@@ -8,9 +8,9 @@
   },
   "scripts": {
     "check": "pnpm lint && pnpm format:check && pnpm typecheck",
-    "lint": "node scripts/check-files.mjs lint",
-    "format": "node scripts/check-files.mjs format",
-    "format:check": "node scripts/check-files.mjs format:check",
+    "lint": "eslint \"**/*.{js,mjs,cjs,jsx,ts,mts,cts,tsx}\" --max-warnings 0",
+    "format": "prettier \"**/*.{js,mjs,cjs,jsx,ts,mts,cts,tsx,json,jsonc,yaml,yml,md}\" --write",
+    "format:check": "prettier \"**/*.{js,mjs,cjs,jsx,ts,mts,cts,tsx,json,jsonc,yaml,yml,md}\" --check",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"
