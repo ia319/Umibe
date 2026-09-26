@@ -6,6 +6,15 @@
   "engines": {
     "node": ">=24.0.0 <25"
   },
+  "scripts": {
+    "check": "pnpm lint && pnpm format:check && pnpm typecheck",
+    "lint": "node scripts/check-files.mjs lint",
+    "format": "node scripts/check-files.mjs format",
+    "format:check": "node scripts/check-files.mjs format:check",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
   "devDependencies": {
     "@eslint/js": "10.0.1",
     "@types/node": "24.13.6",
