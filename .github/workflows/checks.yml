@@ -1,0 +1,36 @@
+name: Checks
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Lint
+            script: lint
+          - name: Formatting
+            script: format:check
+          - name: Types
+            script: typecheck
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up development environment
+        uses: ./.github/actions/setup
+
+      - name: Run check
+        run: pnpm run "$CHECK_SCRIPT"
+        env:
+          CHECK_SCRIPT: ${{ matrix.script }}
