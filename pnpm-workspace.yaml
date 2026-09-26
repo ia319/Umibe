@@ -1,0 +1,10 @@
+packages: []
+
+minimumReleaseAge: 10080
+minimumReleaseAgeStrict: true
+minimumReleaseAgeIgnoreMissingTime: false
+trustLockfile: false
+
+saveExact: true
+strictPeerDependencies: true
+engineStrict: true

@@ -1,0 +1,13 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+.eslintcache
+.prettiercache
+
+.env
+.env.*
+!.env.example
+
+npm-debug.log*
+pnpm-debug.log*
