@@ -3,6 +3,7 @@ import type {
   CandidateCoverage,
   CandidateExclusion,
   CandidateSet,
+  ParameterSource,
 } from '#internal/contracts/candidate';
 import type { JsonValue } from '#internal/contracts/json';
 import type { GoalRef } from '#internal/contracts/references';
@@ -180,6 +181,7 @@ function readCandidate(
       'actionId',
       'actionVersion',
       'params',
+      'paramSources',
       'description',
       'expectedEffects',
       'cost',
@@ -201,6 +203,51 @@ function readCandidate(
     context,
     `${path}/observationRef`,
   );
+  const params = requireObject(object.params, context, `${path}/params`);
+  const sourceObject = requireObject(
+    object.paramSources,
+    context,
+    `${path}/paramSources`,
+  );
+  const paramSources: Record<string, ParameterSource> = {};
+  if (
+    Object.keys(sourceObject).length !== Object.keys(params).length ||
+    Object.keys(params).some((key) => !Object.hasOwn(sourceObject, key))
+  ) {
+    throw new ContractError(
+      context.code,
+      context.stage,
+      `${path}/paramSources`,
+      'parameter_source_mismatch',
+    );
+  }
+  for (const [key, value] of Object.entries(sourceObject)) {
+    const sourcePath = `${path}/paramSources/${key}`;
+    const record = requireObject(value, context, sourcePath);
+    requireKeys(record, ['kind', 'reference'], context, sourcePath);
+    const kind = record.kind;
+    if (
+      kind !== 'observation' &&
+      kind !== 'application' &&
+      kind !== 'model' &&
+      kind !== 'default'
+    ) {
+      throw new ContractError(
+        context.code,
+        context.stage,
+        `${sourcePath}/kind`,
+        'invalid_parameter_source',
+      );
+    }
+    paramSources[key] = Object.freeze({
+      kind,
+      reference: requireString(
+        record.reference,
+        context,
+        `${sourcePath}/reference`,
+      ),
+    });
+  }
   const candidate: Candidate = Object.freeze({
     id: requireString(object.id, context, `${path}/id`),
     candidateSetId: requireString(
@@ -215,7 +262,8 @@ function readCandidate(
       context,
       `${path}/actionVersion`,
     ),
-    params: requireObject(object.params, context, `${path}/params`),
+    params,
+    paramSources: Object.freeze(paramSources),
     description: requireString(
       object.description,
       context,

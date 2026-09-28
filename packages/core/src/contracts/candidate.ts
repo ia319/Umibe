@@ -17,6 +17,12 @@ export interface CandidateCoverage {
   readonly capabilityGaps: readonly string[];
 }
 
+export interface ParameterSource {
+  readonly kind: 'observation' | 'application' | 'model' | 'default';
+  /** Fact path, application rule, model request or schema field, as applicable. */
+  readonly reference: string;
+}
+
 /** An immutable proposed call. P2 validates params against the registered action schema. */
 export interface Candidate {
   readonly id: string;
@@ -24,6 +30,8 @@ export interface Candidate {
   readonly actionId: string;
   readonly actionVersion: number;
   readonly params: JsonObject;
+  /** Every top-level parameter has a declared source; deeper provenance may use a fact path. */
+  readonly paramSources: Readonly<Record<string, ParameterSource>>;
   readonly description: string;
   readonly expectedEffects: JsonObject;
   readonly cost: JsonValue | null;

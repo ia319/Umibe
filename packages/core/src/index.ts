@@ -11,6 +11,7 @@ export type {
   GoalAssessment,
   GoalGraph,
   GoalGraphSnapshot,
+  GoalEvidence,
   GoalLifecycle,
   GoalRecord,
   RootGoalRecord,
@@ -22,6 +23,36 @@ export type {
 } from '#internal/contracts/references';
 export { parseGoalGraph } from '#internal/validation/goal';
 export type {
+  PlanProposal,
+  PlanningTrigger,
+  ProposedGoal,
+  ProposedParent,
+} from '#internal/contracts/planning';
+export type { ProposalLimits } from '#internal/validation/planning';
+export { parsePlanProposal } from '#internal/validation/planning';
+export { describeActionParameters } from '#internal/action/describe';
+export type {
+  ActionCapability,
+  CallControl,
+  CandidateProvider,
+  CandidateRequest,
+  CriteriaSupport,
+  DecisionContext,
+  Environment,
+  Planner,
+  PlannerRequest,
+  Selector,
+  SelectorRequest,
+  VerificationRequest,
+  Verifier,
+} from '#internal/contracts/adapters';
+export type {
+  ActionCheck,
+  ActionDefinition,
+  ActionExecutionContext,
+  Reconciliation,
+} from '#internal/contracts/action';
+export type {
   Observation,
   ObservationCoverage,
   ObservationFact,
@@ -32,6 +63,7 @@ export type {
   CandidateCoverage,
   CandidateExclusion,
   CandidateSet,
+  ParameterSource,
 } from '#internal/contracts/candidate';
 export type { SelectionResult } from '#internal/contracts/selection';
 export { parseCandidateSet } from '#internal/validation/candidate';

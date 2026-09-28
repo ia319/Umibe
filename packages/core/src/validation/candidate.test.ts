@@ -33,6 +33,10 @@ function candidateSetInput() {
         actionId: 'move',
         actionVersion: 1,
         params: { target: 'north', mode: 'sprint' },
+        paramSources: {
+          target: { kind: 'observation', reference: '/data/openDirection' },
+          mode: { kind: 'model', reference: 'request-1' },
+        },
         description: 'Move north',
         expectedEffects: { displacement: 10 },
         cost: null,
@@ -92,6 +96,16 @@ test('rejects candidates with a stale basis and incomplete coverage disguised as
     expect.objectContaining({
       path: '/coverage',
       reason: 'inconsistent_coverage',
+    }),
+  );
+
+  const missingSource = candidateSetInput();
+  delete (missingSource.candidates[0]!.paramSources as Record<string, unknown>)
+    .mode;
+  expect(() => parseCandidateSet(missingSource)).toThrowError(
+    expect.objectContaining({
+      path: '/candidates/0/paramSources',
+      reason: 'parameter_source_mismatch',
     }),
   );
 });
