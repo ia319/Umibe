@@ -8,11 +8,7 @@ import type {
   RootGoalRecord,
 } from '#internal/contracts/goal';
 import type { JsonValue } from '#internal/contracts/json';
-import type {
-  GoalRef,
-  ObservationRef,
-  PlanRef,
-} from '#internal/contracts/references';
+import type { GoalRef } from '#internal/contracts/references';
 import { ContractError } from '#internal/errors';
 import {
   requireInteger,
@@ -22,47 +18,12 @@ import {
 } from './fields.js';
 import type { FieldContext } from './fields.js';
 import { isJsonArray, parseJsonValue } from './json.js';
+import { readGoalRef, readObservationRef, readPlanRef } from './references.js';
 
 const context: FieldContext = {
   code: 'INVALID_GOAL_GRAPH',
   stage: 'goal_graph',
 };
-
-function readGoalRef(value: JsonValue | undefined, path: string): GoalRef {
-  const object = requireObject(value, context, path);
-  requireKeys(object, ['id', 'version'], context, path);
-  return Object.freeze({
-    id: requireString(object.id, context, `${path}/id`),
-    version: requireInteger(object.version, 1, context, `${path}/version`),
-  });
-}
-
-function readObservationRef(
-  value: JsonValue | undefined,
-  path: string,
-): ObservationRef {
-  const object = requireObject(value, context, path);
-  requireKeys(object, ['id', 'revision'], context, path);
-  return Object.freeze({
-    id: requireString(object.id, context, `${path}/id`),
-    revision: requireInteger(object.revision, 0, context, `${path}/revision`),
-  });
-}
-
-function readPlanRef(value: JsonValue | undefined, path: string): PlanRef {
-  const object = requireObject(value, context, path);
-  requireKeys(object, ['id', 'version', 'rootGoalVersion'], context, path);
-  return Object.freeze({
-    id: requireString(object.id, context, `${path}/id`),
-    version: requireInteger(object.version, 1, context, `${path}/version`),
-    rootGoalVersion: requireInteger(
-      object.rootGoalVersion,
-      1,
-      context,
-      `${path}/rootGoalVersion`,
-    ),
-  });
-}
 
 function readAssessment(
   value: JsonValue | undefined,
@@ -76,9 +37,10 @@ function readAssessment(
     context,
     path,
   );
-  const goalRef = readGoalRef(object.goalRef, `${path}/goalRef`);
+  const goalRef = readGoalRef(object.goalRef, context, `${path}/goalRef`);
   const observationRef = readObservationRef(
     object.observationRef,
+    context,
     `${path}/observationRef`,
   );
   const evidence = object.evidence;
@@ -229,9 +191,14 @@ function readGoalRecord(value: JsonValue, path: string): GoalRecord {
   const record: ChildGoalRecord = Object.freeze({
     ...base,
     kind,
-    parentGoalRef: readGoalRef(object.parentGoalRef, `${path}/parentGoalRef`),
+    parentGoalRef: readGoalRef(
+      object.parentGoalRef,
+      context,
+      `${path}/parentGoalRef`,
+    ),
     acceptedPlanRef: readPlanRef(
       object.acceptedPlanRef,
+      context,
       `${path}/acceptedPlanRef`,
     ),
   });
@@ -428,8 +395,12 @@ export function parseGoalGraph(input: unknown): GoalGraphSnapshot {
   }
   const graph: GoalGraph = {
     runId: requireString(object.runId, context, '/runId'),
-    rootGoalRef: readGoalRef(object.rootGoalRef, '/rootGoalRef'),
-    currentGoalRef: readGoalRef(object.currentGoalRef, '/currentGoalRef'),
+    rootGoalRef: readGoalRef(object.rootGoalRef, context, '/rootGoalRef'),
+    currentGoalRef: readGoalRef(
+      object.currentGoalRef,
+      context,
+      '/currentGoalRef',
+    ),
     goals: Object.freeze(
       object.goals.map((record, index) =>
         readGoalRecord(record, `/goals/${index}`),

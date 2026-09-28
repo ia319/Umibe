@@ -27,3 +27,12 @@ export type {
   ObservationFact,
 } from '#internal/contracts/observation';
 export { parseObservation } from '#internal/validation/observation';
+export type {
+  Candidate,
+  CandidateCoverage,
+  CandidateExclusion,
+  CandidateSet,
+} from '#internal/contracts/candidate';
+export type { SelectionResult } from '#internal/contracts/selection';
+export { parseCandidateSet } from '#internal/validation/candidate';
+export { parseSelection } from '#internal/validation/selection';
