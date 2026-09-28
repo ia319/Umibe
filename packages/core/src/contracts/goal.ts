@@ -9,16 +9,24 @@ interface AssessmentBase {
   readonly observationRef: ObservationRef;
 }
 
+export interface GoalEvidence {
+  readonly source: 'application' | 'model' | 'human';
+  /** Keys in the bound observation; the verifier must identify the facts it used. */
+  readonly observationPaths: readonly string[];
+  readonly executionIds: readonly string[];
+  readonly details: JsonObject;
+}
+
 export type GoalAssessment = AssessmentBase &
   (
     | {
         readonly outcome: 'passed';
-        readonly evidence: Exclude<JsonValue, null>;
+        readonly evidence: GoalEvidence;
         readonly reason: null;
       }
     | {
         readonly outcome: 'notYet' | 'needsInput';
-        readonly evidence: JsonValue | null;
+        readonly evidence: GoalEvidence | null;
         readonly reason: string;
       }
   );

@@ -1,9 +1,67 @@
-import type { GoalAssessment } from '#internal/contracts/goal';
+import type { GoalAssessment, GoalEvidence } from '#internal/contracts/goal';
 import type { JsonValue } from '#internal/contracts/json';
 import { ContractError } from '#internal/errors';
 import { requireKeys, requireObject, requireString } from './fields.js';
 import type { FieldContext } from './fields.js';
 import { readGoalRef, readObservationRef } from './references.js';
+import { isJsonArray } from './json.js';
+
+function readEvidence(
+  value: JsonValue | undefined,
+  context: FieldContext,
+  path: string,
+): GoalEvidence {
+  const object = requireObject(value, context, path);
+  requireKeys(
+    object,
+    ['source', 'observationPaths', 'executionIds', 'details'],
+    context,
+    path,
+  );
+  const source = object.source;
+  if (source !== 'application' && source !== 'model' && source !== 'human') {
+    throw new ContractError(
+      context.code,
+      context.stage,
+      `${path}/source`,
+      'invalid_evidence_source',
+    );
+  }
+  const paths = object.observationPaths;
+  const ids = object.executionIds;
+  if (!isJsonArray(paths) || !isJsonArray(ids)) {
+    throw new ContractError(
+      context.code,
+      context.stage,
+      path,
+      'invalid_evidence_references',
+    );
+  }
+  const observationPaths = Object.freeze(
+    paths.map((item, index) =>
+      requireString(item, context, `${path}/observationPaths/${index}`),
+    ),
+  );
+  const executionIds = Object.freeze(
+    ids.map((item, index) =>
+      requireString(item, context, `${path}/executionIds/${index}`),
+    ),
+  );
+  if (observationPaths.length + executionIds.length === 0) {
+    throw new ContractError(
+      context.code,
+      context.stage,
+      path,
+      'evidence_without_reference',
+    );
+  }
+  return Object.freeze({
+    source,
+    observationPaths,
+    executionIds,
+    details: requireObject(object.details, context, `${path}/details`),
+  });
+}
 
 export function readGoalAssessment(
   value: JsonValue | undefined,
@@ -23,8 +81,7 @@ export function readGoalAssessment(
     context,
     `${path}/observationRef`,
   );
-  const evidence = object.evidence;
-  if (evidence === undefined) {
+  if (object.evidence === undefined) {
     throw new ContractError(
       context.code,
       context.stage,
@@ -32,6 +89,10 @@ export function readGoalAssessment(
       'missing_field',
     );
   }
+  const evidence =
+    object.evidence === null
+      ? null
+      : readEvidence(object.evidence, context, `${path}/evidence`);
   if (
     object.outcome === 'passed' &&
     evidence !== null &&

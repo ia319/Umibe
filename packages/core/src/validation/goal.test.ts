@@ -122,16 +122,27 @@ test('requires independent evidence before a goal can be succeeded', () => {
     expect.objectContaining({ reason: 'success_without_verification' }),
   );
 
+  const evidence = {
+    source: 'application',
+    observationPaths: ['tradeCompleted'],
+    executionIds: ['trade-1'],
+    details: { tradeId: 'confirmed' },
+  };
   Object.assign(input.goals[2], {
     lastAssessment: {
       goalRef: { id: 'trade', version: 1 },
       observationRef: { id: 'observation', revision: 0 },
       outcome: 'passed',
-      evidence: { tradeId: 'confirmed' },
+      evidence,
       reason: null,
     },
   });
   const graph = parseGoalGraph(input);
   expect(graph.goals[2]?.lifecycle).toBe('succeeded');
   expect(graph.goals[0]?.lifecycle).toBe('inProgress');
+
+  Object.assign(evidence, { observationPaths: [], executionIds: [] });
+  expect(() => parseGoalGraph(input)).toThrowError(
+    expect.objectContaining({ reason: 'evidence_without_reference' }),
+  );
 });
