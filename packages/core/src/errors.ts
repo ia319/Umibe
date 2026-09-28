@@ -3,7 +3,8 @@ export type ContractErrorCode =
   | 'INVALID_GOAL_GRAPH'
   | 'INVALID_OBSERVATION'
   | 'INVALID_CANDIDATES'
-  | 'INVALID_SELECTION';
+  | 'INVALID_SELECTION'
+  | 'INVALID_APPLICATION_EVENT';
 
 /** Identifies an invalid contract without retaining the rejected value. */
 export class ContractError extends Error {

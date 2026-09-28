@@ -36,3 +36,5 @@ export type {
 export type { SelectionResult } from '#internal/contracts/selection';
 export { parseCandidateSet } from '#internal/validation/candidate';
 export { parseSelection } from '#internal/validation/selection';
+export type { ApplicationEvent } from '#internal/contracts/event';
+export { parseApplicationEvent } from '#internal/validation/event';
