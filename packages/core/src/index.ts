@@ -38,3 +38,17 @@ export { parseCandidateSet } from '#internal/validation/candidate';
 export { parseSelection } from '#internal/validation/selection';
 export type { ApplicationEvent } from '#internal/contracts/event';
 export { parseApplicationEvent } from '#internal/validation/event';
+export type {
+  ActionIntent,
+  ActionResult,
+  CoreEventData,
+  RunCheckpoint,
+  RunRecord,
+  RunStatus,
+  RunSummary,
+} from '#internal/contracts/record';
+export {
+  parseRunCheckpoint,
+  parseRunRecord,
+  parseRunSummary,
+} from '#internal/validation/record';

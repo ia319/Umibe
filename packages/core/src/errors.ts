@@ -4,7 +4,10 @@ export type ContractErrorCode =
   | 'INVALID_OBSERVATION'
   | 'INVALID_CANDIDATES'
   | 'INVALID_SELECTION'
-  | 'INVALID_APPLICATION_EVENT';
+  | 'INVALID_APPLICATION_EVENT'
+  | 'INVALID_RUN_RECORD'
+  | 'INVALID_RUN_SUMMARY'
+  | 'INVALID_RUN_CHECKPOINT';
 
 /** Identifies an invalid contract without retaining the rejected value. */
 export class ContractError extends Error {

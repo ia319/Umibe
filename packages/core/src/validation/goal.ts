@@ -1,6 +1,5 @@
 import type {
   ChildGoalRecord,
-  GoalAssessment,
   GoalGraph,
   GoalGraphSnapshot,
   GoalLifecycle,
@@ -18,70 +17,13 @@ import {
 } from './fields.js';
 import type { FieldContext } from './fields.js';
 import { isJsonArray, parseJsonValue } from './json.js';
-import { readGoalRef, readObservationRef, readPlanRef } from './references.js';
+import { readGoalAssessment } from './assessment.js';
+import { readGoalRef, readPlanRef } from './references.js';
 
 const context: FieldContext = {
   code: 'INVALID_GOAL_GRAPH',
   stage: 'goal_graph',
 };
-
-function readAssessment(
-  value: JsonValue | undefined,
-  path: string,
-): GoalAssessment | null {
-  if (value === null) return null;
-  const object = requireObject(value, context, path);
-  requireKeys(
-    object,
-    ['goalRef', 'observationRef', 'outcome', 'evidence', 'reason'],
-    context,
-    path,
-  );
-  const goalRef = readGoalRef(object.goalRef, context, `${path}/goalRef`);
-  const observationRef = readObservationRef(
-    object.observationRef,
-    context,
-    `${path}/observationRef`,
-  );
-  const evidence = object.evidence;
-  if (evidence === undefined) {
-    throw new ContractError(
-      context.code,
-      context.stage,
-      `${path}/evidence`,
-      'missing_field',
-    );
-  }
-
-  if (
-    object.outcome === 'passed' &&
-    evidence !== null &&
-    object.reason === null
-  ) {
-    return Object.freeze({
-      goalRef,
-      observationRef,
-      outcome: 'passed',
-      evidence,
-      reason: null,
-    });
-  }
-  if (object.outcome === 'notYet' || object.outcome === 'needsInput') {
-    return Object.freeze({
-      goalRef,
-      observationRef,
-      outcome: object.outcome,
-      evidence,
-      reason: requireString(object.reason, context, `${path}/reason`),
-    });
-  }
-  throw new ContractError(
-    context.code,
-    context.stage,
-    `${path}/outcome`,
-    'invalid_assessment',
-  );
-}
 
 function readGoalRecord(value: JsonValue, path: string): GoalRecord {
   const object = requireObject(value, context, path);
@@ -150,10 +92,14 @@ function readGoalRecord(value: JsonValue, path: string): GoalRecord {
     ),
     criteria,
     lifecycle: acceptedLifecycle,
-    lastAssessment: readAssessment(
-      object.lastAssessment,
-      `${path}/lastAssessment`,
-    ),
+    lastAssessment:
+      object.lastAssessment === null
+        ? null
+        : readGoalAssessment(
+            object.lastAssessment,
+            context,
+            `${path}/lastAssessment`,
+          ),
   };
 
   if (kind === 'root') {
