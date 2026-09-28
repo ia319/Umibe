@@ -1,8 +1,16 @@
 import { ContractError } from '#internal/errors';
 import type { JsonObject, JsonValue } from '#internal/contracts/json';
 
-export function isJsonObject(value: JsonValue): value is JsonObject {
+export function isJsonObject(
+  value: JsonValue | undefined,
+): value is JsonObject {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+export function isJsonArray(
+  value: JsonValue | undefined,
+): value is readonly JsonValue[] {
+  return Array.isArray(value);
 }
 
 type Container = Record<string, JsonValue> | JsonValue[];
@@ -20,11 +28,14 @@ type Task =
       readonly target: Container;
     };
 
-function childPath(path: string, key: string): string {
+export function jsonPointerChild(path: string, key: string): string {
   return `${path}/${key.replaceAll('~', '~0').replaceAll('/', '~1')}`;
 }
 
 /** Copy and freeze JSON data after validating its complete runtime shape.
+ * @param input - The untrusted value to validate and copy.
+ * @param stage - The diagnostic boundary reported on invalid input.
+ * @returns A detached, recursively frozen JSON value.
  * @throws ContractError with a JSON Pointer path when the input cannot be preserved as JSON data.
  */
 export function parseJsonValue(input: unknown, stage: string): JsonValue {
@@ -105,14 +116,14 @@ export function parseJsonValue(input: unknown, stage: string): JsonValue {
             throw new ContractError(
               'INVALID_JSON',
               stage,
-              childPath(task.path, String(index)),
+              jsonPointerChild(task.path, String(index)),
               'missing_or_accessor_value',
             );
           }
           tasks.push({
             kind: 'visit',
             input: descriptor.value as unknown,
-            path: childPath(task.path, String(index)),
+            path: jsonPointerChild(task.path, String(index)),
             assign: (item) => (target[index] = item),
           });
         }
@@ -143,7 +154,7 @@ export function parseJsonValue(input: unknown, stage: string): JsonValue {
             'symbol_key',
           );
         }
-        const path = childPath(task.path, key);
+        const path = jsonPointerChild(task.path, key);
         const descriptor = Object.getOwnPropertyDescriptor(value, key);
         if (
           descriptor === undefined ||
