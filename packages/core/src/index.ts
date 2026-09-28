@@ -84,3 +84,10 @@ export {
   parseRunRecord,
   parseRunSummary,
 } from '#internal/validation/record';
+export type {
+  CommitResult,
+  RecordPage,
+  RunCommit,
+  RunRecordDraft,
+  RunStore,
+} from '#internal/storage/contracts';
