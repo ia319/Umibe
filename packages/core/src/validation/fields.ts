@@ -61,6 +61,28 @@ export function requireInteger(
   return value;
 }
 
+/** Timestamps use the canonical millisecond UTC form produced by Date#toISOString. */
+export function requireTimestamp(
+  value: JsonValue | undefined,
+  context: FieldContext,
+  path: string,
+): string {
+  if (
+    typeof value !== 'string' ||
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) ||
+    !Number.isFinite(Date.parse(value)) ||
+    new Date(value).toISOString() !== value
+  ) {
+    throw new ContractError(
+      context.code,
+      context.stage,
+      path,
+      'expected_utc_timestamp',
+    );
+  }
+  return value;
+}
+
 /** Reject unsupported fields instead of silently accepting control metadata. */
 export function requireKeys(
   object: JsonObject,

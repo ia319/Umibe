@@ -21,3 +21,9 @@ export type {
   PlanRef,
 } from '#internal/contracts/references';
 export { parseGoalGraph } from '#internal/validation/goal';
+export type {
+  Observation,
+  ObservationCoverage,
+  ObservationFact,
+} from '#internal/contracts/observation';
+export { parseObservation } from '#internal/validation/observation';

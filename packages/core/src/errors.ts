@@ -1,4 +1,5 @@
-export type ContractErrorCode = 'INVALID_JSON' | 'INVALID_GOAL_GRAPH';
+export type ContractErrorCode =
+  'INVALID_JSON' | 'INVALID_GOAL_GRAPH' | 'INVALID_OBSERVATION';
 
 /** Identifies an invalid contract without retaining the rejected value. */
 export class ContractError extends Error {
