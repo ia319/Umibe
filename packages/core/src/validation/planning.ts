@@ -116,11 +116,11 @@ function validateNewGoals(
   ) {
     fail('/goals', 'total_goal_limit');
   }
-  const proposed = new Map<string, { goal: ProposedGoal; index: number }>();
+  const proposed = new Map<string, ProposedGoal>();
   for (const [index, goal] of goals.entries()) {
     if (proposed.has(goal.tempId))
       fail(`/goals/${index}/tempId`, 'duplicate_temp_id');
-    proposed.set(goal.tempId, { goal, index });
+    proposed.set(goal.tempId, goal);
   }
   const graph = request.context.graph;
   for (const [index, goal] of goals.entries()) {
@@ -137,7 +137,7 @@ function validateNewGoals(
         const parent = proposed.get(cursor.parent.tempId);
         if (parent === undefined)
           fail(`/goals/${index}/parent`, 'missing_proposed_parent');
-        cursor = parent.goal;
+        cursor = parent;
         continue;
       }
       const parentRef = cursor.parent.goalRef;
@@ -277,9 +277,7 @@ export function parsePlanProposal(
   }
   if (outcome === 'decompose') {
     if (!isJsonArray(object.goals)) fail('/goals', 'expected_array');
-    const goals = Object.freeze(
-      object.goals.map((value, index) => readGoal(value, index)),
-    );
+    const goals = Object.freeze(object.goals.map(readGoal));
     validateNewGoals(goals, request, limits);
     const nextTempId = requireString(object.nextTempId, context, '/nextTempId');
     if (!goals.some((goal) => goal.tempId === nextTempId)) {
