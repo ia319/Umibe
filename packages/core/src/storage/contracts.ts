@@ -38,13 +38,19 @@ export type CommitResult =
       readonly actualRevision: number | null;
     };
 
+/** A cursor is valid only for the run that produced it. */
+export interface RecordCursor {
+  readonly runId: string;
+  readonly sequence: number;
+}
+
 export interface RecordPage {
   readonly records: readonly RunRecord[];
   /** Null means the page reached the committed end of this run. */
-  readonly nextCursor: number | null;
+  readonly nextCursor: RecordCursor | null;
 }
 
-/** Async, per-run atomic persistence; P1-D supplies the in-memory implementation. */
+/** Async, per-run persistence with atomic compare-and-commit semantics. */
 export interface RunStore {
   readRun(runId: string): Promise<{
     readonly summary: RunSummary;
@@ -52,7 +58,7 @@ export interface RunStore {
   } | null>;
   readRecords(
     runId: string,
-    afterSequence: number,
+    cursor: RecordCursor | null,
     limit: number,
   ): Promise<RecordPage>;
   commit(input: RunCommit): Promise<CommitResult>;

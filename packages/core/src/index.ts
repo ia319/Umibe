@@ -86,6 +86,7 @@ export {
 } from '#internal/validation/record';
 export type {
   CommitResult,
+  RecordCursor,
   RecordPage,
   RunCommit,
   RunRecordDraft,
