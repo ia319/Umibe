@@ -154,3 +154,37 @@ test('allows abstain and rejects out-of-set or contradictory selector results', 
     expect.objectContaining({ path: '/candidateId', reason: 'unknown_field' }),
   );
 });
+
+test('preserves parameter sources named like object prototype properties', () => {
+  const input = candidateSetInput();
+  const source = { kind: 'application', reference: 'target-rule' };
+  const candidate = {
+    ...input.candidates[0]!,
+    params: { ['__proto__']: 'north' },
+    paramSources: { ['__proto__']: source },
+  };
+  const result = parseCandidateSet({ ...input, candidates: [candidate] });
+  const sources = result.candidates[0]!.paramSources;
+
+  expect(Object.keys(sources)).toEqual(['__proto__']);
+  expect(Object.getPrototypeOf(sources)).toBe(Object.prototype);
+  expect(JSON.stringify(sources)).toBe(JSON.stringify(candidate.paramSources));
+});
+
+test('escapes parameter names in source diagnostics', () => {
+  const input = candidateSetInput();
+  const candidate = {
+    ...input.candidates[0]!,
+    params: { 'a/b~c': 'north' },
+    paramSources: { 'a/b~c': { kind: 'invalid', reference: 'target-rule' } },
+  };
+
+  expect(() =>
+    parseCandidateSet({ ...input, candidates: [candidate] }),
+  ).toThrowError(
+    expect.objectContaining({
+      path: '/candidates/0/paramSources/a~1b~0c/kind',
+      reason: 'invalid_parameter_source',
+    }),
+  );
+});

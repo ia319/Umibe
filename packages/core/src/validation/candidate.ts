@@ -15,7 +15,7 @@ import {
   requireString,
 } from './fields.js';
 import type { FieldContext } from './fields.js';
-import { isJsonArray, parseJsonValue } from './json.js';
+import { isJsonArray, jsonPointerChild, parseJsonValue } from './json.js';
 import { readGoalRef, readObservationRef, readPlanRef } from './references.js';
 
 const context: FieldContext = {
@@ -222,7 +222,7 @@ function readCandidate(
     );
   }
   for (const [key, value] of Object.entries(sourceObject)) {
-    const sourcePath = `${path}/paramSources/${key}`;
+    const sourcePath = jsonPointerChild(`${path}/paramSources`, key);
     const record = requireObject(value, context, sourcePath);
     requireKeys(record, ['kind', 'reference'], context, sourcePath);
     const kind = record.kind;
@@ -239,13 +239,17 @@ function readCandidate(
         'invalid_parameter_source',
       );
     }
-    paramSources[key] = Object.freeze({
-      kind,
-      reference: requireString(
-        record.reference,
-        context,
-        `${sourcePath}/reference`,
-      ),
+    // Parameter names are data, including the inherited __proto__ setter name.
+    Object.defineProperty(paramSources, key, {
+      value: Object.freeze({
+        kind,
+        reference: requireString(
+          record.reference,
+          context,
+          `${sourcePath}/reference`,
+        ),
+      }),
+      enumerable: true,
     });
   }
   const candidate: Candidate = Object.freeze({
