@@ -52,7 +52,7 @@ function invalid(path: string, reason: string): never {
   );
 }
 
-/** An in-process store. Each synchronous commit section has no suspension point. */
+/** Operations run in call order; synchronous Promise executors also isolate inputs before returning. */
 export class MemoryRunStore implements RunStore {
   private readonly runs = new Map<string, StoredRun>();
   private closed = false;
@@ -61,13 +61,15 @@ export class MemoryRunStore implements RunStore {
     readonly summary: RunSummary;
     readonly checkpoint: RunCheckpoint;
   } | null> {
-    return Promise.resolve().then(() => {
+    return new Promise((resolve) => {
       this.ensureOpen('readRun');
       const id = requireString(runId, queryContext, '/runId');
       const run = this.runs.get(id);
-      return run === undefined
-        ? null
-        : Object.freeze({ summary: run.summary, checkpoint: run.checkpoint });
+      resolve(
+        run === undefined
+          ? null
+          : Object.freeze({ summary: run.summary, checkpoint: run.checkpoint }),
+      );
     });
   }
 
@@ -76,7 +78,7 @@ export class MemoryRunStore implements RunStore {
     cursor: RecordCursor | null,
     limit: number,
   ): Promise<RecordPage> {
-    return Promise.resolve().then(() => {
+    return new Promise((resolve) => {
       this.ensureOpen('readRecords');
       const id = requireString(runId, queryContext, '/runId');
       const size = requireInteger(limit, 1, queryContext, '/limit');
@@ -113,7 +115,10 @@ export class MemoryRunStore implements RunStore {
             'cursor_run_missing',
           );
         }
-        return Object.freeze({ records: Object.freeze([]), nextCursor: null });
+        resolve(
+          Object.freeze({ records: Object.freeze([]), nextCursor: null }),
+        );
+        return;
       }
       if (sequence > run.summary.lastSequence) {
         throw new ContractError(
@@ -131,12 +136,12 @@ export class MemoryRunStore implements RunStore {
         last !== undefined && last.sequence < run.summary.lastSequence
           ? Object.freeze({ runId: id, sequence: last.sequence })
           : null;
-      return Object.freeze({ records, nextCursor });
+      resolve(Object.freeze({ records, nextCursor }));
     });
   }
 
   commit(input: RunCommit): Promise<CommitResult> {
-    return Promise.resolve().then(() => {
+    return new Promise((resolve) => {
       this.ensureOpen('commit');
       const value = requireObject(
         parseJsonValue(input, commitContext.stage),
@@ -254,7 +259,8 @@ export class MemoryRunStore implements RunStore {
         throw error;
       }
       if (expectedRevision !== actualRevision) {
-        return Object.freeze({ outcome: 'conflict', actualRevision });
+        resolve(Object.freeze({ outcome: 'conflict', actualRevision }));
+        return;
       }
       if (current === undefined) {
         this.runs.set(runId, {
@@ -272,20 +278,24 @@ export class MemoryRunStore implements RunStore {
         current.summary = summary;
         current.checkpoint = checkpoint;
       }
-      return Object.freeze({
-        outcome: 'committed',
-        summary,
-        checkpoint,
-        records: Object.freeze([...records]),
-      });
+      resolve(
+        Object.freeze({
+          outcome: 'committed',
+          summary,
+          checkpoint,
+          records: Object.freeze([...records]),
+        }),
+      );
     });
   }
 
   close(): Promise<void> {
-    return Promise.resolve().then(() => {
-      if (this.closed) return;
-      this.closed = true;
-      this.runs.clear();
+    return new Promise((resolve) => {
+      if (!this.closed) {
+        this.closed = true;
+        this.runs.clear();
+      }
+      resolve();
     });
   }
 

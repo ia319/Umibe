@@ -52,15 +52,39 @@ export interface RecordPage {
 
 /** Async, per-run persistence with atomic compare-and-commit semantics. */
 export interface RunStore {
+  /**
+   * Read the latest committed state of a run.
+   * @param runId - The run to read.
+   * @returns A frozen snapshot, or null when the run does not exist.
+   * @throws StoreClosedError if the store is closed; ContractError for invalid input.
+   */
   readRun(runId: string): Promise<{
     readonly summary: RunSummary;
     readonly checkpoint: RunCheckpoint;
   } | null>;
+  /**
+   * Read committed records in sequence order.
+   * @param runId - The run to read.
+   * @param cursor - A cursor for this run, or null to start at its first record.
+   * @param limit - A positive maximum number of records.
+   * @returns A frozen page; a null next cursor marks the current committed end.
+   * @throws StoreClosedError if closed; ContractError for invalid or mismatched cursors.
+   */
   readRecords(
     runId: string,
     cursor: RecordCursor | null,
     limit: number,
   ): Promise<RecordPage>;
+  /**
+   * Capture input before returning, then atomically compare and commit the batch.
+   * @param input - A complete batch with the expected checkpoint revision.
+   * @returns The committed snapshot, or a conflict without changes.
+   * @throws StoreClosedError if closed; ContractError for invalid data, before conflict handling.
+   */
   commit(input: RunCommit): Promise<CommitResult>;
+  /**
+   * Finish earlier operations and release owned resources. Repeated calls are safe.
+   * @returns A promise that settles when the store has closed.
+   */
   close(): Promise<void>;
 }

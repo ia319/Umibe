@@ -227,6 +227,10 @@ export function runStoreContract(
         expect(
           (await store.readRecords('run-2', null, 1)).records[0]?.sequence,
         ).toBe(1);
+        const cursor = { runId: 'run-1', sequence: 1 };
+        const pendingPage = store.readRecords('run-1', cursor, 1);
+        cursor.sequence = 2;
+        expect((await pendingPage).records[0]?.eventId).toBe('next-id');
         expect(await store.readRun('missing')).toBeNull();
         expect(await store.readRecords('missing', null, 1)).toEqual({
           records: [],
@@ -263,10 +267,9 @@ export function runStoreContract(
       try {
         const state = { phase: 'before' };
         const draft = coreEvent('run-1', 'e1');
-        const created = await store.commit(
-          commit('run-1', null, [draft], state),
-        );
+        const pending = store.commit(commit('run-1', null, [draft], state));
         state.phase = 'after';
+        const created = await pending;
         expect((await store.readRun('run-1'))?.checkpoint.state.phase).toBe(
           'before',
         );
@@ -307,6 +310,19 @@ export function runStoreContract(
         code: 'STORE_CLOSED',
         operation: 'commit',
       });
+    });
+
+    test('orders close after pending operations and rejects later calls', async () => {
+      const store = await createStore();
+      const pending = store.commit(commit('run-1', null, []));
+      const closing = store.close();
+      const lateRead = store.readRun('run-1');
+
+      await Promise.all([
+        expect(pending).resolves.toMatchObject({ outcome: 'committed' }),
+        expect(closing).resolves.toBeUndefined(),
+        expect(lateRead).rejects.toMatchObject({ code: 'STORE_CLOSED' }),
+      ]);
     });
   });
 }
