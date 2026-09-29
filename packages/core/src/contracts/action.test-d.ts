@@ -22,7 +22,7 @@ declare const verification: VerificationRequest<{ traded: boolean }>;
 declare const selection: SelectionResult;
 declare const assessment: GoalAssessment;
 
-assertType<typeof moveSchema>(moveSchema);
+assertType<'walk' | 'sprint'>(moveSchema.parse({ target: 'village' }).mode);
 // @ts-expect-error Check receives the normalized enum, never an arbitrary movement mode.
 void move.check(context, { target: 'village', mode: 'teleport' }, control);
 
