@@ -9,7 +9,9 @@ export type ContractErrorCode =
   | 'INVALID_APPLICATION_EVENT'
   | 'INVALID_RUN_RECORD'
   | 'INVALID_RUN_SUMMARY'
-  | 'INVALID_RUN_CHECKPOINT';
+  | 'INVALID_RUN_CHECKPOINT'
+  | 'INVALID_STORE_COMMIT'
+  | 'INVALID_STORE_QUERY';
 
 /** Identifies an invalid contract without retaining the rejected value. */
 export class ContractError extends Error {

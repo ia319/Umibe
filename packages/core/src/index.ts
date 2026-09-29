@@ -92,3 +92,5 @@ export type {
   RunRecordDraft,
   RunStore,
 } from '#internal/storage/contracts';
+export { MemoryRunStore } from '#internal/storage/memory';
+export { StoreClosedError } from '#internal/storage/errors';
