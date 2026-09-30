@@ -8,17 +8,23 @@ test('describes candidate input before applying action defaults', () => {
     mode: z.enum(['walk', 'sprint']).default('sprint'),
   });
 
+  // Assert validation rules while allowing export metadata to evolve.
   expect(describeActionParameters(parameters)).toMatchObject({
     type: 'object',
     required: ['target'],
+    additionalProperties: false,
     properties: {
-      mode: { enum: ['walk', 'sprint'], default: 'sprint' },
+      target: { type: 'string' },
+      mode: { type: 'string', enum: ['walk', 'sprint'], default: 'sprint' },
     },
   });
   expect(parameters.parse({ target: 'north' })).toEqual({
     target: 'north',
     mode: 'sprint',
   });
+  expect(parameters.safeParse({ target: 'north', extra: true }).success).toBe(
+    false,
+  );
 });
 
 test('rejects parameters without a JSON input representation', () => {
