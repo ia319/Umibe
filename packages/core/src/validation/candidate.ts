@@ -209,7 +209,7 @@ function readCandidate(
     context,
     `${path}/paramSources`,
   );
-  const paramSources: Record<string, ParameterSource> = {};
+  const paramSources = Object.create(null) as Record<string, ParameterSource>;
   if (
     Object.keys(sourceObject).length !== Object.keys(params).length ||
     Object.keys(params).some((key) => !Object.hasOwn(sourceObject, key))
@@ -239,17 +239,13 @@ function readCandidate(
         'invalid_parameter_source',
       );
     }
-    // Parameter names are data, including the inherited __proto__ setter name.
-    Object.defineProperty(paramSources, key, {
-      value: Object.freeze({
-        kind,
-        reference: requireString(
-          record.reference,
-          context,
-          `${sourcePath}/reference`,
-        ),
-      }),
-      enumerable: true,
+    paramSources[key] = Object.freeze({
+      kind,
+      reference: requireString(
+        record.reference,
+        context,
+        `${sourcePath}/reference`,
+      ),
     });
   }
   const candidate: Candidate = Object.freeze({
@@ -319,7 +315,7 @@ function readCandidate(
 
 /** Validate one provider result and its binding to a single decision basis.
  * @param input - Untrusted candidate-set data.
- * @returns A detached, frozen candidate set.
+ * @returns A detached, frozen candidate set with null-prototype parameter dictionaries.
  * @throws ContractError for malformed data, inconsistent context or duplicate IDs.
  */
 export function parseCandidateSet(input: unknown): CandidateSet {

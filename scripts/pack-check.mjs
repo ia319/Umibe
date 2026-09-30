@@ -124,7 +124,10 @@ try {
     `import assert from 'node:assert/strict';
 import { MemoryRunStore, parseJsonValue } from '@umibe/core';
 
-assert.deepEqual(parseJsonValue({ ready: true }, 'consumer'), { ready: true });
+const snapshot = parseJsonValue({ ready: true }, 'consumer');
+assert.equal(Object.getPrototypeOf(snapshot), null);
+assert.equal(snapshot.constructor, undefined);
+assert.deepEqual(Object.entries(snapshot), [['ready', true]]);
 const store = new MemoryRunStore();
 try {
   const result = await store.commit({

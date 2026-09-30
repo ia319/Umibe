@@ -35,7 +35,7 @@ export function jsonPointerChild(path: string, key: string): string {
 /** Copy and freeze JSON data after validating its complete runtime shape.
  * @param input - The untrusted value to validate and copy.
  * @param stage - The diagnostic boundary reported on invalid input.
- * @returns A detached, recursively frozen JSON value.
+ * @returns A detached, recursively frozen JSON value with null-prototype objects.
  * @throws ContractError with a JSON Pointer path when the input cannot be preserved as JSON data.
  */
 export function parseJsonValue(input: unknown, stage: string): JsonValue {
@@ -139,7 +139,8 @@ export function parseJsonValue(input: unknown, stage: string): JsonValue {
           'non_plain_object',
         );
       }
-      const target: Record<string, JsonValue> = {};
+      // Missing data keys must not resolve to Object.prototype properties.
+      const target = Object.create(null) as Record<string, JsonValue>;
       const keys = Reflect.ownKeys(value);
       task.assign(target);
       active.add(value);
@@ -172,13 +173,7 @@ export function parseJsonValue(input: unknown, stage: string): JsonValue {
           kind: 'visit',
           input: descriptor.value as unknown,
           path,
-          assign: (item) =>
-            Object.defineProperty(target, key, {
-              value: item,
-              enumerable: true,
-              writable: true,
-              configurable: true,
-            }),
+          assign: (item) => (target[key] = item),
         });
       }
     } catch (error) {

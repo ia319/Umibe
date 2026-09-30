@@ -157,17 +157,30 @@ test('allows abstain and rejects out-of-set or contradictory selector results', 
 
 test('preserves parameter sources named like object prototype properties', () => {
   const input = candidateSetInput();
+  const keys = ['__proto__', 'constructor', 'toString', 'valueOf'];
   const source = { kind: 'application', reference: 'target-rule' };
   const candidate = {
     ...input.candidates[0]!,
-    params: { ['__proto__']: 'north' },
-    paramSources: { ['__proto__']: source },
+    params: Object.fromEntries(keys.map((key) => [key, 'north'])),
+    paramSources: Object.fromEntries(keys.map((key) => [key, source])),
   };
+  const missing = parseCandidateSet(input).candidates[0]!.paramSources;
   const result = parseCandidateSet({ ...input, candidates: [candidate] });
   const sources = result.candidates[0]!.paramSources;
 
-  expect(Object.keys(sources)).toEqual(['__proto__']);
-  expect(Object.getPrototypeOf(sources)).toBe(Object.prototype);
+  for (const key of keys) {
+    expect(Object.hasOwn(missing, key)).toBe(false);
+    expect(missing[key]).toBeUndefined();
+    expect(Object.hasOwn(sources, key)).toBe(true);
+    expect(sources[key]).toEqual(source);
+  }
+  expect(Object.keys(sources)).toEqual(keys);
+  expect(Object.getPrototypeOf(missing)).toBeNull();
+  expect(Object.getPrototypeOf(sources)).toBeNull();
+  expect(Object.isFrozen(sources)).toBe(true);
+  expect(Object.entries(sources)).toEqual(
+    Object.entries(candidate.paramSources),
+  );
   expect(JSON.stringify(sources)).toBe(JSON.stringify(candidate.paramSources));
 });
 

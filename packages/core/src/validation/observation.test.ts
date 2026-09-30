@@ -31,6 +31,27 @@ test('keeps observed, absent and missing facts distinct in a detached snapshot',
   expect(Object.isFrozen(observation.data)).toBe(true);
 });
 
+test('distinguishes missing facts from explicit facts named like prototype properties', () => {
+  const keys = ['__proto__', 'constructor', 'toString', 'valueOf'];
+  const data = Object.fromEntries(
+    keys.map((key) => [key, { status: 'known', value: 2 }]),
+  );
+  const missing = parseObservation({ ...input(), data: {} }).data;
+  const present = parseObservation({ ...input(), data }).data;
+
+  for (const key of keys) {
+    expect(Object.hasOwn(missing, key)).toBe(false);
+    expect(missing[key]).toBeUndefined();
+    expect(Object.hasOwn(present, key)).toBe(true);
+    expect(present[key]).toEqual({ status: 'known', value: 2 });
+  }
+  expect(Object.getPrototypeOf(missing)).toBeNull();
+  expect(Object.getPrototypeOf(present)).toBeNull();
+  expect(Object.isFrozen(present)).toBe(true);
+  expect(Object.entries(present)).toEqual(Object.entries(data));
+  expect(JSON.stringify(present)).toBe(JSON.stringify(data));
+});
+
 test('accepts explicit partial coverage and rejects false completeness', () => {
   const value = input();
   const partial = {

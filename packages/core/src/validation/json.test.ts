@@ -14,6 +14,29 @@ test('copies and freezes nested data before returning it', () => {
   expect(Object.isFrozen(snapshot)).toBe(true);
   expect(Object.isFrozen(snapshot.position)).toBe(true);
   expect(Object.isFrozen(snapshot.position[1])).toBe(true);
+  expect(Object.getPrototypeOf(snapshot)).toBeNull();
+  expect(Object.getPrototypeOf(snapshot.position[1])).toBeNull();
+});
+
+test('keeps prototype names absent unless explicitly supplied', () => {
+  const keys = ['__proto__', 'constructor', 'toString', 'valueOf'];
+  const input = Object.fromEntries(keys.map((key) => [key, { value: 1 }]));
+  const missing = parseJsonValue({}, 'observation');
+  const present = parseJsonValue(input, 'observation');
+  if (!isJsonObject(missing) || !isJsonObject(present)) {
+    throw new Error('Expected JSON objects.');
+  }
+
+  for (const key of keys) {
+    expect(Object.hasOwn(missing, key)).toBe(false);
+    expect(missing[key]).toBeUndefined();
+    expect(Object.hasOwn(present, key)).toBe(true);
+    expect(present[key]).toEqual({ value: 1 });
+  }
+  expect(Object.getPrototypeOf(missing)).toBeNull();
+  expect(Object.getPrototypeOf(present)).toBeNull();
+  expect(Object.entries(present)).toEqual(Object.entries(input));
+  expect(JSON.stringify(present)).toBe(JSON.stringify(input));
 });
 
 test('rejects invalid JSON data with stage, path and stable code', () => {

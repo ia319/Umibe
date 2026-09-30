@@ -66,7 +66,7 @@ function readFact(value: JsonValue, path: string): ObservationFact {
 
 /** Validate a detached observation without interpreting its application facts.
  * @param input - Untrusted observation data from the application or storage.
- * @returns A detached, frozen observation with explicit knowledge states.
+ * @returns A detached, frozen observation with a null-prototype fact dictionary.
  * @throws ContractError if JSON, coverage, facts or timestamps are invalid.
  */
 export function parseObservation(input: unknown): Observation {
@@ -122,7 +122,7 @@ export function parseObservation(input: unknown): Observation {
     uncheckedScopes,
   });
   const dataObject = requireObject(object.data, context, '/data');
-  const data: Record<string, ObservationFact> = {};
+  const data = Object.create(null) as Record<string, ObservationFact>;
   const observedAt = requireTimestamp(
     object.observedAt,
     context,
@@ -139,10 +139,7 @@ export function parseObservation(input: unknown): Observation {
         'future_last_observation',
       );
     }
-    Object.defineProperty(data, name, {
-      value: fact,
-      enumerable: true,
-    });
+    data[name] = fact;
     hasIncompleteFact ||=
       fact.status === 'unknown' ||
       fact.status === 'unobserved' ||
