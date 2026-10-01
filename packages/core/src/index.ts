@@ -31,6 +31,8 @@ export type {
 export type { ProposalLimits } from '#internal/validation/planning';
 export { parsePlanProposal } from '#internal/validation/planning';
 export { describeActionParameters } from '#internal/action/describe';
+export { ActionRegistry, defineAction } from '#internal/action/registry';
+export type { RegisteredAction } from '#internal/action/registry';
 export type {
   ActionCapability,
   CallControl,
@@ -50,6 +52,9 @@ export type {
   ActionCheck,
   ActionDefinition,
   ActionExecutionContext,
+  FixedActionCall,
+  ParameterChange,
+  PreparedAction,
   Reconciliation,
 } from '#internal/contracts/action';
 export type {
