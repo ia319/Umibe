@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -16,6 +17,20 @@ import { fileURLToPath } from 'node:url';
 const repositoryRoot = fileURLToPath(new URL('../', import.meta.url));
 const packageRoot = join(repositoryRoot, 'packages/core');
 const compilerPath = fileURLToPath(import.meta.resolve('typescript/bin/tsc'));
+const coreManifest = /** @type {unknown} */ (
+  JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8'))
+);
+if (
+  typeof coreManifest !== 'object' ||
+  coreManifest === null ||
+  !('dependencies' in coreManifest) ||
+  typeof coreManifest.dependencies !== 'object' ||
+  coreManifest.dependencies === null ||
+  !('zod' in coreManifest.dependencies) ||
+  typeof coreManifest.dependencies.zod !== 'string'
+) {
+  throw new Error('The core package must declare its Zod dependency.');
+}
 const pnpmCli = process.env.npm_execpath;
 if (!pnpmCli) {
   throw new Error(
@@ -117,12 +132,34 @@ try {
     '--offline',
     '--ignore-scripts',
     tarball,
+    `zod@${coreManifest.dependencies.zod}`,
   ]);
 
   writeFileSync(
     join(consumerRoot, 'consumer.mjs'),
     `import assert from 'node:assert/strict';
-import { MemoryRunStore, parseJsonValue } from '@umibe/core';
+import { ActionRegistry, defineAction, MemoryRunStore, parseJsonValue } from '@umibe/core';
+import { z } from 'zod';
+
+let defaultCalls = 0;
+const action = defineAction({
+  id: 'collect', version: 1, description: 'Collect samples', tags: ['samples'],
+  expectedEffects: {},
+  parameters: z.strictObject({ count: z.number().int().min(1).default(() => { defaultCalls += 1; return 2; }) }),
+  check: () => Promise.resolve({ outcome: 'allowed' }),
+  execute: () => { throw new Error('Package validation must not dispatch actions'); },
+});
+const registrationDefaults = defaultCalls;
+const registry = new ActionRegistry([action]);
+const prepared = await registry.prepare({ actionId: 'collect', actionVersion: 1, params: {}, paramSources: {} });
+assert.equal(defaultCalls - registrationDefaults, 1);
+assert.equal(prepared.call.params.count, 2);
+assert.equal(prepared.call.paramSources.count.kind, 'default');
+assert.ok(Object.isFrozen(prepared.call.params));
+assert.equal(registry.capabilities[0].id, 'collect');
+await assert.rejects(registry.prepare({ actionId: 'collect', actionVersion: 2, params: {}, paramSources: {} }), {
+  code: 'INVALID_ACTION_PARAMETERS', reason: 'action_version_mismatch',
+});
 
 const snapshot = parseJsonValue({ ready: true }, 'consumer');
 assert.equal(Object.getPrototypeOf(snapshot), null);
@@ -158,7 +195,25 @@ try {
 
   writeFileSync(
     join(consumerRoot, 'consumer.mts'),
-    `import { MemoryRunStore, type RecordPage, type RunCommit } from '@umibe/core';
+    `import { ActionRegistry, defineAction, MemoryRunStore, type PreparedAction, type RecordPage, type RunCommit } from '@umibe/core';
+import { z } from 'zod';
+
+const action = defineAction({
+  id: 'collect', version: 1, description: 'Collect samples', tags: [], expectedEffects: {},
+  parameters: z.object({ count: z.number().default(1), mode: z.enum(['scan', 'collect']).default('collect') }),
+  check(_context, params) {
+    const mode: 'scan' | 'collect' = params.mode;
+    const count: number = params.count;
+    // @ts-expect-error Parsed defaults retain their numeric output type.
+    const invalid: string = params.count;
+    void mode; void count; void invalid;
+    return Promise.resolve({ outcome: 'allowed' });
+  },
+  execute: () => { throw new Error('Type-only consumer'); },
+});
+const registry = new ActionRegistry([action]);
+const prepared: Promise<PreparedAction> = registry.prepare({ actionId: 'collect', actionVersion: 1, params: {}, paramSources: {} });
+void prepared;
 
 const input: RunCommit = {
   runId: 'consumer-run',
