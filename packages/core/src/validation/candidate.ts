@@ -3,7 +3,6 @@ import type {
   CandidateCoverage,
   CandidateExclusion,
   CandidateSet,
-  ParameterSource,
 } from '#internal/contracts/candidate';
 import type { JsonValue } from '#internal/contracts/json';
 import type { GoalRef } from '#internal/contracts/references';
@@ -15,7 +14,8 @@ import {
   requireString,
 } from './fields.js';
 import type { FieldContext } from './fields.js';
-import { isJsonArray, jsonPointerChild, parseJsonValue } from './json.js';
+import { isJsonArray, parseJsonValue } from './json.js';
+import { readParameterSources } from './parameter-sources.js';
 import { readGoalRef, readObservationRef, readPlanRef } from './references.js';
 
 const context: FieldContext = {
@@ -204,50 +204,12 @@ function readCandidate(
     `${path}/observationRef`,
   );
   const params = requireObject(object.params, context, `${path}/params`);
-  const sourceObject = requireObject(
+  const paramSources = readParameterSources(
     object.paramSources,
+    params,
     context,
     `${path}/paramSources`,
   );
-  const paramSources = Object.create(null) as Record<string, ParameterSource>;
-  if (
-    Object.keys(sourceObject).length !== Object.keys(params).length ||
-    Object.keys(params).some((key) => !Object.hasOwn(sourceObject, key))
-  ) {
-    throw new ContractError(
-      context.code,
-      context.stage,
-      `${path}/paramSources`,
-      'parameter_source_mismatch',
-    );
-  }
-  for (const [key, value] of Object.entries(sourceObject)) {
-    const sourcePath = jsonPointerChild(`${path}/paramSources`, key);
-    const record = requireObject(value, context, sourcePath);
-    requireKeys(record, ['kind', 'reference'], context, sourcePath);
-    const kind = record.kind;
-    if (
-      kind !== 'observation' &&
-      kind !== 'application' &&
-      kind !== 'model' &&
-      kind !== 'default'
-    ) {
-      throw new ContractError(
-        context.code,
-        context.stage,
-        `${sourcePath}/kind`,
-        'invalid_parameter_source',
-      );
-    }
-    paramSources[key] = Object.freeze({
-      kind,
-      reference: requireString(
-        record.reference,
-        context,
-        `${sourcePath}/reference`,
-      ),
-    });
-  }
   const candidate: Candidate = Object.freeze({
     id: requireString(object.id, context, `${path}/id`),
     candidateSetId: requireString(
@@ -263,7 +225,7 @@ function readCandidate(
       `${path}/actionVersion`,
     ),
     params,
-    paramSources: Object.freeze(paramSources),
+    paramSources,
     description: requireString(
       object.description,
       context,
