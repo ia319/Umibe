@@ -2,6 +2,7 @@ import { vi } from 'vitest';
 import { z } from 'zod';
 import { defineAction } from '#internal/action/registry';
 import type { ActionExecutionContext } from '#internal/contracts/action';
+import type { ActionResult } from '#internal/contracts/record';
 import type { AgentOptions, StartRun } from '#internal/contracts/runtime';
 import type { ApplicationEvent } from '#internal/contracts/event';
 import type {
@@ -73,7 +74,7 @@ export function runnerFixture(initial = 0, target = 2) {
     (
       _params: { target: string; count: number },
       context: ActionExecutionContext,
-    ) => {
+    ): Promise<ActionResult> => {
       count++;
       return Promise.resolve({
         executionId: context.executionId,

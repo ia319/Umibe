@@ -14,6 +14,8 @@ import type { RuntimeLimits } from './limits.js';
 import type { ExecutionSnapshot } from './execution.js';
 import type { SchedulingState } from './scheduling.js';
 import type { GoalState } from './goals.js';
+import type { GoalProgress } from './progress.js';
+import type { ActionResult } from '#internal/contracts/record';
 
 export interface SessionState {
   readonly control: RunControlState;
@@ -24,6 +26,8 @@ export interface SessionState {
   readonly execution: ExecutionSnapshot | null;
   readonly scheduling: SchedulingState;
   readonly goals: GoalState;
+  readonly progress: readonly GoalProgress[];
+  readonly recentResults: readonly ActionResult[];
 }
 
 export interface RuntimeDiagnostic {
@@ -78,6 +82,8 @@ export class RunSession {
       modelAttempts: 0,
       actionAttempts: 0,
       execution: null,
+      progress: [],
+      recentResults: [],
       goals: {
         created: decision.context.graph.goals.length - 1,
         pending: [],
@@ -280,6 +286,60 @@ export class RunSession {
     records: readonly RunRecordDraft[],
   ): Promise<void> {
     this.ensureOpen();
+    const path = new Set(
+      state.decision.context.graph.goalPath.map((ref) => ref.id),
+    );
+    state = {
+      ...state,
+      decision: Object.freeze({
+        ...state.decision,
+        context: Object.freeze({
+          ...state.decision.context,
+          runtime: Object.freeze({
+            execution:
+              state.execution === null
+                ? null
+                : Object.freeze({
+                    executionId: state.execution.intent.executionId,
+                    phase: state.execution.phase,
+                  }),
+            recentResults: state.recentResults,
+            progress: Object.freeze(
+              state.progress.map(
+                ({ goalRef, noProgress, recoveryAttempts, highWater }) =>
+                  Object.freeze({
+                    goalRef,
+                    noProgress,
+                    recoveryAttempts,
+                    highWater,
+                  }),
+              ),
+            ),
+            blocker: state.control.blocker,
+            completedSiblings: Object.freeze(
+              state.decision.context.graph.goals
+                .filter(
+                  (goal) =>
+                    !path.has(goal.id) &&
+                    goal.lifecycle === 'succeeded' &&
+                    goal.parentGoalRef !== null &&
+                    path.has(goal.parentGoalRef.id),
+                )
+                .flatMap((goal) =>
+                  goal.lastAssessment === null
+                    ? []
+                    : [
+                        Object.freeze({
+                          goalRef: { id: goal.id, version: goal.version },
+                          assessment: goal.lastAssessment,
+                        }),
+                      ],
+                ),
+            ),
+          }),
+        }),
+      }),
+    };
     const checkpointState = requireObject(
       parseJsonValue(state, validation.stage),
       validation,

@@ -55,8 +55,12 @@ export function assertAssessmentEvidence(
   }
   for (const id of evidence.executionIds)
     if (
-      context.lastActionResult?.executionId !== id ||
-      context.lastActionResult.outcome === 'unknown'
+      !(
+        context.runtime?.recentResults ??
+        (context.lastActionResult === null ? [] : [context.lastActionResult])
+      ).some(
+        (result) => result.executionId === id && result.outcome !== 'unknown',
+      )
     )
       invalid();
 }

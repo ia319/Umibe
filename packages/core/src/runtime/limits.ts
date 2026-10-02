@@ -14,6 +14,8 @@ export interface RuntimeLimits {
   readonly maxGoalDepth: number;
   /** Cumulative new child IDs, including closed and invalidated goals. */
   readonly maxSubgoals: number;
+  readonly maxNoProgress: number;
+  readonly maxRecoveryAttempts: number;
 }
 
 export function captureLimits(input: Partial<RuntimeLimits>): RuntimeLimits {
@@ -29,6 +31,8 @@ export function captureLimits(input: Partial<RuntimeLimits>): RuntimeLimits {
     actionRetries: 0,
     maxGoalDepth: 8,
     maxSubgoals: 100,
+    maxNoProgress: 3,
+    maxRecoveryAttempts: 3,
   };
   for (const key of Object.keys(input))
     if (!Object.hasOwn(defaults, key))
@@ -45,7 +49,8 @@ export function captureLimits(input: Partial<RuntimeLimits>): RuntimeLimits {
       (key.endsWith('Ms') && value > 2_147_483_647) ||
       value < (key.endsWith('Retries') || key.startsWith('max') ? 0 : 1) ||
       (key === 'modelRetries' && value > 2) ||
-      (key === 'actionRetries' && value > 1)
+      (key === 'actionRetries' && value > 1) ||
+      ((key === 'maxNoProgress' || key === 'maxRecoveryAttempts') && value < 1)
     ) {
       throw new ContractError(
         'INVALID_RUN_CONTROL',

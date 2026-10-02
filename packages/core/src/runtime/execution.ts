@@ -685,6 +685,14 @@ export class ActionCoordinator {
       {
         ...session.state,
         actionAttempts: session.state.actionAttempts - (unsent ? 1 : 0),
+        recentResults: Object.freeze(
+          [
+            ...session.state.recentResults.filter(
+              (item) => item.executionId !== result.executionId,
+            ),
+            result,
+          ].slice(-50),
+        ),
         execution: matches
           ? Object.freeze({
               ...current,

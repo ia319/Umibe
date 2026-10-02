@@ -41,6 +41,7 @@ export type {
   CandidateRequest,
   CriteriaSupport,
   DecisionContext,
+  RuntimeContext,
   Environment,
   Planner,
   PlannerRequest,
@@ -146,5 +147,6 @@ export type {
   RunHandle,
   RunInspection,
   RunResult,
+  ResumeRun,
   StartRun,
 } from '#internal/contracts/runtime';

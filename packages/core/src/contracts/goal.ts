@@ -7,6 +7,8 @@ export type GoalLifecycle =
 interface AssessmentBase {
   readonly goalRef: GoalRef;
   readonly observationRef: ObservationRef;
+  /** Optional application-defined progress measure; larger values mean net progress. Requires evidence. */
+  readonly progress?: number;
 }
 
 export interface GoalEvidence {

@@ -241,7 +241,9 @@ export function createAgent<TCriteria extends JsonValue>(
         starting.delete(runId);
       }
     },
-    resume: (runId: string) => owned(runId).resume(),
+    resume: (runId: string, update: Parameters<Agent['resume']>[1]) =>
+      owned(runId).resume(update),
+    reconcile: (runId: string) => owned(runId).reconcile(),
     pause: (runId: string, reasonCode: string) =>
       owned(runId).stop('pause', reasonCode),
     cancel: (runId: string, reasonCode: string) =>
@@ -259,7 +261,8 @@ export function createAgent<TCriteria extends JsonValue>(
       if (
         starting.size !== 0 ||
         [...runs.values()].some(
-          ({ session }) =>
+          ({ session, restoring }) =>
+            restoring ||
             session.hasExecution ||
             (session.failure === null &&
               ['running', 'pausing', 'cancelling'].includes(

@@ -20,6 +20,7 @@ import type { RootGoalRecord } from './goal.js';
 import type { JsonObject, JsonValue } from './json.js';
 import type { RunCheckpoint, RunRecord, RunSummary } from './record.js';
 import type { ApplicationEvent } from './event.js';
+import type { Reconciliation } from './action.js';
 
 export type ModelStage =
   'planning' | 'selection' | 'candidates' | 'verification';
@@ -40,6 +41,26 @@ export interface StartRun {
   readonly goal: GoalDefinition;
   readonly effectiveConstraints: JsonObject;
   readonly context?: JsonObject;
+}
+
+export interface ResumeRun {
+  /** Merge application context keys without treating them as observations. */
+  readonly context?: JsonObject;
+  readonly effectiveConstraints?: JsonObject;
+  /** Keep the root ID and increment its version by one; supply effectiveConstraints with a changed root. */
+  readonly goal?: GoalDefinition;
+  /** Increase limits only. Existing usage, progress and recovery counters remain cumulative. */
+  readonly limits?: Partial<
+    Pick<
+      RuntimeLimits,
+      | 'maxActionAttempts'
+      | 'maxModelAttempts'
+      | 'maxGoalDepth'
+      | 'maxSubgoals'
+      | 'maxNoProgress'
+      | 'maxRecoveryAttempts'
+    >
+  >;
 }
 
 export interface AgentOptions<TCriteria extends JsonValue = JsonValue> {
@@ -80,7 +101,9 @@ export interface Agent {
   /** Wait for initialization, then return without waiting for goal completion. Invalid initialization rejects. */
   start(input: StartRun): Promise<RunHandle>;
   /** Continue a paused run owned by this instance, preserving cumulative budgets and issuing a new result promise. */
-  resume(runId: string): Promise<RunHandle>;
+  resume(runId: string, update?: ResumeRun): Promise<RunHandle>;
+  /** Reconcile unresolved effects without resuming, including after cancellation. */
+  reconcile(runId: string): Promise<Reconciliation>;
   pause(runId: string, reasonCode: string): Promise<void>;
   cancel(runId: string, reasonCode: string): Promise<void>;
   /** Commit a domain event; duplicate IDs are idempotent only for identical content. */

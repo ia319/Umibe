@@ -4,10 +4,15 @@ import type {
   AgentOptions,
   ModelStage,
   RunHandle,
+  ResumeRun,
 } from '#internal/contracts/runtime';
 import type { CallControl, PlannerRequest } from '#internal/contracts/adapters';
 import type { JsonValue } from '#internal/contracts/json';
-import type { GoalAssessment, GoalRecord } from '#internal/contracts/goal';
+import type {
+  GoalAssessment,
+  GoalGraphSnapshot,
+  GoalRecord,
+} from '#internal/contracts/goal';
 import type { PlanningTrigger } from '#internal/contracts/planning';
 import type { ApplicationEvent } from '#internal/contracts/event';
 import { captureControl, invokeControlled } from '#internal/candidate/control';
@@ -29,6 +34,8 @@ import { ActionCoordinator } from './execution.js';
 import { invokeModel } from './model.js';
 import type { RunSession } from './session.js';
 import { selectionBasis } from './scheduling.js';
+import { assessProgress } from './progress.js';
+import { prepareResume } from './resume.js';
 import {
   assertAssessmentEvidence,
   focusGoal,
@@ -52,6 +59,9 @@ export class RunDriver<TCriteria extends JsonValue> {
   >();
   #decisionController = new AbortController();
   #refresh = false;
+  #progressAttempt: { before: GoalGraphSnapshot; failed: boolean } | null =
+    null;
+  #resumeController: AbortController | null = null;
 
   constructor(
     readonly session: RunSession,
@@ -75,6 +85,10 @@ export class RunDriver<TCriteria extends JsonValue> {
     );
     void result.catch(() => undefined);
     return Object.freeze({ runId: this.session.runId, result });
+  }
+
+  get restoring(): boolean {
+    return this.#resumeController !== null;
   }
 
   start(): void {
@@ -195,12 +209,13 @@ export class RunDriver<TCriteria extends JsonValue> {
     let controlCommit: Promise<void> | undefined;
     if (applicable && event.control !== 'none') {
       const cause = { eventId: event.eventId, reasonCode: event.reasonCode };
-      if (event.control === 'pauseRun' || event.control === 'cancelRun')
+      if (event.control === 'pauseRun' || event.control === 'cancelRun') {
+        this.#resumeController?.abort();
         controlCommit = session.transition({
           kind: event.control === 'pauseRun' ? 'pause' : 'cancel',
           cause,
         });
-      else if (session.state.execution !== null)
+      } else if (session.state.execution !== null)
         this.execution.interrupt(
           session.state.execution.intent.executionId,
           cause,
@@ -215,6 +230,7 @@ export class RunDriver<TCriteria extends JsonValue> {
   }
 
   async stop(kind: 'pause' | 'cancel', reasonCode: string): Promise<void> {
+    this.#resumeController?.abort();
     const record = this.session.event(
       'application_control',
       requireString(reasonCode, validation, '/reasonCode'),
@@ -229,23 +245,102 @@ export class RunDriver<TCriteria extends JsonValue> {
     await this.settleStop();
   }
 
-  async resume(): Promise<RunHandle> {
-    await this.#task;
-    await this.session.transition({ kind: 'resume' });
-    await this.session.commit(
-      {
-        ...this.session.state,
-        scheduling: {
-          ...this.session.state.scheduling,
-          selectionCause: 'resumed',
-          lastSelectionBasis: null,
-        },
-      },
-      [],
-    );
-    const handle = this.handle();
-    this.start();
-    return handle;
+  async reconcile() {
+    return this.execution.reconcile({
+      signal: new AbortController().signal,
+      deadlineAt: new Date(
+        Date.now() + this.session.state.limits.verificationTimeoutMs,
+      ).toISOString(),
+    });
+  }
+
+  async resume(input: ResumeRun = {}): Promise<RunHandle> {
+    const session = this.session;
+    if (this.restoring || session.state.control.status !== 'paused')
+      throw new ContractError(
+        validation.code,
+        'resume',
+        '/status',
+        'resume_unavailable',
+      );
+    const controller = new AbortController();
+    const update = parseJsonValue(input, 'resume');
+    this.#resumeController = controller;
+    try {
+      await this.#task;
+      const record = session.event('resume_updated', 'application_resume', {
+        update,
+      });
+      let next = prepareResume(session.state, update, record.eventId);
+      const epoch = session.state.decision.decisionEpoch;
+      const root = next.decision.context.graph.goals.find(
+        (goal) => goal.kind === 'root',
+      )!;
+      let criteria: TCriteria | undefined;
+      const control = {
+        signal: controller.signal,
+        deadlineAt: new Date(
+          Date.now() + session.state.limits.verificationTimeoutMs,
+        ).toISOString(),
+      };
+      if (root.version !== session.state.control.rootGoalRef.version) {
+        const supported = await invokeControlled(
+          captureControl(control),
+          (control) => this.options.verifier.support(root.criteria, control),
+        );
+        if (supported.outcome !== 'returned')
+          throw new ContractError(
+            validation.code,
+            'resume',
+            '/goal',
+            `support_${supported.outcome}`,
+          );
+        criteria = this.decodeSupport(supported.value);
+      }
+      if (session.hasExecution) await this.execution.reconcile(control);
+      if (session.hasExecution)
+        throw new ContractError(
+          validation.code,
+          'resume',
+          '/execution',
+          'execution_unsettled',
+        );
+      if (
+        controller.signal.aborted ||
+        session.state.control.status !== 'paused' ||
+        session.state.decision.decisionEpoch !== epoch
+      )
+        throw new ContractError(
+          validation.code,
+          'resume',
+          '',
+          'resume_invalidated',
+        );
+      // Reconciliation and event delivery may have added records while validation was pending.
+      next = prepareResume(session.state, update, record.eventId);
+      await session.commit(next, [record]);
+      if (
+        controller.signal.aborted ||
+        session.state.control.status !== 'paused'
+      )
+        throw new ContractError(
+          validation.code,
+          'resume',
+          '',
+          'resume_invalidated',
+        );
+      if (criteria !== undefined) {
+        this.#criteria.clear();
+        this.#criteria.set(`${root.id}:${root.version}`, criteria);
+      }
+      this.#progressAttempt = null;
+      await session.transition({ kind: 'resume' });
+      const handle = this.handle();
+      this.start();
+      return handle;
+    } finally {
+      this.#resumeController = null;
+    }
   }
 
   private control(stage: CallbackStage): CallControl {
@@ -324,6 +419,10 @@ export class RunDriver<TCriteria extends JsonValue> {
     const result = await this.call('support', (control) =>
       this.options.verifier.support(goal.criteria, control),
     );
+    return this.decodeSupport(result);
+  }
+
+  private decodeSupport(result: unknown): TCriteria {
     const raw = requireObject(
       parseJsonValue(result, validation.stage),
       validation,
@@ -337,10 +436,12 @@ export class RunDriver<TCriteria extends JsonValue> {
           '/support',
           'invalid_support',
         );
-      await this.block(
+      throw new ContractError(
+        validation.code,
+        validation.stage,
+        '/support',
         requireString(raw.reason, validation, '/support/reason'),
       );
-      throw new CallStopped();
     }
     if (
       raw.criteria === null ||
@@ -398,8 +499,7 @@ export class RunDriver<TCriteria extends JsonValue> {
           goal,
           criteria,
           context,
-          actionResults:
-            context.lastActionResult === null ? [] : [context.lastActionResult],
+          actionResults: session.state.recentResults,
         },
         control,
       ),
@@ -459,6 +559,20 @@ export class RunDriver<TCriteria extends JsonValue> {
       {
         ...session.state,
         decision,
+        progress:
+          goal.kind === 'root' && assessment.outcome === 'passed'
+            ? assessProgress(
+                session.state.progress,
+                context.graph,
+                graph,
+                'baseline',
+                false,
+              )
+            : session.state.progress,
+        scheduling:
+          closed.size === 0
+            ? session.state.scheduling
+            : { ...session.state.scheduling, recoveryAttempts: 0 },
         goals: {
           ...session.state.goals,
           order: session.state.goals.order.filter((ref) => !closed.has(ref.id)),
@@ -498,6 +612,13 @@ export class RunDriver<TCriteria extends JsonValue> {
       await this.verifyGoal(goal);
       if (session.state.control.status !== 'running') return;
     }
+    const attempt = this.#progressAttempt;
+    this.#progressAttempt = null;
+    await this.recordProgress(
+      attempt?.before ?? session.state.decision.context.graph,
+      attempt === null ? 'baseline' : 'action',
+      attempt?.failed ?? false,
+    );
     const graph = session.state.decision.context.graph;
     const current = graph.goals.find(
       (goal) => goal.id === graph.currentGoalRef.id,
@@ -548,6 +669,66 @@ export class RunDriver<TCriteria extends JsonValue> {
       ],
     );
     if (planned !== null) await this.verify();
+  }
+
+  private async recordProgress(
+    before: GoalGraphSnapshot,
+    attempt: 'baseline' | 'action' | 'planning',
+    failed: boolean,
+  ): Promise<void> {
+    const session = this.session;
+    let progress = assessProgress(
+      session.state.progress,
+      before,
+      session.state.decision.context.graph,
+      attempt,
+      failed,
+    );
+    const blocked = progress.find(
+      (item) => item.noProgress >= session.state.limits.maxNoProgress,
+    );
+    const recovery = [...session.state.decision.context.graph.goalPath]
+      .reverse()
+      .flatMap((ref) => progress.filter((item) => item.goalRef.id === ref.id))
+      .find(
+        (item) =>
+          !item.recoveryPlanned &&
+          item.recoveryAttempts >= session.state.limits.maxRecoveryAttempts,
+      );
+    if (recovery && !blocked)
+      progress = progress.map((item) =>
+        item.recoveryAttempts >= session.state.limits.maxRecoveryAttempts
+          ? { ...item, recoveryPlanned: true }
+          : item,
+      );
+    const epoch = session.state.decision.decisionEpoch;
+    await session.commit(
+      {
+        ...session.state,
+        progress,
+        scheduling:
+          recovery && !blocked
+            ? {
+                ...session.state.scheduling,
+                planning: {
+                  kind: 'recoveryExhausted',
+                  goalRef: recovery.goalRef,
+                  failures: recovery.recoveryAttempts,
+                },
+              }
+            : session.state.scheduling,
+      },
+      [
+        session.event('progress_assessed', attempt, {
+          progress: parseJsonValue(progress, 'progress'),
+        }),
+      ],
+    );
+    if (!session.canDispatch(epoch)) throw new CallStopped();
+    if (blocked) {
+      await this.block('no_progress');
+      throw new CallStopped();
+    }
   }
 
   private async plan(trigger: PlanningTrigger): Promise<void> {
@@ -663,8 +844,14 @@ export class RunDriver<TCriteria extends JsonValue> {
     if (
       prepared.changed.length > 0 ||
       current.graph.currentGoalRef.id !== prepared.graph.currentGoalRef.id
-    )
+    ) {
       await this.verify();
+      if (
+        session.state.control.status === 'running' &&
+        session.state.scheduling.planning !== null
+      )
+        await this.recordProgress(current.graph, 'planning', false);
+    }
   }
 
   private async run(): Promise<void> {
@@ -840,6 +1027,7 @@ export class RunDriver<TCriteria extends JsonValue> {
             await this.block(`selection_${selected.outcome}`);
           break;
         }
+        const before = session.state.decision.context.graph;
         const result = await this.execution.execute(selected);
         if (session.state.control.status !== 'running') break;
         if (result.outcome !== 'recorded') {
@@ -852,12 +1040,15 @@ export class RunDriver<TCriteria extends JsonValue> {
             ...session.state,
             scheduling: {
               ...session.state.scheduling,
-              recoveryAttempts: 0,
               selectionCause: 'action_completed',
             },
           },
           [],
         );
+        this.#progressAttempt = {
+          before,
+          failed: result.result.outcome !== 'succeeded',
+        };
         if (this.#refresh) continue;
         await this.verify();
       }
@@ -886,7 +1077,11 @@ export class RunDriver<TCriteria extends JsonValue> {
   }
 
   private async settleStop(): Promise<void> {
-    if (this.session.hasExecution) return;
+    if (
+      this.session.hasExecution &&
+      this.session.state.execution?.phase !== 'unknown'
+    )
+      return;
     const control = this.session.state.control;
     if (control.status === 'pausing' || control.status === 'cancelling')
       await this.session.transition({
