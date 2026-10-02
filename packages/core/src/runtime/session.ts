@@ -1,0 +1,350 @@
+import { randomUUID } from 'node:crypto';
+import type { JsonObject } from '#internal/contracts/json';
+import type { CandidateGenerationInput } from '#internal/contracts/candidate-processing';
+import type { RunCheckpoint, RunRecord } from '#internal/contracts/record';
+import { captureDecisionRequest } from '#internal/candidate/context';
+import { ContractError } from '#internal/errors';
+import type { RunRecordDraft, RunStore } from '#internal/storage/contracts';
+import { requireObject } from '#internal/validation/fields';
+import { parseJsonValue } from '#internal/validation/json';
+import { createRunControl, transitionRun } from './state.js';
+import type { RunCommand, RunControlState } from './state.js';
+
+export interface SessionState {
+  readonly control: RunControlState;
+  readonly decision: CandidateGenerationInput;
+}
+
+export interface RuntimeDiagnostic {
+  readonly code: 'store_failed' | 'store_conflict' | 'subscriber_failed';
+  readonly runId: string;
+  readonly eventId: string | null;
+}
+
+const owners = new WeakMap<RunStore, Set<string>>();
+const validation = {
+  code: 'INVALID_RUN_CONTROL',
+  stage: 'run_session',
+} as const;
+
+/**
+ * One in-process writer for a run. State admission is synchronous; persistence
+ * is ordered separately so a pending commit cannot delay a stop signal.
+ * The injected store remains owned by its caller. This is not a crash-recovery API.
+ */
+export class RunSession {
+  readonly runId: string;
+  #state: SessionState;
+  #checkpoint: RunCheckpoint | null = null;
+  #tail: Promise<void> = Promise.resolve();
+  #pending = 0;
+  #closed = false;
+  #failure: ContractError | null = null;
+  #controller = new AbortController();
+  readonly #listeners = new Set<(record: RunRecord) => void>();
+  #resolveResult!: (state: RunControlState) => void;
+  #rejectResult!: (error: unknown) => void;
+  #result!: Promise<RunControlState>;
+
+  private constructor(
+    private readonly store: RunStore,
+    decision: CandidateGenerationInput,
+    private readonly diagnose: (diagnostic: RuntimeDiagnostic) => void,
+  ) {
+    this.runId = decision.context.graph.runId;
+    this.#state = Object.freeze({
+      control: createRunControl(decision.context.graph.rootGoalRef),
+      decision,
+    });
+    this.beginInterval();
+  }
+
+  static async create(
+    store: RunStore,
+    input: CandidateGenerationInput,
+    diagnose: (diagnostic: RuntimeDiagnostic) => void,
+  ): Promise<RunSession> {
+    const decision = captureDecisionRequest(input);
+    const runId = decision.context.graph.runId;
+    let owned = owners.get(store);
+    if (owned === undefined) {
+      owned = new Set();
+      owners.set(store, owned);
+    }
+    if (owned.has(runId))
+      throw new ContractError(
+        validation.code,
+        validation.stage,
+        '/runId',
+        'run_owned',
+      );
+    owned.add(runId);
+    const session = new RunSession(store, decision, diagnose);
+    try {
+      await session.commit(session.state, [
+        session.event('run_created', 'created', {}),
+      ]);
+      return session;
+    } catch (error) {
+      owned.delete(runId);
+      throw error;
+    }
+  }
+
+  get state(): SessionState {
+    return this.#state;
+  }
+  get checkpoint(): RunCheckpoint | null {
+    return this.#checkpoint;
+  }
+  get signal(): AbortSignal {
+    return this.#controller.signal;
+  }
+  get result(): Promise<RunControlState> {
+    return this.#result;
+  }
+  get failure(): ContractError | null {
+    return this.#failure;
+  }
+
+  /** Resolves after commit; invalid commands reject without changing admitted state. */
+  async transition(command: RunCommand): Promise<void> {
+    this.ensureOpen();
+    if (
+      command.kind === 'resume' &&
+      (this.#pending !== 0 || this.#checkpoint?.status !== 'paused')
+    ) {
+      throw new ContractError(
+        validation.code,
+        validation.stage,
+        '/status',
+        'pause_not_committed',
+      );
+    }
+    const control = transitionRun(this.#state.control, command);
+    if (control === this.#state.control) return;
+    if (command.kind === 'resume') this.beginInterval();
+    const record = this.event('run_transition', command.kind, {
+      previous: this.#state.control.status,
+      status: control.status,
+      stopCause: control.stopCause === null ? null : { ...control.stopCause },
+      blocker: control.blocker === null ? null : { ...control.blocker },
+    });
+    const committed = this.commit({ ...this.#state, control }, [record]);
+    if (control.status !== 'running' && control.status !== 'created')
+      this.#controller.abort();
+    await committed;
+  }
+
+  /** Context owners must advance the epoch for semantic changes, never for sampling alone. */
+  async replaceDecision(input: CandidateGenerationInput): Promise<void> {
+    const decision = captureDecisionRequest(input);
+    if (
+      decision.context.graph.runId !== this.runId ||
+      decision.decisionEpoch < this.#state.decision.decisionEpoch
+    ) {
+      throw new ContractError(
+        validation.code,
+        validation.stage,
+        '/decision',
+        'stale_or_foreign_decision',
+      );
+    }
+    if (this.#state.control.status !== 'running')
+      throw new ContractError(
+        validation.code,
+        validation.stage,
+        '/status',
+        'run_not_running',
+      );
+    await this.commit(
+      {
+        ...this.#state,
+        control: Object.freeze({
+          ...this.#state.control,
+          rootGoalRef: decision.context.graph.rootGoalRef,
+        }),
+        decision,
+      },
+      [
+        this.event('context_accepted', 'context_updated', {
+          decisionEpoch: decision.decisionEpoch,
+        }),
+      ],
+    );
+  }
+
+  /** Check again immediately before dispatch, after awaiting the authorizing commit. */
+  canDispatch(epoch: number): boolean {
+    return (
+      !this.#closed &&
+      this.#failure === null &&
+      !this.signal.aborted &&
+      this.#state.control.status === 'running' &&
+      this.#state.decision.decisionEpoch === epoch
+    );
+  }
+
+  /** Internal atomic checkpoint/event submission; callers must supply detached validated data. */
+  commit(
+    state: SessionState,
+    records: readonly RunRecordDraft[],
+  ): Promise<void> {
+    this.ensureOpen();
+    const checkpointState = requireObject(
+      parseJsonValue(state, validation.stage),
+      validation,
+      '/state',
+    );
+    this.#state = Object.freeze(state);
+    this.#pending += 1;
+    const pending = this.#tail.then(async () => {
+      if (this.#failure !== null) throw this.#failure;
+      const result = await this.store.commit({
+        runId: this.runId,
+        expectedRevision: this.#checkpoint?.revision ?? null,
+        status: state.control.status,
+        rootGoalRef: state.control.rootGoalRef,
+        currentGoalRef: state.decision.context.graph.currentGoalRef,
+        stateSchemaVersion: 1,
+        state: checkpointState,
+        records,
+      });
+      if (result.outcome === 'conflict')
+        throw new ContractError(
+          validation.code,
+          validation.stage,
+          '/revision',
+          'store_conflict',
+        );
+      this.#checkpoint = result.checkpoint;
+      for (const record of result.records) {
+        for (const listener of [...this.#listeners]) {
+          try {
+            // Async subscriber failures must also remain outside the transaction.
+            void Promise.resolve(listener(record)).catch(() =>
+              this.report('subscriber_failed', record.eventId),
+            );
+          } catch {
+            this.report('subscriber_failed', record.eventId);
+          }
+        }
+      }
+      if (
+        state.control.status === 'paused' ||
+        state.control.status === 'cancelled' ||
+        state.control.status === 'succeeded' ||
+        state.control.status === 'failed'
+      ) {
+        this.#resolveResult(state.control);
+      }
+    });
+    this.#tail = pending.then(
+      () => {
+        this.#pending -= 1;
+      },
+      (error: unknown) => {
+        this.#pending -= 1;
+        if (this.#failure !== null) return;
+        const code =
+          error instanceof ContractError && error.reason === 'store_conflict'
+            ? 'store_conflict'
+            : 'store_failed';
+        this.#failure = new ContractError(
+          validation.code,
+          validation.stage,
+          '/store',
+          code,
+        );
+        this.#controller.abort();
+        this.#rejectResult(this.#failure);
+        this.report(code, null);
+      },
+    );
+    return pending;
+  }
+
+  event(type: string, reasonCode: string, details: JsonObject): RunRecordDraft {
+    return {
+      formatVersion: 1,
+      runId: this.runId,
+      eventId: randomUUID(),
+      kind: 'coreEvent',
+      data: {
+        source: 'core',
+        type,
+        reasonCode,
+        goalRef: this.#state.decision.context.graph.currentGoalRef,
+        requestId:
+          typeof details.requestId === 'string' ? details.requestId : null,
+        decisionId:
+          typeof details.decisionId === 'string' ? details.decisionId : null,
+        executionId:
+          typeof details.executionId === 'string' ? details.executionId : null,
+        details,
+      },
+    };
+  }
+
+  subscribe(listener: (record: RunRecord) => void): () => void {
+    this.ensureOpen();
+    this.#listeners.add(listener);
+    return () => {
+      this.#listeners.delete(listener);
+    };
+  }
+
+  close(): void {
+    if (this.#closed) return;
+    if (
+      this.#pending > 0 ||
+      (this.#failure === null &&
+        ['running', 'pausing', 'cancelling'].includes(
+          this.#state.control.status,
+        ))
+    ) {
+      throw new ContractError(
+        validation.code,
+        validation.stage,
+        '/status',
+        'run_active',
+      );
+    }
+    this.#closed = true;
+    this.#controller.abort();
+    this.#listeners.clear();
+    owners.get(this.store)?.delete(this.runId);
+  }
+
+  private beginInterval(): void {
+    this.#controller = new AbortController();
+    this.#result = new Promise((resolve, reject) => {
+      this.#resolveResult = resolve;
+      this.#rejectResult = reject;
+    });
+    // Callers may obtain result after an initialization failure has already occurred.
+    void this.#result.catch(() => undefined);
+  }
+
+  private report(
+    code: RuntimeDiagnostic['code'],
+    eventId: string | null,
+  ): void {
+    try {
+      this.diagnose({ code, runId: this.runId, eventId });
+    } catch {
+      // Diagnostic observers cannot recursively fail the writer they observe.
+    }
+  }
+
+  private ensureOpen(): void {
+    if (this.#closed)
+      throw new ContractError(
+        validation.code,
+        validation.stage,
+        '',
+        'run_closed',
+      );
+    if (this.#failure !== null) throw this.#failure;
+  }
+}
