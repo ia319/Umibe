@@ -17,6 +17,7 @@ import {
 import { parseJsonValue } from '#internal/validation/json';
 import { parseGoalGraph } from '#internal/validation/goal';
 import { parseObservation } from '#internal/validation/observation';
+import { parseApplicationEvent } from '#internal/validation/event';
 import { captureLimits } from './limits.js';
 import { RunSession } from './session.js';
 import { RunDriver } from './runner.js';
@@ -76,6 +77,7 @@ export function createAgent<TCriteria extends JsonValue>(
   const runs = new Map<string, RunDriver<TCriteria>>();
   const starting = new Set<string>();
   let closed = false;
+  let unsubscribe: (() => void) | undefined;
   const owned = (runId: string) => {
     if (closed)
       throw new ContractError(
@@ -210,6 +212,29 @@ export function createAgent<TCriteria extends JsonValue>(
         runs.set(runId, driver);
         await session.transition({ kind: 'start' });
         const handle = driver.handle();
+        if (unsubscribe === undefined && options.environment.subscribe) {
+          try {
+            unsubscribe = options.environment.subscribe((input) => {
+              try {
+                const event = parseApplicationEvent(input);
+                const target = runs.get(event.runId);
+                if (target)
+                  void target
+                    .emit(event)
+                    .catch(() =>
+                      target.session.report(
+                        'environment_event_failed',
+                        event.eventId,
+                      ),
+                    );
+              } catch {
+                session.report('environment_event_failed', null);
+              }
+            });
+          } catch {
+            session.report('environment_subscription_failed', null);
+          }
+        }
         driver.start();
         return handle;
       } finally {
@@ -221,6 +246,10 @@ export function createAgent<TCriteria extends JsonValue>(
       owned(runId).stop('pause', reasonCode),
     cancel: (runId: string, reasonCode: string) =>
       owned(runId).stop('cancel', reasonCode),
+    emit: (input: Parameters<Agent['emit']>[0]) => {
+      const event = parseApplicationEvent(input);
+      return owned(event.runId).emit(event);
+    },
     inspect: options.store.readRun.bind(options.store),
     records: options.store.readRecords.bind(options.store),
     subscribe: (runId: string, listener: Parameters<Agent['subscribe']>[1]) =>
@@ -232,9 +261,10 @@ export function createAgent<TCriteria extends JsonValue>(
         [...runs.values()].some(
           ({ session }) =>
             session.hasExecution ||
-            ['running', 'pausing', 'cancelling'].includes(
-              session.state.control.status,
-            ),
+            (session.failure === null &&
+              ['running', 'pausing', 'cancelling'].includes(
+                session.state.control.status,
+              )),
         )
       )
         throw new ContractError(
@@ -244,6 +274,14 @@ export function createAgent<TCriteria extends JsonValue>(
           'agent_active',
         );
       for (const run of runs.values()) run.session.close();
+      try {
+        unsubscribe?.();
+      } catch {
+        runs
+          .values()
+          .next()
+          .value?.session.report('environment_subscription_failed', null);
+      }
       runs.clear();
       closed = true;
     },

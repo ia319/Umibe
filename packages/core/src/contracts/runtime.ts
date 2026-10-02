@@ -19,6 +19,7 @@ import type {
 import type { RootGoalRecord } from './goal.js';
 import type { JsonObject, JsonValue } from './json.js';
 import type { RunCheckpoint, RunRecord, RunSummary } from './record.js';
+import type { ApplicationEvent } from './event.js';
 
 export type ModelStage =
   'planning' | 'selection' | 'candidates' | 'verification';
@@ -82,6 +83,8 @@ export interface Agent {
   resume(runId: string): Promise<RunHandle>;
   pause(runId: string, reasonCode: string): Promise<void>;
   cancel(runId: string, reasonCode: string): Promise<void>;
+  /** Commit a domain event; duplicate IDs are idempotent only for identical content. */
+  emit(event: ApplicationEvent): Promise<void>;
   /** Read the committed checkpoint without changing execution or acquiring a run. */
   inspect(runId: string): Promise<RunInspection | null>;
   records(

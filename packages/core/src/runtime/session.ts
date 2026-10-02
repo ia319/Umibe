@@ -12,6 +12,7 @@ import type { RunCommand, RunControlState } from './state.js';
 import { captureLimits } from './limits.js';
 import type { RuntimeLimits } from './limits.js';
 import type { ExecutionSnapshot } from './execution.js';
+import type { SchedulingState } from './scheduling.js';
 
 export interface SessionState {
   readonly control: RunControlState;
@@ -20,10 +21,16 @@ export interface SessionState {
   readonly modelAttempts: number;
   readonly actionAttempts: number;
   readonly execution: ExecutionSnapshot | null;
+  readonly scheduling: SchedulingState;
 }
 
 export interface RuntimeDiagnostic {
-  readonly code: 'store_failed' | 'store_conflict' | 'subscriber_failed';
+  readonly code:
+    | 'store_failed'
+    | 'store_conflict'
+    | 'subscriber_failed'
+    | 'environment_event_failed'
+    | 'environment_subscription_failed';
   readonly runId: string;
   readonly eventId: string | null;
 }
@@ -69,6 +76,13 @@ export class RunSession {
       modelAttempts: 0,
       actionAttempts: 0,
       execution: null,
+      scheduling: {
+        policyVersion: 1,
+        planning: { kind: 'initial', assessment: 'notYet' },
+        recoveryAttempts: 0,
+        lastSelectionBasis: null,
+        selectionCause: 'initial',
+      } satisfies SchedulingState,
     });
     this.beginInterval();
   }
@@ -396,12 +410,11 @@ export class RunSession {
     void this.#result.catch(() => undefined);
   }
 
-  private report(
-    code: RuntimeDiagnostic['code'],
-    eventId: string | null,
-  ): void {
+  report(code: RuntimeDiagnostic['code'], eventId: string | null): void {
     try {
-      this.diagnose({ code, runId: this.runId, eventId });
+      void Promise.resolve(
+        this.diagnose({ code, runId: this.runId, eventId }),
+      ).catch(() => undefined);
     } catch {
       // Diagnostic observers cannot recursively fail the writer they observe.
     }

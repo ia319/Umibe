@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { ActionRegistry } from '#internal/action/registry';
 import type {
   AgentOptions,
@@ -9,6 +9,7 @@ import type { CallControl, PlannerRequest } from '#internal/contracts/adapters';
 import type { JsonValue } from '#internal/contracts/json';
 import type { GoalAssessment, GoalRecord } from '#internal/contracts/goal';
 import type { PlanningTrigger } from '#internal/contracts/planning';
+import type { ApplicationEvent } from '#internal/contracts/event';
 import { captureControl, invokeControlled } from '#internal/candidate/control';
 import { prepareCandidates } from '#internal/candidate/prepare';
 import { checkCandidates } from '#internal/candidate/check';
@@ -22,9 +23,12 @@ import { parseObservation } from '#internal/validation/observation';
 import { parseGoalGraph } from '#internal/validation/goal';
 import { parsePlanProposal } from '#internal/validation/planning';
 import { readGoalAssessment } from '#internal/validation/assessment';
+import { parseApplicationEvent } from '#internal/validation/event';
+import { captureDecisionRequest } from '#internal/candidate/context';
 import { ActionCoordinator } from './execution.js';
 import { invokeModel } from './model.js';
 import type { RunSession } from './session.js';
+import { selectionBasis } from './scheduling.js';
 
 const validation = { code: 'INVALID_RUN_CONTROL', stage: 'run_loop' } as const;
 class CallStopped extends Error {}
@@ -36,6 +40,12 @@ export class RunDriver<TCriteria extends JsonValue> {
   readonly execution: ActionCoordinator;
   #task: Promise<void> | null = null;
   readonly #criteria = new Map<string, TCriteria>();
+  readonly #events = new Map<
+    string,
+    { fingerprint: string; committed: Promise<void> }
+  >();
+  #decisionController = new AbortController();
+  #refresh = false;
 
   constructor(
     readonly session: RunSession,
@@ -65,8 +75,137 @@ export class RunDriver<TCriteria extends JsonValue> {
     if (this.#task !== null) return;
     this.#task = this.run().finally(() => {
       this.#task = null;
+      if (
+        this.#refresh &&
+        this.session.state.control.status === 'running' &&
+        this.session.failure === null
+      )
+        this.start();
     });
     void this.#task.catch(() => undefined);
+  }
+
+  async emit(input: ApplicationEvent): Promise<void> {
+    const event = parseApplicationEvent(input);
+    const session = this.session;
+    if (event.runId !== session.runId)
+      throw new ContractError(
+        validation.code,
+        validation.stage,
+        '/runId',
+        'cross_run_event',
+      );
+    const fingerprint = createHash('sha256')
+      .update(canonicalJson(parseJsonValue(event, 'event')), 'utf8')
+      .digest('hex');
+    const previous = this.#events.get(event.eventId);
+    if (previous !== undefined) {
+      if (previous.fingerprint !== fingerprint)
+        throw new ContractError(
+          validation.code,
+          validation.stage,
+          '/eventId',
+          'event_conflict',
+        );
+      return previous.committed;
+    }
+    const context = session.state.decision.context;
+    const matches = (ref: { id: string; version: number }) =>
+      context.graph.goals.some(
+        (goal) =>
+          goal.id === ref.id &&
+          goal.version === ref.version &&
+          (goal.lifecycle === 'pending' || goal.lifecycle === 'inProgress'),
+      );
+    const applicable =
+      (event.currentGoalRef === null ||
+        (event.currentGoalRef.id === context.graph.currentGoalRef.id &&
+          event.currentGoalRef.version ===
+            context.graph.currentGoalRef.version)) &&
+      event.affectedGoalRefs.every(matches) &&
+      (event.planRef === null ||
+        canonicalJson({ ...event.planRef }) ===
+          canonicalJson(
+            context.planRef === null ? null : { ...context.planRef },
+          )) &&
+      (event.executionId === null ||
+        event.executionId === session.state.execution?.intent.executionId);
+    const active = session.state.control.status === 'running';
+    const invalidates =
+      applicable &&
+      active &&
+      (event.impact !== 'observation' || event.control === 'interruptAction');
+    const decision = captureDecisionRequest({
+      ...session.state.decision,
+      decisionEpoch:
+        session.state.decision.decisionEpoch + (invalidates ? 1 : 0),
+      context: {
+        ...context,
+        recentEvents: [...context.recentEvents, event].slice(-50),
+      },
+    });
+    const scheduling = invalidates
+      ? {
+          ...session.state.scheduling,
+          planning:
+            event.impact === 'plan'
+              ? { kind: 'planInvalidated' as const, eventId: event.eventId }
+              : session.state.scheduling.planning,
+          selectionCause: 'candidates_changed' as const,
+        }
+      : session.state.scheduling;
+    const committed = session.commit(
+      { ...session.state, decision, scheduling },
+      [
+        {
+          formatVersion: 1,
+          runId: session.runId,
+          eventId: event.eventId,
+          kind: 'applicationEvent',
+          data: event,
+        },
+        session.event(
+          'event_scheduled',
+          !applicable
+            ? 'stale_event'
+            : invalidates
+              ? 'decision_invalidated'
+              : 'observation_recorded',
+          {
+            sourceEventId: event.eventId,
+            impact: event.impact,
+            timing: event.timing,
+            affectedGoalRefs: event.affectedGoalRefs.map((ref) => ({ ...ref })),
+          },
+        ),
+      ],
+    );
+    this.#events.set(event.eventId, { fingerprint, committed });
+    if (invalidates) {
+      this.#refresh = true;
+      this.#decisionController.abort();
+      this.#decisionController = new AbortController();
+    }
+    let controlCommit: Promise<void> | undefined;
+    if (applicable && event.control !== 'none') {
+      const cause = { eventId: event.eventId, reasonCode: event.reasonCode };
+      if (event.control === 'pauseRun' || event.control === 'cancelRun')
+        controlCommit = session.transition({
+          kind: event.control === 'pauseRun' ? 'pause' : 'cancel',
+          cause,
+        });
+      else if (session.state.execution !== null)
+        this.execution.interrupt(
+          session.state.execution.intent.executionId,
+          cause,
+        );
+    }
+    await committed;
+    await controlCommit;
+    if (this.#task === null) {
+      if (active && invalidates) this.start();
+      else await this.settleStop();
+    }
   }
 
   async stop(kind: 'pause' | 'cancel', reasonCode: string): Promise<void> {
@@ -87,6 +226,17 @@ export class RunDriver<TCriteria extends JsonValue> {
   async resume(): Promise<RunHandle> {
     await this.#task;
     await this.session.transition({ kind: 'resume' });
+    await this.session.commit(
+      {
+        ...this.session.state,
+        scheduling: {
+          ...this.session.state.scheduling,
+          selectionCause: 'resumed',
+          lastSelectionBasis: null,
+        },
+      },
+      [],
+    );
     const handle = this.handle();
     this.start();
     return handle;
@@ -95,7 +245,10 @@ export class RunDriver<TCriteria extends JsonValue> {
   private control(stage: CallbackStage): CallControl {
     const limits = this.session.state.limits;
     return {
-      signal: this.session.signal,
+      signal: AbortSignal.any([
+        this.session.signal,
+        this.#decisionController.signal,
+      ]),
       deadlineAt: new Date(
         Date.now() +
           (stage === 'verification' || stage === 'support'
@@ -353,23 +506,43 @@ export class RunDriver<TCriteria extends JsonValue> {
       decisionEpoch: session.state.decision.decisionEpoch + 1,
       context: { ...current, planRef, planGuidance: proposal.guidance },
     });
-    await session.commit(session.state, [
-      session.event('plan_accepted', trigger.kind, {
-        requestId: request.requestId,
-        planRef: { ...planRef },
-        proposal: parseJsonValue(proposal, 'planning'),
-      }),
-    ]);
+    await session.commit(
+      {
+        ...session.state,
+        scheduling: {
+          ...session.state.scheduling,
+          planning:
+            session.state.scheduling.planning === trigger
+              ? null
+              : session.state.scheduling.planning,
+        },
+      },
+      [
+        session.event('plan_accepted', trigger.kind, {
+          requestId: request.requestId,
+          planRef: { ...planRef },
+          proposal: parseJsonValue(proposal, 'planning'),
+        }),
+      ],
+    );
   }
 
   private async run(): Promise<void> {
     const session = this.session;
     try {
+      this.#refresh = false;
       await this.observe();
       await this.verify();
       while (session.state.control.status === 'running') {
-        if (session.state.decision.context.planRef === null)
-          await this.plan({ kind: 'initial', assessment: 'notYet' });
+        if (this.#refresh) {
+          this.#refresh = false;
+          await this.observe();
+          await this.verify();
+        }
+        if (session.state.control.status !== 'running') break;
+        const planning = session.state.scheduling.planning;
+        if (planning !== null) await this.plan(planning);
+        if (this.#refresh) continue;
         const input = { ...session.state.decision, requestId: randomUUID() };
         const prepared = await prepareCandidates(
           input,
@@ -385,6 +558,10 @@ export class RunDriver<TCriteria extends JsonValue> {
           },
           this.control('candidates'),
         );
+        if (!session.canDispatch(input.decisionEpoch)) {
+          if (this.#refresh) continue;
+          break;
+        }
         if (prepared.outcome !== 'prepared') {
           if (session.state.control.status === 'running')
             await this.block(`candidates_${prepared.outcome}`);
@@ -394,6 +571,10 @@ export class RunDriver<TCriteria extends JsonValue> {
           prepared.prepared,
           this.control('checking'),
         );
+        if (!session.canDispatch(input.decisionEpoch)) {
+          if (this.#refresh) continue;
+          break;
+        }
         if (checked.outcome !== 'checked') {
           if (session.state.control.status === 'running')
             await this.block(`checking_${checked.outcome}`);
@@ -404,11 +585,45 @@ export class RunDriver<TCriteria extends JsonValue> {
           this.control('filtering'),
           this.options.candidateFilter,
         );
+        if (!session.canDispatch(input.decisionEpoch)) {
+          if (this.#refresh) continue;
+          break;
+        }
         if (filtered.outcome !== 'filtered') {
           if (session.state.control.status === 'running')
             await this.block(`filtering_${filtered.outcome}`);
           break;
         }
+        const basis = selectionBasis(
+          session.state.decision.context,
+          filtered.filtered.set,
+        );
+        await session.commit(session.state, [
+          session.event('candidates_processed', 'candidates_ready', {
+            requestId: input.requestId,
+            generation: parseJsonValue(prepared.prepared.report, 'generation'),
+            checking: parseJsonValue(checked.checked.report, 'checking'),
+            filtering: parseJsonValue(filtered.filtered.report, 'filtering'),
+            candidates: parseJsonValue(filtered.filtered.set, 'candidates'),
+          }),
+        ]);
+        if (!session.canDispatch(input.decisionEpoch)) continue;
+        const scheduling = session.state.scheduling;
+        if (
+          basis === scheduling.lastSelectionBasis &&
+          scheduling.selectionCause !== 'action_completed' &&
+          scheduling.selectionCause !== 'resumed'
+        ) {
+          await this.block('decision_basis_unchanged');
+          break;
+        }
+        await session.commit(session.state, [
+          session.event('selection_requested', scheduling.selectionCause, {
+            requestId: input.requestId,
+            decisionEpoch: input.decisionEpoch,
+          }),
+        ]);
+        if (!session.canDispatch(input.decisionEpoch)) continue;
         const selected = await selectCandidates(
           filtered.filtered,
           {
@@ -422,7 +637,60 @@ export class RunDriver<TCriteria extends JsonValue> {
           this.control('selection'),
           this.options.selectorCapacity,
         );
+        if (!session.canDispatch(input.decisionEpoch)) {
+          if (this.#refresh) continue;
+          break;
+        }
+        await session.commit(
+          {
+            ...session.state,
+            scheduling: {
+              ...session.state.scheduling,
+              lastSelectionBasis: basis,
+            },
+          },
+          [
+            session.event('selection_finished', selected.outcome, {
+              requestId: input.requestId,
+              ...(selected.outcome === 'selected' ||
+              selected.outcome === 'abstain'
+                ? { selection: parseJsonValue(selected.selection, 'selection') }
+                : {}),
+            }),
+          ],
+        );
+        if (!session.canDispatch(input.decisionEpoch)) continue;
         if (selected.outcome !== 'selected') {
+          if (
+            (selected.outcome === 'no_candidates' ||
+              selected.outcome === 'abstain') &&
+            session.state.scheduling.recoveryAttempts === 0
+          ) {
+            await session.commit(
+              {
+                ...session.state,
+                scheduling: {
+                  ...session.state.scheduling,
+                  recoveryAttempts: 1,
+                  selectionCause: 'remedy',
+                  planning: {
+                    kind: 'recoveryExhausted',
+                    goalRef:
+                      session.state.decision.context.graph.currentGoalRef,
+                    failures: 1,
+                  },
+                },
+              },
+              [
+                session.event('decision_remedy', selected.outcome, {
+                  requestId: input.requestId,
+                }),
+              ],
+            );
+            await this.observe();
+            await this.verify();
+            continue;
+          }
           if (session.state.control.status === 'running')
             await this.block(`selection_${selected.outcome}`);
           break;
@@ -430,9 +698,22 @@ export class RunDriver<TCriteria extends JsonValue> {
         const result = await this.execution.execute(selected);
         if (session.state.control.status !== 'running') break;
         if (result.outcome !== 'recorded') {
+          if (this.#refresh) continue;
           await this.block(result.reasonCode);
           break;
         }
+        await session.commit(
+          {
+            ...session.state,
+            scheduling: {
+              ...session.state.scheduling,
+              recoveryAttempts: 0,
+              selectionCause: 'action_completed',
+            },
+          },
+          [],
+        );
+        if (this.#refresh) continue;
         await this.verify();
       }
     } catch (error) {

@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { defineAction } from '#internal/action/registry';
 import type { ActionExecutionContext } from '#internal/contracts/action';
 import type { AgentOptions, StartRun } from '#internal/contracts/runtime';
+import type { ApplicationEvent } from '#internal/contracts/event';
 import type {
   CandidateProvider,
   Environment,
@@ -16,6 +17,31 @@ import {
 } from '#internal/candidate/__tests__/fixtures';
 import { MemoryRunStore } from '#internal/storage/memory';
 import { createAgent } from '../agent.js';
+
+export function applicationEvent(
+  overrides: Partial<ApplicationEvent> = {},
+): ApplicationEvent {
+  return {
+    kind: 'application',
+    eventId: 'event',
+    runId: 'run',
+    type: 'fixture_event',
+    source: { kind: 'application', id: 'fixture' },
+    observedAt: '2026-10-02T00:00:00.000Z',
+    reasonCode: 'facts_changed',
+    impact: 'candidates',
+    timing: 'immediate',
+    control: 'none',
+    currentGoalRef: null,
+    planRef: null,
+    goalPathRef: null,
+    executionId: null,
+    observationRef: null,
+    affectedGoalRefs: [],
+    details: {},
+    ...overrides,
+  };
+}
 
 export function runnerFixture(initial = 0, target = 2) {
   let count = initial;
