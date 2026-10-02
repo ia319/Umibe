@@ -232,9 +232,12 @@ function readActionIntent(value: JsonValue | undefined): ActionIntent {
   });
 }
 
-function readActionResult(value: JsonValue | undefined): ActionResult {
-  const path = '/data';
-  const object = requireObject(value, recordContext, path);
+export function readActionResult(
+  value: JsonValue | undefined,
+  context: FieldContext,
+  path: string,
+): ActionResult {
+  const object = requireObject(value, context, path);
   requireKeys(
     object,
     [
@@ -247,7 +250,7 @@ function readActionResult(value: JsonValue | undefined): ActionResult {
       'progress',
       'stopCauseEventId',
     ],
-    recordContext,
+    context,
     path,
   );
   const outcome = object.outcome;
@@ -258,23 +261,23 @@ function readActionResult(value: JsonValue | undefined): ActionResult {
     outcome !== 'unknown'
   ) {
     throw new ContractError(
-      recordContext.code,
-      recordContext.stage,
+      context.code,
+      context.stage,
       `${path}/outcome`,
       'invalid_action_outcome',
     );
   }
   if (typeof object.underlyingSettled !== 'boolean') {
     throw new ContractError(
-      recordContext.code,
-      recordContext.stage,
+      context.code,
+      context.stage,
       `${path}/underlyingSettled`,
       'expected_boolean',
     );
   }
   const unresolvedEffects = requireObject(
     object.unresolvedEffects,
-    recordContext,
+    context,
     `${path}/unresolvedEffects`,
   );
   const hasUnresolved = Object.keys(unresolvedEffects).length > 0;
@@ -283,8 +286,8 @@ function readActionResult(value: JsonValue | undefined): ActionResult {
     (outcome === 'unknown' && object.underlyingSettled && !hasUnresolved)
   ) {
     throw new ContractError(
-      recordContext.code,
-      recordContext.stage,
+      context.code,
+      context.stage,
       `${path}/outcome`,
       'inconsistent_action_result',
     );
@@ -292,26 +295,22 @@ function readActionResult(value: JsonValue | undefined): ActionResult {
   return Object.freeze({
     executionId: requireString(
       object.executionId,
-      recordContext,
+      context,
       `${path}/executionId`,
     ),
     outcome,
-    reasonCode: requireString(
-      object.reasonCode,
-      recordContext,
-      `${path}/reasonCode`,
-    ),
+    reasonCode: requireString(object.reasonCode, context, `${path}/reasonCode`),
     underlyingSettled: object.underlyingSettled,
     confirmedEffects: requireObject(
       object.confirmedEffects,
-      recordContext,
+      context,
       `${path}/confirmedEffects`,
     ),
     unresolvedEffects,
-    progress: requireObject(object.progress, recordContext, `${path}/progress`),
+    progress: requireObject(object.progress, context, `${path}/progress`),
     stopCauseEventId: readNullableString(
       object.stopCauseEventId,
-      recordContext,
+      context,
       `${path}/stopCauseEventId`,
     ),
   });
@@ -395,7 +394,7 @@ export function parseRunRecord(input: unknown): RunRecord {
       return Object.freeze({
         ...base,
         kind: 'actionResult',
-        data: readActionResult(object.data),
+        data: readActionResult(object.data, recordContext, '/data'),
       });
     case 'goalAssessment':
       return Object.freeze({

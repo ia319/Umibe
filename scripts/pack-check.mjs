@@ -138,7 +138,7 @@ try {
   writeFileSync(
     join(consumerRoot, 'consumer.mjs'),
     `import assert from 'node:assert/strict';
-import { ActionRegistry, defineAction, MemoryRunStore, parseJsonValue } from '@umibe/core';
+import { ActionRegistry, defineAction, MemoryRunStore, parseJsonValue, parseGoalGraph, parseObservation, prepareCandidates } from '@umibe/core';
 import { z } from 'zod';
 
 let defaultCalls = 0;
@@ -160,6 +160,38 @@ assert.equal(registry.capabilities[0].id, 'collect');
 await assert.rejects(registry.prepare({ actionId: 'collect', actionVersion: 2, params: {}, paramSources: {} }), {
   code: 'INVALID_ACTION_PARAMETERS', reason: 'action_version_mismatch',
 });
+
+const rootGoalRef = { id: 'root', version: 1 };
+const context = {
+  graph: parseGoalGraph({
+    runId: 'consumer-run', rootGoalRef, currentGoalRef: rootGoalRef,
+    goals: [{ ...rootGoalRef, runId: 'consumer-run', kind: 'root', description: 'Collect samples', criteria: { count: 2 }, lifecycle: 'inProgress', lastAssessment: null, parentGoalRef: null, acceptedPlanRef: null, hardConstraints: [], limits: {}, preferences: [] }],
+  }),
+  planRef: { id: 'plan', version: 1, rootGoalVersion: 1 }, planGuidance: 'Collect nearby samples',
+  observation: parseObservation({ runId: 'consumer-run', id: 'observation', revision: 1, observedAt: '2026-10-02T00:00:00.000Z', source: 'consumer', coverage: { scope: 'nearby', completeness: 'complete', uncheckedScopes: [] }, data: {} }),
+  constraintsVersion: 1, effectiveConstraints: { maxCount: 2 }, lastActionResult: null, recentEvents: [],
+};
+const generation = await prepareCandidates({ requestId: 'request', decisionEpoch: 1, context }, registry, {
+  generate(request) {
+    const current = request.context;
+    const observationRef = { id: current.observation.id, revision: current.observation.revision };
+    return Promise.resolve({
+      id: 'provider-set', runId: current.graph.runId, rootGoalRef: current.graph.rootGoalRef, currentGoalRef: current.graph.currentGoalRef,
+      goalPathRef: 'provider-path', goalPath: current.graph.goalPath, planRef: current.planRef, observationRef, constraintsVersion: current.constraintsVersion,
+      coverage: { generation: 'complete', checking: 'complete', uncheckedScopes: [], truncated: false, exclusions: [], informationGaps: [], capabilityGaps: [] },
+      candidates: [{ id: 'defaulted', params: {}, paramSources: {} }, { id: 'explicit', params: { count: 2 }, paramSources: { count: { kind: 'application', reference: 'consumer' } } }].map((proposal) => ({
+        ...proposal, candidateSetId: 'provider-set', actionId: 'collect', actionVersion: 1, description: 'Collect samples', expectedEffects: {}, cost: null, risk: null, source: 'consumer',
+        goalRef: current.graph.currentGoalRef, goalPathRef: 'provider-path', planRef: current.planRef, observationRef, constraintsVersion: current.constraintsVersion,
+      })),
+    });
+  },
+}, { signal: new AbortController().signal, deadlineAt: new Date(Date.now() + 30_000).toISOString() });
+assert.equal(generation.outcome, 'prepared');
+assert.equal(generation.prepared.set.candidates.length, 1);
+assert.equal(generation.prepared.report.merged, 1);
+assert.notEqual(generation.prepared.set.id, generation.prepared.providerSet.id);
+assert.equal(generation.prepared.set.candidates[0].params.count, 2);
+assert.ok(Object.isFrozen(generation.prepared.request.context.effectiveConstraints));
 
 const snapshot = parseJsonValue({ ready: true }, 'consumer');
 assert.equal(Object.getPrototypeOf(snapshot), null);
@@ -195,7 +227,7 @@ try {
 
   writeFileSync(
     join(consumerRoot, 'consumer.mts'),
-    `import { ActionRegistry, defineAction, MemoryRunStore, type PreparedAction, type RecordPage, type RunCommit } from '@umibe/core';
+    `import { ActionRegistry, defineAction, MemoryRunStore, prepareCandidates, type CandidateProvider, type CandidateGenerationInput, type CandidatePreparationResult, type PreparedAction, type RecordPage, type RunCommit } from '@umibe/core';
 import { z } from 'zod';
 
 const action = defineAction({
@@ -214,6 +246,19 @@ const action = defineAction({
 const registry = new ActionRegistry([action]);
 const prepared: Promise<PreparedAction> = registry.prepare({ actionId: 'collect', actionVersion: 1, params: {}, paramSources: {} });
 void prepared;
+
+declare const candidateInput: CandidateGenerationInput;
+declare const candidateProvider: CandidateProvider;
+const preparation: Promise<CandidatePreparationResult> = prepareCandidates(candidateInput, registry, candidateProvider, { signal: new AbortController().signal, deadlineAt: new Date().toISOString() });
+void preparation;
+declare const candidateResult: CandidatePreparationResult;
+if (candidateResult.outcome === 'prepared') {
+  // @ts-expect-error A preparation token does not expose action execution.
+  void candidateResult.prepared.execute;
+} else {
+  // @ts-expect-error An unsuccessful preparation has no eligible candidate set.
+  void candidateResult.prepared;
+}
 
 const input: RunCommit = {
   runId: 'consumer-run',
