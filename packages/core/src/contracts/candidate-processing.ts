@@ -58,8 +58,13 @@ export interface PreparedCandidates {
 export interface CandidateStageFailure {
   readonly outcome: 'failed' | 'cancelled' | 'deadlineExceeded';
   readonly stage:
-    'generation' | 'preparation' | 'checking' | 'filtering' | 'selection';
-  /** Provider candidate ID during preparation, normalized ID during checking. */
+    | 'generation'
+    | 'preparation'
+    | 'checking'
+    | 'filtering'
+    | 'selection'
+    | 'rechecking';
+  /** Provider ID during preparation, normalized ID during checking or rechecking. */
   readonly candidateId: string | null;
   readonly reason:
     'callback_failed' | 'invalid_result' | 'cancelled' | 'deadline_exceeded';
@@ -139,14 +144,17 @@ export type CandidateFilteringResult =
       readonly report: CandidateFilteringReport;
     });
 
+/** Rechecking requires this exact in-process result; copies do not retain the selected call. */
+export interface SelectedCandidate {
+  readonly outcome: 'selected';
+  readonly filtered: FilteredCandidates;
+  readonly selection: Extract<SelectionResult, { outcome: 'selected' }>;
+  readonly candidate: Candidate;
+}
+
 /** Selection reports a decision or a stopping condition; it never dispatches an action. */
 export type CandidateSelectionResult =
-  | {
-      readonly outcome: 'selected';
-      readonly filtered: FilteredCandidates;
-      readonly selection: Extract<SelectionResult, { outcome: 'selected' }>;
-      readonly candidate: Candidate;
-    }
+  | SelectedCandidate
   | {
       readonly outcome: 'abstain';
       readonly filtered: FilteredCandidates;
@@ -160,3 +168,41 @@ export type CandidateSelectionResult =
       readonly capacity: number;
     }
   | (CandidateStageFailure & { readonly filtered: FilteredCandidates });
+
+/** A new request ID may identify the recheck; decisionEpoch must still match the selection. */
+export type CandidateRecheckInput = Omit<CandidateRequest, 'capabilities'>;
+
+export type CandidateInvalidationReason =
+  | 'action_unavailable'
+  | 'action_version_changed'
+  | 'action_registration_changed'
+  | 'run_changed'
+  | 'decision_epoch_changed'
+  | 'root_goal_changed'
+  | 'current_goal_changed'
+  | 'goal_path_changed'
+  | 'inactive_goal_path'
+  | 'goal_definition_changed'
+  | 'plan_changed'
+  | 'constraints_changed'
+  | 'observation_regressed'
+  | 'observation_conflict';
+
+/** Original selection and captured recheck request remain separate; no outcome authorizes dispatch. */
+export type CandidateRecheckResult =
+  | {
+      readonly outcome: 'rechecked';
+      readonly selected: SelectedCandidate;
+      readonly request: CandidateRecheckInput;
+      readonly check: ActionCheck;
+    }
+  | {
+      readonly outcome: 'invalidated';
+      readonly selected: SelectedCandidate;
+      readonly request: CandidateRecheckInput;
+      readonly reason: CandidateInvalidationReason;
+    }
+  | (CandidateStageFailure & {
+      readonly selected: SelectedCandidate;
+      readonly request: CandidateRecheckInput;
+    });

@@ -3,6 +3,7 @@ import type {
   CheckedCandidates,
   FilteredCandidates,
   PreparedCandidates,
+  SelectedCandidate,
 } from '#internal/contracts/candidate-processing';
 import { ContractError } from '#internal/errors';
 
@@ -13,6 +14,29 @@ const preparedCalls = new WeakMap<
 
 const checkedCandidates = new WeakSet<CheckedCandidates>();
 const filteredCandidates = new WeakSet<FilteredCandidates>();
+const selectedCalls = new WeakMap<SelectedCandidate, PreparedAction>();
+
+export function registerSelectedCandidate(
+  data: SelectedCandidate,
+): SelectedCandidate {
+  const token = Object.freeze(data);
+  const calls = getPreparedCalls(data.filtered.checked.prepared);
+  selectedCalls.set(token, calls.get(data.candidate.id)!);
+  return token;
+}
+
+export function getSelectedCall(selected: SelectedCandidate): PreparedAction {
+  const call = selectedCalls.get(selected);
+  if (call === undefined) {
+    throw new ContractError(
+      'INVALID_CANDIDATE_REQUEST',
+      'candidate_rechecking',
+      '',
+      'unselected_candidate',
+    );
+  }
+  return call;
+}
 
 export function registerFilteredCandidates(
   data: FilteredCandidates,

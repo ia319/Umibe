@@ -13,7 +13,10 @@ import { requireInteger } from '#internal/validation/fields';
 import { parseSelection } from '#internal/validation/selection';
 import { captureControl, invokeControlled } from './control.js';
 import { candidateContractIssue, invocationFailure } from './diagnostics.js';
-import { assertFilteredCandidates } from './handles.js';
+import {
+  assertFilteredCandidates,
+  registerSelectedCandidate,
+} from './handles.js';
 
 /**
  * Select from an accepted filtered batch, including when it has just one member.
@@ -122,5 +125,7 @@ export async function selectCandidates(
       ...invocationFailure({ outcome: late }, 'selection', null),
       filtered,
     });
-  return accepted;
+  return accepted.outcome === 'selected'
+    ? registerSelectedCandidate(accepted)
+    : accepted;
 }

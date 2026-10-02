@@ -76,6 +76,7 @@ export { prepareCandidates } from '#internal/candidate/prepare';
 export { checkCandidates } from '#internal/candidate/check';
 export { filterCandidates } from '#internal/candidate/filter';
 export { selectCandidates } from '#internal/candidate/select';
+export { recheckCandidate } from '#internal/candidate/recheck';
 export type {
   CandidateFilterEntry,
   CandidateFilterResult,
@@ -88,6 +89,10 @@ export type {
   CandidateFilteringReport,
   CandidateFilteringResult,
   CandidateSelectionResult,
+  CandidateInvalidationReason,
+  CandidateRecheckInput,
+  CandidateRecheckResult,
+  SelectedCandidate,
   FilteredCandidates,
   CandidateCheckEntry,
   CandidateCheckingReport,

@@ -24,11 +24,10 @@ const context: FieldContext = {
   stage: 'candidate_request',
 };
 
-/** Validate the authoritative context and detach all request data before any await. */
-export function captureCandidateRequest(
-  input: CandidateGenerationInput,
-  capabilities: readonly ActionCapability[],
-): CandidateRequest {
+/** Validate and detach a request; each stage checks lifecycle and plan availability. */
+export function captureDecisionRequest(
+  input: Omit<CandidateRequest, 'capabilities'>,
+): Omit<CandidateRequest, 'capabilities'> {
   const object = requireObject(
     parseJsonValue(input, context.stage),
     context,
@@ -90,31 +89,14 @@ export function captureCandidateRequest(
       'goal_path_mismatch',
     );
   }
-  const activeIds = new Set(graph.goalPath.map((ref) => ref.id));
-  for (const [index, goal] of graph.goals.entries()) {
-    if (
-      activeIds.has(goal.id) &&
-      goal.lifecycle !== 'pending' &&
-      goal.lifecycle !== 'inProgress'
-    ) {
-      throw new ContractError(
-        context.code,
-        context.stage,
-        `/context/graph/goals/${index}/lifecycle`,
-        'inactive_goal_path',
-      );
-    }
-  }
-  if (raw.planRef === null) {
-    throw new ContractError(
-      context.code,
-      context.stage,
-      '/context/planRef',
-      'missing_plan',
-    );
-  }
-  const planRef = readPlanRef(raw.planRef, context, '/context/planRef');
-  if (planRef.rootGoalVersion !== graph.rootGoalRef.version) {
+  const planRef =
+    raw.planRef === null
+      ? null
+      : readPlanRef(raw.planRef, context, '/context/planRef');
+  if (
+    planRef !== null &&
+    planRef.rootGoalVersion !== graph.rootGoalRef.version
+  ) {
     throw new ContractError(
       context.code,
       context.stage,
@@ -159,7 +141,6 @@ export function captureCandidateRequest(
       context,
       '/decisionEpoch',
     ),
-    capabilities,
     context: Object.freeze({
       graph,
       planRef,
@@ -190,6 +171,39 @@ export function captureCandidateRequest(
       recentEvents: Object.freeze(recentEvents),
     }),
   });
+}
+
+/** Generation requires an accepted plan and an active root-to-current path. */
+export function captureCandidateRequest(
+  input: CandidateGenerationInput,
+  capabilities: readonly ActionCapability[],
+): CandidateRequest {
+  const request = captureDecisionRequest(input);
+  const current = request.context;
+  const activeIds = new Set(current.graph.goalPath.map((ref) => ref.id));
+  for (const [index, goal] of current.graph.goals.entries()) {
+    if (
+      activeIds.has(goal.id) &&
+      goal.lifecycle !== 'pending' &&
+      goal.lifecycle !== 'inProgress'
+    ) {
+      throw new ContractError(
+        context.code,
+        context.stage,
+        `/context/graph/goals/${index}/lifecycle`,
+        'inactive_goal_path',
+      );
+    }
+  }
+  if (current.planRef === null) {
+    throw new ContractError(
+      context.code,
+      context.stage,
+      '/context/planRef',
+      'missing_plan',
+    );
+  }
+  return Object.freeze({ ...request, capabilities });
 }
 
 /** Provider path labels are opaque; the full sequence must match the derived path. */

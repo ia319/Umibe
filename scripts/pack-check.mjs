@@ -138,7 +138,7 @@ try {
   writeFileSync(
     join(consumerRoot, 'consumer.mjs'),
     `import assert from 'node:assert/strict';
-import { ActionRegistry, defineAction, MemoryRunStore, parseJsonValue, parseGoalGraph, parseObservation, prepareCandidates, checkCandidates, filterCandidates, selectCandidates } from '@umibe/core';
+import { ActionRegistry, defineAction, MemoryRunStore, parseJsonValue, parseGoalGraph, parseObservation, prepareCandidates, checkCandidates, filterCandidates, selectCandidates, recheckCandidate } from '@umibe/core';
 import { z } from 'zod';
 
 let defaultCalls = 0;
@@ -218,6 +218,18 @@ assert.equal(selection.outcome, 'selected');
 assert.equal(selection.candidate.params, generation.prepared.set.candidates[0].params);
 assert.equal(checks, 1);
 assert.equal(defaultCalls, defaultsAfterPreparation);
+const recheck = await recheckCandidate(selection, {
+  requestId: 'recheck', decisionEpoch: 1, context: { ...context, observation: { ...context.observation, revision: 2 } },
+}, registry, { signal: new AbortController().signal, deadlineAt: new Date(Date.now() + 30_000).toISOString() });
+assert.equal(recheck.outcome, 'rechecked');
+assert.equal(recheck.check.outcome, 'allowed');
+assert.equal(recheck.selected, selection);
+assert.equal(recheck.request.context.observation.revision, 2);
+assert.equal(selection.candidate.observationRef.revision, 1);
+assert.equal(recheck.request.context.effectiveConstraints, generation.prepared.request.context.effectiveConstraints);
+assert.equal(checks, 2);
+assert.equal(defaultCalls, defaultsAfterPreparation);
+await assert.rejects(recheckCandidate({ ...selection }, { requestId: 'copied', decisionEpoch: 1, context }, registry, { signal: new AbortController().signal, deadlineAt: new Date(Date.now() + 30_000).toISOString() }), { reason: 'unselected_candidate' });
 await assert.rejects(checkCandidates({ ...generation.prepared }, { signal: new AbortController().signal, deadlineAt: new Date(Date.now() + 30_000).toISOString() }), { reason: 'unprepared_candidates' });
 
 const snapshot = parseJsonValue({ ready: true }, 'consumer');
@@ -254,7 +266,7 @@ try {
 
   writeFileSync(
     join(consumerRoot, 'consumer.mts'),
-    `import { ActionRegistry, defineAction, MemoryRunStore, prepareCandidates, checkCandidates, filterCandidates, selectCandidates, type CandidateProvider, type CandidateGenerationInput, type CandidatePreparationResult, type CandidateCheckingResult, type CandidateFilteringResult, type CandidateSelectionResult, type Selector, type PreparedAction, type RecordPage, type RunCommit } from '@umibe/core';
+    `import { ActionRegistry, defineAction, MemoryRunStore, prepareCandidates, checkCandidates, filterCandidates, selectCandidates, recheckCandidate, type CandidateProvider, type CandidateGenerationInput, type CandidatePreparationResult, type CandidateCheckingResult, type CandidateFilteringResult, type CandidateSelectionResult, type CandidateRecheckInput, type CandidateRecheckResult, type SelectedCandidate, type Selector, type PreparedAction, type RecordPage, type RunCommit } from '@umibe/core';
 import { z } from 'zod';
 
 const action = defineAction({
@@ -302,6 +314,10 @@ if (filteringResult.outcome === 'filtered') {
   const selection: Promise<CandidateSelectionResult> = selectCandidates(filteringResult.filtered, selector, { signal: new AbortController().signal, deadlineAt: new Date().toISOString() }, 5);
   void selection;
 }
+declare const selected: SelectedCandidate;
+declare const recheckInput: CandidateRecheckInput;
+const recheck: Promise<CandidateRecheckResult> = recheckCandidate(selected, recheckInput, registry, { signal: new AbortController().signal, deadlineAt: new Date().toISOString() });
+void recheck;
 
 const input: RunCommit = {
   runId: 'consumer-run',

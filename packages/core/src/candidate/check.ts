@@ -10,45 +10,10 @@ import type {
   CandidateCheckingResult,
   PreparedCandidates,
 } from '#internal/contracts/candidate-processing';
-import { ContractError } from '#internal/errors';
-import {
-  requireKeys,
-  requireObject,
-  requireString,
-} from '#internal/validation/fields';
-import { parseJsonValue } from '#internal/validation/json';
+import { parseActionCheck } from '#internal/validation/action-check';
 import { captureControl, invokeControlled } from './control.js';
 import { candidateContractIssue, invocationFailure } from './diagnostics.js';
 import { getPreparedCalls, registerCheckedCandidates } from './handles.js';
-
-function parseActionCheck(input: unknown): ActionCheck {
-  const context = {
-    code: 'INVALID_ACTION_CHECK',
-    stage: 'action_check',
-  } as const;
-  const object = requireObject(
-    parseJsonValue(input, context.stage),
-    context,
-    '',
-  );
-  if (object.outcome === 'allowed') {
-    requireKeys(object, ['outcome'], context, '');
-    return Object.freeze({ outcome: 'allowed' });
-  }
-  if (object.outcome === 'denied' || object.outcome === 'unknown') {
-    requireKeys(object, ['outcome', 'reason'], context, '');
-    return Object.freeze({
-      outcome: object.outcome,
-      reason: requireString(object.reason, context, '/reason'),
-    });
-  }
-  throw new ContractError(
-    context.code,
-    context.stage,
-    '/outcome',
-    'invalid_check_outcome',
-  );
-}
 
 /**
  * Check each distinct prepared call sequentially against its captured context.
