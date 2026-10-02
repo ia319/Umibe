@@ -46,6 +46,9 @@ export function captureDecisionRequest(
       'effectiveConstraints',
       'lastActionResult',
       'recentEvents',
+      ...(Object.hasOwn(raw, 'applicationContext')
+        ? ['applicationContext']
+        : []),
     ],
     context,
     '/context',
@@ -169,6 +172,15 @@ export function captureDecisionRequest(
               '/context/lastActionResult',
             ),
       recentEvents: Object.freeze(recentEvents),
+      ...(raw.applicationContext === undefined
+        ? {}
+        : {
+            applicationContext: requireObject(
+              raw.applicationContext,
+              context,
+              '/context/applicationContext',
+            ),
+          }),
     }),
   });
 }

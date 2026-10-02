@@ -138,7 +138,7 @@ try {
   writeFileSync(
     join(consumerRoot, 'consumer.mjs'),
     `import assert from 'node:assert/strict';
-import { ActionRegistry, defineAction, MemoryRunStore, parseJsonValue, parseGoalGraph, parseObservation, prepareCandidates, checkCandidates, filterCandidates, selectCandidates, recheckCandidate } from '@umibe/core';
+import { createAgent, ActionRegistry, defineAction, MemoryRunStore, parseJsonValue, parseGoalGraph, parseObservation, prepareCandidates, checkCandidates, filterCandidates, selectCandidates, recheckCandidate } from '@umibe/core';
 import { z } from 'zod';
 
 let defaultCalls = 0;
@@ -231,6 +231,34 @@ assert.equal(checks, 2);
 assert.equal(defaultCalls, defaultsAfterPreparation);
 await assert.rejects(recheckCandidate({ ...selection }, { requestId: 'copied', decisionEpoch: 1, context }, registry, { signal: new AbortController().signal, deadlineAt: new Date(Date.now() + 30_000).toISOString() }), { reason: 'unselected_candidate' });
 await assert.rejects(checkCandidates({ ...generation.prepared }, { signal: new AbortController().signal, deadlineAt: new Date(Date.now() + 30_000).toISOString() }), { reason: 'unprepared_candidates' });
+
+const agentStore = new MemoryRunStore();
+const agent = createAgent({
+  actions: [action], store: agentStore,
+  environment: { observe: () => Promise.resolve({ ...context.observation, runId: 'agent-consumer', data: { ready: { status: 'known', value: true } } }) },
+  planner: { plan: () => { throw new Error('Already satisfied goal must not plan'); } },
+  selector: { select: () => { throw new Error('Already satisfied goal must not select'); } },
+  candidateProvider: { generate: () => { throw new Error('Already satisfied goal must not generate'); } },
+  verifier: {
+    support: (criteria) => Promise.resolve({ outcome: 'supported', criteria, requiredEvidence: [] }),
+    verify: ({ goal, context }) => Promise.resolve({
+      goalRef: { id: goal.id, version: goal.version },
+      observationRef: { id: context.observation.id, revision: context.observation.revision },
+      outcome: 'passed', reason: null,
+      evidence: { source: 'application', observationPaths: ['/ready'], executionIds: [], details: {} },
+    }),
+  },
+});
+const handle = await agent.start({
+  runId: 'agent-consumer',
+  goal: { id: 'root', version: 1, description: 'Already satisfied', criteria: { ready: true }, hardConstraints: [], limits: {}, preferences: [] },
+  effectiveConstraints: {},
+});
+assert.equal((await handle.result).status, 'succeeded');
+assert.equal((await agent.inspect(handle.runId)).summary.status, 'succeeded');
+agent.close();
+assert.ok(await agentStore.readRun(handle.runId));
+await agentStore.close();
 
 const snapshot = parseJsonValue({ ready: true }, 'consumer');
 assert.equal(Object.getPrototypeOf(snapshot), null);

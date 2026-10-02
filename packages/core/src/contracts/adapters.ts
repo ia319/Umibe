@@ -26,6 +26,8 @@ export interface DecisionContext {
   readonly effectiveConstraints: JsonObject;
   readonly lastActionResult: ActionResult | null;
   readonly recentEvents: readonly ApplicationEvent[];
+  /** Application-supplied task context; separate from observed facts and hard constraints. */
+  readonly applicationContext?: JsonObject;
 }
 
 export interface ActionCapability {

@@ -43,6 +43,7 @@ export class RunSession {
   readonly runId: string;
   #state: SessionState;
   #checkpoint: RunCheckpoint | null = null;
+  #committedState: SessionState | null = null;
   #tail: Promise<void> = Promise.resolve();
   #pending = 0;
   #closed = false;
@@ -111,6 +112,10 @@ export class RunSession {
   }
   get checkpoint(): RunCheckpoint | null {
     return this.#checkpoint;
+  }
+  get committedState(): SessionState {
+    // create() returns only after the first checkpoint is acknowledged.
+    return this.#committedState!;
   }
   get signal(): AbortSignal {
     return this.#controller.signal;
@@ -281,6 +286,7 @@ export class RunSession {
           'store_conflict',
         );
       this.#checkpoint = result.checkpoint;
+      this.#committedState = state;
       for (const record of result.records) {
         for (const listener of [...this.#listeners]) {
           try {

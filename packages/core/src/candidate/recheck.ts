@@ -103,7 +103,9 @@ export function candidateInvalidationReason(
   if (
     current.constraintsVersion !== previous.constraintsVersion ||
     canonicalJson(current.effectiveConstraints) !==
-      canonicalJson(previous.effectiveConstraints)
+      canonicalJson(previous.effectiveConstraints) ||
+    canonicalJson(current.applicationContext ?? {}) !==
+      canonicalJson(previous.applicationContext ?? {})
   ) {
     return 'constraints_changed';
   }

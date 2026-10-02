@@ -133,3 +133,17 @@ export type {
 } from '#internal/storage/contracts';
 export { MemoryRunStore } from '#internal/storage/memory';
 export { StoreClosedError } from '#internal/storage/errors';
+export { createAgent } from '#internal/runtime/agent';
+export { ModelRequestError } from '#internal/runtime/model';
+export type { RuntimeLimits as RunLimits } from '#internal/runtime/limits';
+export type { RuntimeDiagnostic } from '#internal/runtime/session';
+export type {
+  Agent,
+  AgentOptions,
+  GoalDefinition,
+  ModelStage,
+  RunHandle,
+  RunInspection,
+  RunResult,
+  StartRun,
+} from '#internal/contracts/runtime';

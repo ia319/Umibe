@@ -13,7 +13,7 @@ export interface RuntimeLimits {
 }
 
 export function captureLimits(input: Partial<RuntimeLimits>): RuntimeLimits {
-  const limits = {
+  const defaults: RuntimeLimits = {
     maxModelAttempts: 200,
     modelTimeoutMs: 30_000,
     modelRetries: 2,
@@ -23,8 +23,16 @@ export function captureLimits(input: Partial<RuntimeLimits>): RuntimeLimits {
     actionTimeoutMs: 60_000,
     stopGraceMs: 5_000,
     actionRetries: 0,
-    ...input,
   };
+  for (const key of Object.keys(input))
+    if (!Object.hasOwn(defaults, key))
+      throw new ContractError(
+        'INVALID_RUN_CONTROL',
+        'runtime_limits',
+        `/${key}`,
+        'unknown_limit',
+      );
+  const limits = { ...defaults, ...input };
   for (const [key, value] of Object.entries(limits)) {
     if (
       !Number.isSafeInteger(value) ||
