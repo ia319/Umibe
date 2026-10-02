@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -16,6 +17,20 @@ import { fileURLToPath } from 'node:url';
 const repositoryRoot = fileURLToPath(new URL('../', import.meta.url));
 const packageRoot = join(repositoryRoot, 'packages/core');
 const compilerPath = fileURLToPath(import.meta.resolve('typescript/bin/tsc'));
+const coreManifest = /** @type {unknown} */ (
+  JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8'))
+);
+if (
+  typeof coreManifest !== 'object' ||
+  coreManifest === null ||
+  !('dependencies' in coreManifest) ||
+  typeof coreManifest.dependencies !== 'object' ||
+  coreManifest.dependencies === null ||
+  !('zod' in coreManifest.dependencies) ||
+  typeof coreManifest.dependencies.zod !== 'string'
+) {
+  throw new Error('The core package must declare its Zod dependency.');
+}
 const pnpmCli = process.env.npm_execpath;
 if (!pnpmCli) {
   throw new Error(
@@ -117,12 +132,105 @@ try {
     '--offline',
     '--ignore-scripts',
     tarball,
+    `zod@${coreManifest.dependencies.zod}`,
   ]);
 
   writeFileSync(
     join(consumerRoot, 'consumer.mjs'),
     `import assert from 'node:assert/strict';
-import { MemoryRunStore, parseJsonValue } from '@umibe/core';
+import { ActionRegistry, defineAction, MemoryRunStore, parseJsonValue, parseGoalGraph, parseObservation, prepareCandidates, checkCandidates, filterCandidates, selectCandidates, recheckCandidate } from '@umibe/core';
+import { z } from 'zod';
+
+let defaultCalls = 0;
+let checks = 0;
+const action = defineAction({
+  id: 'collect', version: 1, description: 'Collect samples', tags: ['samples'],
+  expectedEffects: {},
+  parameters: z.strictObject({ count: z.number().int().min(1).default(() => { defaultCalls += 1; return 2; }) }),
+  check: (_context, params) => {
+    checks += 1;
+    assert.equal(params.count, 2);
+    return Promise.resolve({ outcome: 'allowed' });
+  },
+  execute: () => { throw new Error('Package validation must not dispatch actions'); },
+});
+const registrationDefaults = defaultCalls;
+const registry = new ActionRegistry([action]);
+const prepared = await registry.prepare({ actionId: 'collect', actionVersion: 1, params: {}, paramSources: {} });
+assert.equal(defaultCalls - registrationDefaults, 1);
+assert.equal(prepared.call.params.count, 2);
+assert.equal(prepared.call.paramSources.count.kind, 'default');
+assert.ok(Object.isFrozen(prepared.call.params));
+assert.equal(registry.capabilities[0].id, 'collect');
+await assert.rejects(registry.prepare({ actionId: 'collect', actionVersion: 2, params: {}, paramSources: {} }), {
+  code: 'INVALID_ACTION_PARAMETERS', reason: 'action_version_mismatch',
+});
+
+const rootGoalRef = { id: 'root', version: 1 };
+const context = {
+  graph: parseGoalGraph({
+    runId: 'consumer-run', rootGoalRef, currentGoalRef: rootGoalRef,
+    goals: [{ ...rootGoalRef, runId: 'consumer-run', kind: 'root', description: 'Collect samples', criteria: { count: 2 }, lifecycle: 'inProgress', lastAssessment: null, parentGoalRef: null, acceptedPlanRef: null, hardConstraints: [], limits: {}, preferences: [] }],
+  }),
+  planRef: { id: 'plan', version: 1, rootGoalVersion: 1 }, planGuidance: 'Collect nearby samples',
+  observation: parseObservation({ runId: 'consumer-run', id: 'observation', revision: 1, observedAt: '2026-10-02T00:00:00.000Z', source: 'consumer', coverage: { scope: 'nearby', completeness: 'complete', uncheckedScopes: [] }, data: {} }),
+  constraintsVersion: 1, effectiveConstraints: { maxCount: 2 }, lastActionResult: null, recentEvents: [],
+};
+const generation = await prepareCandidates({ requestId: 'request', decisionEpoch: 1, context }, registry, {
+  generate(request) {
+    const current = request.context;
+    const observationRef = { id: current.observation.id, revision: current.observation.revision };
+    return Promise.resolve({
+      id: 'provider-set', runId: current.graph.runId, rootGoalRef: current.graph.rootGoalRef, currentGoalRef: current.graph.currentGoalRef,
+      goalPathRef: 'provider-path', goalPath: current.graph.goalPath, planRef: current.planRef, observationRef, constraintsVersion: current.constraintsVersion,
+      coverage: { generation: 'complete', checking: 'complete', uncheckedScopes: [], truncated: false, exclusions: [], informationGaps: [], capabilityGaps: [] },
+      candidates: [{ id: 'defaulted', params: {}, paramSources: {} }, { id: 'explicit', params: { count: 2 }, paramSources: { count: { kind: 'application', reference: 'consumer' } } }].map((proposal) => ({
+        ...proposal, candidateSetId: 'provider-set', actionId: 'collect', actionVersion: 1, description: 'Collect samples', expectedEffects: {}, cost: null, risk: null, source: 'consumer',
+        goalRef: current.graph.currentGoalRef, goalPathRef: 'provider-path', planRef: current.planRef, observationRef, constraintsVersion: current.constraintsVersion,
+      })),
+    });
+  },
+}, { signal: new AbortController().signal, deadlineAt: new Date(Date.now() + 30_000).toISOString() });
+assert.equal(generation.outcome, 'prepared');
+assert.equal(generation.prepared.set.candidates.length, 1);
+assert.equal(generation.prepared.report.merged, 1);
+assert.notEqual(generation.prepared.set.id, generation.prepared.providerSet.id);
+assert.equal(generation.prepared.set.candidates[0].params.count, 2);
+assert.ok(Object.isFrozen(generation.prepared.request.context.effectiveConstraints));
+assert.equal(checks, 0);
+const defaultsAfterPreparation = defaultCalls;
+const checking = await checkCandidates(generation.prepared, { signal: new AbortController().signal, deadlineAt: new Date(Date.now() + 30_000).toISOString() });
+assert.equal(checking.outcome, 'checked');
+assert.equal(checking.checked.report.allowed, 1);
+assert.equal(checking.checked.set.candidates[0].params, generation.prepared.set.candidates[0].params);
+assert.equal(checking.checked.set.coverage.checking, 'complete');
+assert.equal(checks, 1);
+assert.equal(defaultCalls, defaultsAfterPreparation);
+const filtering = await filterCandidates(checking.checked, { signal: new AbortController().signal, deadlineAt: new Date(Date.now() + 30_000).toISOString() });
+assert.equal(filtering.outcome, 'filtered');
+assert.equal(filtering.filtered.report.kept, 1);
+assert.notEqual(filtering.filtered.set.id, checking.checked.set.id);
+assert.equal(filtering.filtered.set.candidates[0].params, checking.checked.set.candidates[0].params);
+const selection = await selectCandidates(filtering.filtered, {
+  select: (request) => Promise.resolve({ outcome: 'selected', decisionId: 'consumer-decision', candidateSetId: request.candidates.id, candidateId: request.candidates.candidates[0].id }),
+}, { signal: new AbortController().signal, deadlineAt: new Date(Date.now() + 30_000).toISOString() }, 1);
+assert.equal(selection.outcome, 'selected');
+assert.equal(selection.candidate.params, generation.prepared.set.candidates[0].params);
+assert.equal(checks, 1);
+assert.equal(defaultCalls, defaultsAfterPreparation);
+const recheck = await recheckCandidate(selection, {
+  requestId: 'recheck', decisionEpoch: 1, context: { ...context, observation: { ...context.observation, revision: 2 } },
+}, registry, { signal: new AbortController().signal, deadlineAt: new Date(Date.now() + 30_000).toISOString() });
+assert.equal(recheck.outcome, 'rechecked');
+assert.equal(recheck.check.outcome, 'allowed');
+assert.equal(recheck.selected, selection);
+assert.equal(recheck.request.context.observation.revision, 2);
+assert.equal(selection.candidate.observationRef.revision, 1);
+assert.equal(recheck.request.context.effectiveConstraints, generation.prepared.request.context.effectiveConstraints);
+assert.equal(checks, 2);
+assert.equal(defaultCalls, defaultsAfterPreparation);
+await assert.rejects(recheckCandidate({ ...selection }, { requestId: 'copied', decisionEpoch: 1, context }, registry, { signal: new AbortController().signal, deadlineAt: new Date(Date.now() + 30_000).toISOString() }), { reason: 'unselected_candidate' });
+await assert.rejects(checkCandidates({ ...generation.prepared }, { signal: new AbortController().signal, deadlineAt: new Date(Date.now() + 30_000).toISOString() }), { reason: 'unprepared_candidates' });
 
 const snapshot = parseJsonValue({ ready: true }, 'consumer');
 assert.equal(Object.getPrototypeOf(snapshot), null);
@@ -158,7 +266,58 @@ try {
 
   writeFileSync(
     join(consumerRoot, 'consumer.mts'),
-    `import { MemoryRunStore, type RecordPage, type RunCommit } from '@umibe/core';
+    `import { ActionRegistry, defineAction, MemoryRunStore, prepareCandidates, checkCandidates, filterCandidates, selectCandidates, recheckCandidate, type CandidateProvider, type CandidateGenerationInput, type CandidatePreparationResult, type CandidateCheckingResult, type CandidateFilteringResult, type CandidateSelectionResult, type CandidateRecheckInput, type CandidateRecheckResult, type SelectedCandidate, type Selector, type PreparedAction, type RecordPage, type RunCommit } from '@umibe/core';
+import { z } from 'zod';
+
+const action = defineAction({
+  id: 'collect', version: 1, description: 'Collect samples', tags: [], expectedEffects: {},
+  parameters: z.object({ count: z.number().default(1), mode: z.enum(['scan', 'collect']).default('collect') }),
+  check(_context, params) {
+    const mode: 'scan' | 'collect' = params.mode;
+    const count: number = params.count;
+    // @ts-expect-error Parsed defaults retain their numeric output type.
+    const invalid: string = params.count;
+    void mode; void count; void invalid;
+    return Promise.resolve({ outcome: 'allowed' });
+  },
+  execute: () => { throw new Error('Type-only consumer'); },
+});
+const registry = new ActionRegistry([action]);
+const prepared: Promise<PreparedAction> = registry.prepare({ actionId: 'collect', actionVersion: 1, params: {}, paramSources: {} });
+void prepared;
+
+declare const candidateInput: CandidateGenerationInput;
+declare const candidateProvider: CandidateProvider;
+const preparation: Promise<CandidatePreparationResult> = prepareCandidates(candidateInput, registry, candidateProvider, { signal: new AbortController().signal, deadlineAt: new Date().toISOString() });
+void preparation;
+declare const candidateResult: CandidatePreparationResult;
+if (candidateResult.outcome === 'prepared') {
+  const checking: Promise<CandidateCheckingResult> = checkCandidates(candidateResult.prepared, { signal: new AbortController().signal, deadlineAt: new Date().toISOString() });
+  void checking;
+  // @ts-expect-error A preparation token does not expose action execution.
+  void candidateResult.prepared.execute;
+} else {
+  // @ts-expect-error An unsuccessful preparation has no eligible candidate set.
+  void candidateResult.prepared;
+}
+declare const checkingResult: CandidateCheckingResult;
+if (checkingResult.outcome !== 'checked') {
+  // @ts-expect-error Interrupted checks expose diagnostics without an allowed set.
+  void checkingResult.checked;
+} else {
+  const filtering: Promise<CandidateFilteringResult> = filterCandidates(checkingResult.checked, { signal: new AbortController().signal, deadlineAt: new Date().toISOString() });
+  void filtering;
+}
+declare const filteringResult: CandidateFilteringResult;
+declare const selector: Selector;
+if (filteringResult.outcome === 'filtered') {
+  const selection: Promise<CandidateSelectionResult> = selectCandidates(filteringResult.filtered, selector, { signal: new AbortController().signal, deadlineAt: new Date().toISOString() }, 5);
+  void selection;
+}
+declare const selected: SelectedCandidate;
+declare const recheckInput: CandidateRecheckInput;
+const recheck: Promise<CandidateRecheckResult> = recheckCandidate(selected, recheckInput, registry, { signal: new AbortController().signal, deadlineAt: new Date().toISOString() });
+void recheck;
 
 const input: RunCommit = {
   runId: 'consumer-run',

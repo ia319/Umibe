@@ -31,6 +31,8 @@ export type {
 export type { ProposalLimits } from '#internal/validation/planning';
 export { parsePlanProposal } from '#internal/validation/planning';
 export { describeActionParameters } from '#internal/action/describe';
+export { ActionRegistry, defineAction } from '#internal/action/registry';
+export type { RegisteredAction } from '#internal/action/registry';
 export type {
   ActionCapability,
   CallControl,
@@ -50,6 +52,9 @@ export type {
   ActionCheck,
   ActionDefinition,
   ActionExecutionContext,
+  FixedActionCall,
+  ParameterChange,
+  PreparedAction,
   Reconciliation,
 } from '#internal/contracts/action';
 export type {
@@ -67,6 +72,40 @@ export type {
 } from '#internal/contracts/candidate';
 export type { SelectionResult } from '#internal/contracts/selection';
 export { parseCandidateSet } from '#internal/validation/candidate';
+export { prepareCandidates } from '#internal/candidate/prepare';
+export { checkCandidates } from '#internal/candidate/check';
+export { filterCandidates } from '#internal/candidate/filter';
+export { selectCandidates } from '#internal/candidate/select';
+export { recheckCandidate } from '#internal/candidate/recheck';
+export type {
+  CandidateFilterEntry,
+  CandidateFilterResult,
+} from '#internal/contracts/candidate-filter';
+export type {
+  CandidateFilter,
+  CandidateFilterRequest,
+} from '#internal/contracts/adapters';
+export type {
+  CandidateFilteringReport,
+  CandidateFilteringResult,
+  CandidateSelectionResult,
+  CandidateInvalidationReason,
+  CandidateRecheckInput,
+  CandidateRecheckResult,
+  SelectedCandidate,
+  FilteredCandidates,
+  CandidateCheckEntry,
+  CandidateCheckingReport,
+  CandidateCheckingResult,
+  CandidateContractIssue,
+  CandidateGenerationInput,
+  CandidatePreparationEntry,
+  CandidatePreparationReport,
+  CandidatePreparationResult,
+  CandidateStageFailure,
+  CheckedCandidates,
+  PreparedCandidates,
+} from '#internal/contracts/candidate-processing';
 export { parseSelection } from '#internal/validation/selection';
 export type { ApplicationEvent } from '#internal/contracts/event';
 export { parseApplicationEvent } from '#internal/validation/event';

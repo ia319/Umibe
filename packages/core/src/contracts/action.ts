@@ -1,5 +1,6 @@
 import type * as z from 'zod';
 import type { CallControl, DecisionContext } from './adapters.js';
+import type { ParameterSource } from './candidate.js';
 import type { JsonObject } from './json.js';
 import type { ActionIntent, ActionResult } from './record.js';
 
@@ -26,7 +27,11 @@ export type Reconciliation =
     }
   | { readonly outcome: 'unknown'; readonly reason: string };
 
-/** The application owns domain checks and effects. P2 fixes parsed params once per candidate. */
+/**
+ * The application owns domain checks and effects. Keep schemas and defaults
+ * deterministic after registration. Registered check/execute callbacks receive
+ * deeply frozen parameters with null-prototype objects; treat them as read-only.
+ */
 export interface ActionDefinition<TSchema extends z.ZodObject> {
   readonly id: string;
   readonly version: number;
@@ -44,6 +49,43 @@ export interface ActionDefinition<TSchema extends z.ZodObject> {
     params: z.output<TSchema>,
     context: ActionExecutionContext,
   ): Promise<ActionResult>;
+  verifyResult?(
+    intent: ActionIntent,
+    result: ActionResult,
+    control: CallControl,
+  ): Promise<ActionResult>;
+  reconcile?(
+    intent: ActionIntent,
+    control: CallControl,
+  ): Promise<Reconciliation>;
+}
+
+/** JSON Pointer paths are relative to the parameter object, including nested changes. */
+export interface ParameterChange {
+  readonly kind: 'added' | 'removed' | 'changed';
+  readonly path: string;
+}
+
+/** Detached normalized data; preparing a call does not establish its current executability. */
+export interface FixedActionCall {
+  readonly actionId: string;
+  readonly actionVersion: number;
+  readonly params: JsonObject;
+  readonly paramSources: Readonly<Record<string, ParameterSource>>;
+  readonly parameterChanges: readonly ParameterChange[];
+}
+
+/**
+ * Binds callbacks to one frozen parameter snapshot without parsing again.
+ * These low-level calls do not enforce deadlines, check results, authorize execution,
+ * or persist intents. The caller owns those boundaries and supplies the decision context.
+ * Callback failures, including synchronous throws, reject the returned Promise.
+ */
+export interface PreparedAction {
+  readonly call: FixedActionCall;
+  readonly retryMode: 'never' | 'idempotent' | 'reconcile';
+  check(context: DecisionContext, control: CallControl): Promise<ActionCheck>;
+  execute(context: ActionExecutionContext): Promise<ActionResult>;
   verifyResult?(
     intent: ActionIntent,
     result: ActionResult,

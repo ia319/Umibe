@@ -23,7 +23,7 @@ export interface ParameterSource {
   readonly reference: string;
 }
 
-/** An immutable proposed call. P2 validates params against the registered action schema. */
+/** A proposed call; its registered action schema must normalize params before checking. */
 export interface Candidate {
   readonly id: string;
   readonly candidateSetId: string;
