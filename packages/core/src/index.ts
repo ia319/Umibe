@@ -73,13 +73,18 @@ export type {
 export type { SelectionResult } from '#internal/contracts/selection';
 export { parseCandidateSet } from '#internal/validation/candidate';
 export { prepareCandidates } from '#internal/candidate/prepare';
+export { checkCandidates } from '#internal/candidate/check';
 export type {
+  CandidateCheckEntry,
+  CandidateCheckingReport,
+  CandidateCheckingResult,
   CandidateContractIssue,
   CandidateGenerationInput,
   CandidatePreparationEntry,
   CandidatePreparationReport,
   CandidatePreparationResult,
   CandidateStageFailure,
+  CheckedCandidates,
   PreparedCandidates,
 } from '#internal/contracts/candidate-processing';
 export { parseSelection } from '#internal/validation/selection';

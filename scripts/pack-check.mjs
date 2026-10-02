@@ -138,15 +138,20 @@ try {
   writeFileSync(
     join(consumerRoot, 'consumer.mjs'),
     `import assert from 'node:assert/strict';
-import { ActionRegistry, defineAction, MemoryRunStore, parseJsonValue, parseGoalGraph, parseObservation, prepareCandidates } from '@umibe/core';
+import { ActionRegistry, defineAction, MemoryRunStore, parseJsonValue, parseGoalGraph, parseObservation, prepareCandidates, checkCandidates } from '@umibe/core';
 import { z } from 'zod';
 
 let defaultCalls = 0;
+let checks = 0;
 const action = defineAction({
   id: 'collect', version: 1, description: 'Collect samples', tags: ['samples'],
   expectedEffects: {},
   parameters: z.strictObject({ count: z.number().int().min(1).default(() => { defaultCalls += 1; return 2; }) }),
-  check: () => Promise.resolve({ outcome: 'allowed' }),
+  check: (_context, params) => {
+    checks += 1;
+    assert.equal(params.count, 2);
+    return Promise.resolve({ outcome: 'allowed' });
+  },
   execute: () => { throw new Error('Package validation must not dispatch actions'); },
 });
 const registrationDefaults = defaultCalls;
@@ -192,6 +197,16 @@ assert.equal(generation.prepared.report.merged, 1);
 assert.notEqual(generation.prepared.set.id, generation.prepared.providerSet.id);
 assert.equal(generation.prepared.set.candidates[0].params.count, 2);
 assert.ok(Object.isFrozen(generation.prepared.request.context.effectiveConstraints));
+assert.equal(checks, 0);
+const defaultsAfterPreparation = defaultCalls;
+const checking = await checkCandidates(generation.prepared, { signal: new AbortController().signal, deadlineAt: new Date(Date.now() + 30_000).toISOString() });
+assert.equal(checking.outcome, 'checked');
+assert.equal(checking.checked.report.allowed, 1);
+assert.equal(checking.checked.set.candidates[0].params, generation.prepared.set.candidates[0].params);
+assert.equal(checking.checked.set.coverage.checking, 'complete');
+assert.equal(checks, 1);
+assert.equal(defaultCalls, defaultsAfterPreparation);
+await assert.rejects(checkCandidates({ ...generation.prepared }, { signal: new AbortController().signal, deadlineAt: new Date(Date.now() + 30_000).toISOString() }), { reason: 'unprepared_candidates' });
 
 const snapshot = parseJsonValue({ ready: true }, 'consumer');
 assert.equal(Object.getPrototypeOf(snapshot), null);
@@ -227,7 +242,7 @@ try {
 
   writeFileSync(
     join(consumerRoot, 'consumer.mts'),
-    `import { ActionRegistry, defineAction, MemoryRunStore, prepareCandidates, type CandidateProvider, type CandidateGenerationInput, type CandidatePreparationResult, type PreparedAction, type RecordPage, type RunCommit } from '@umibe/core';
+    `import { ActionRegistry, defineAction, MemoryRunStore, prepareCandidates, checkCandidates, type CandidateProvider, type CandidateGenerationInput, type CandidatePreparationResult, type CandidateCheckingResult, type PreparedAction, type RecordPage, type RunCommit } from '@umibe/core';
 import { z } from 'zod';
 
 const action = defineAction({
@@ -253,11 +268,18 @@ const preparation: Promise<CandidatePreparationResult> = prepareCandidates(candi
 void preparation;
 declare const candidateResult: CandidatePreparationResult;
 if (candidateResult.outcome === 'prepared') {
+  const checking: Promise<CandidateCheckingResult> = checkCandidates(candidateResult.prepared, { signal: new AbortController().signal, deadlineAt: new Date().toISOString() });
+  void checking;
   // @ts-expect-error A preparation token does not expose action execution.
   void candidateResult.prepared.execute;
 } else {
   // @ts-expect-error An unsuccessful preparation has no eligible candidate set.
   void candidateResult.prepared;
+}
+declare const checkingResult: CandidateCheckingResult;
+if (checkingResult.outcome !== 'checked') {
+  // @ts-expect-error Interrupted checks expose diagnostics without an allowed set.
+  void checkingResult.checked;
 }
 
 const input: RunCommit = {

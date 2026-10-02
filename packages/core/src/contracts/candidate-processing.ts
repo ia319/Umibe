@@ -1,6 +1,6 @@
-import type { ParameterChange } from './action.js';
+import type { ActionCheck, ParameterChange } from './action.js';
 import type { CandidateRequest } from './adapters.js';
-import type { CandidateSet } from './candidate.js';
+import type { CandidateCoverage, CandidateSet } from './candidate.js';
 import type { ContractErrorCode } from '../errors.js';
 
 export type CandidateGenerationInput = Omit<CandidateRequest, 'capabilities'>;
@@ -65,4 +65,41 @@ export type CandidatePreparationResult =
       readonly request: CandidateRequest;
       readonly providerSet: CandidateSet | null;
       readonly report: CandidatePreparationReport;
+    });
+
+export interface CandidateCheckEntry {
+  /** Normalized call ID in the prepared set. */
+  readonly candidateId: string;
+  /** All original proposals represented by this distinct call. */
+  readonly providerCandidateIds: readonly string[];
+  readonly result: ActionCheck;
+}
+
+export interface CandidateCheckingReport {
+  /** Counts distinct prepared calls; preparation counts remain in prepared.report. */
+  readonly total: number;
+  readonly completed: number;
+  readonly allowed: number;
+  readonly denied: number;
+  readonly unknown: number;
+  /** Includes the interrupted or invalid check and calls not yet started. */
+  readonly remaining: number;
+  readonly entries: readonly CandidateCheckEntry[];
+  /** Retains provider gaps and identifies any incomplete core checking work. */
+  readonly coverage: CandidateCoverage;
+}
+
+/** Completed checks against the preparation context, without execution authority. */
+export interface CheckedCandidates {
+  readonly prepared: PreparedCandidates;
+  /** Only allowed calls, with the original normalized parameters and basis. */
+  readonly set: CandidateSet;
+  readonly report: CandidateCheckingReport;
+}
+
+export type CandidateCheckingResult =
+  | { readonly outcome: 'checked'; readonly checked: CheckedCandidates }
+  | (CandidateStageFailure & {
+      readonly prepared: PreparedCandidates;
+      readonly report: CandidateCheckingReport;
     });

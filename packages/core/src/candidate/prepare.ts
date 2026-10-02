@@ -11,53 +11,18 @@ import type {
   CandidateSet,
 } from '#internal/contracts/candidate';
 import type {
-  CandidateContractIssue,
   CandidateGenerationInput,
   CandidatePreparationEntry,
   CandidatePreparationReport,
   CandidatePreparationResult,
-  CandidateStageFailure,
 } from '#internal/contracts/candidate-processing';
 import { ContractError } from '#internal/errors';
 import { parseCandidateSet } from '#internal/validation/candidate';
 import { captureCandidateRequest, validateCandidateBasis } from './context.js';
 import { captureControl, invokeControlled } from './control.js';
-import type { InvocationResult } from './control.js';
+import { candidateContractIssue, invocationFailure } from './diagnostics.js';
 import { registerPreparedCandidates } from './handles.js';
 import { canonicalJson } from './identity.js';
-
-export function candidateContractIssue(
-  error: unknown,
-): CandidateContractIssue | null {
-  return error instanceof ContractError
-    ? Object.freeze({
-        code: error.code,
-        stage: error.stage,
-        path: error.path,
-        reason: error.reason,
-      })
-    : null;
-}
-
-/** Classify adapter failures independently of any error object supplied by the adapter. */
-export function invocationFailure(
-  result: Exclude<InvocationResult<unknown>, { outcome: 'returned' }>,
-  stage: CandidateStageFailure['stage'],
-  candidateId: string | null,
-): CandidateStageFailure {
-  return Object.freeze({
-    outcome: result.outcome,
-    stage,
-    candidateId,
-    reason:
-      result.outcome === 'failed'
-        ? 'callback_failed'
-        : result.outcome === 'cancelled'
-          ? 'cancelled'
-          : 'deadline_exceeded',
-    issue: null,
-  });
-}
 
 interface NormalizedProposal {
   readonly index: number;
