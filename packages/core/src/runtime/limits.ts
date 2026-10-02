@@ -6,6 +6,10 @@ export interface RuntimeLimits {
   readonly modelRetries: number;
   readonly callbackTimeoutMs: number;
   readonly verificationTimeoutMs: number;
+  readonly maxActionAttempts: number;
+  readonly actionTimeoutMs: number;
+  readonly stopGraceMs: number;
+  readonly actionRetries: number;
 }
 
 export function captureLimits(input: Partial<RuntimeLimits>): RuntimeLimits {
@@ -15,13 +19,19 @@ export function captureLimits(input: Partial<RuntimeLimits>): RuntimeLimits {
     modelRetries: 2,
     callbackTimeoutMs: 10_000,
     verificationTimeoutMs: 30_000,
+    maxActionAttempts: 100,
+    actionTimeoutMs: 60_000,
+    stopGraceMs: 5_000,
+    actionRetries: 0,
     ...input,
   };
   for (const [key, value] of Object.entries(limits)) {
     if (
       !Number.isSafeInteger(value) ||
-      value < (key === 'modelRetries' || key === 'maxModelAttempts' ? 0 : 1) ||
-      (key === 'modelRetries' && value > 2)
+      (key.endsWith('Ms') && value > 2_147_483_647) ||
+      value < (key.endsWith('Retries') || key.startsWith('max') ? 0 : 1) ||
+      (key === 'modelRetries' && value > 2) ||
+      (key === 'actionRetries' && value > 1)
     ) {
       throw new ContractError(
         'INVALID_RUN_CONTROL',

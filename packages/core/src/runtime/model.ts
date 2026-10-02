@@ -116,13 +116,19 @@ export async function invokeModel<T>(
         cause: { eventId: cause.eventId, reasonCode: 'model_budget_exhausted' },
       });
       await session.commit(session.state, [cause]);
-      await session.transition({
-        kind: 'stopSettled',
-        blocker: {
-          eventId: cause.eventId,
-          reasonCode: 'model_budget_exhausted',
-        },
-      });
+      if (
+        !session.hasExecution &&
+        (session.state.control.status === 'pausing' ||
+          session.state.control.status === 'cancelling')
+      ) {
+        await session.transition({
+          kind: 'stopSettled',
+          blocker: {
+            eventId: cause.eventId,
+            reasonCode: 'model_budget_exhausted',
+          },
+        });
+      }
       return { outcome: 'budgetExceeded' };
     }
     const details = { ...request, attempt };

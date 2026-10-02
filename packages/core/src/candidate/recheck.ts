@@ -18,7 +18,7 @@ import { candidateContractIssue, invocationFailure } from './diagnostics.js';
 import { getSelectedCall } from './handles.js';
 import { canonicalJson } from './identity.js';
 
-function invalidationReason(
+export function candidateInvalidationReason(
   selected: SelectedCandidate,
   request: CandidateRecheckInput,
   capabilities: readonly ActionCapability[],
@@ -151,7 +151,7 @@ export async function recheckCandidate(
   }
   const capabilities = registry.capabilities;
   const control = captureControl(controlInput);
-  const reason = invalidationReason(selected, captured, capabilities);
+  const reason = candidateInvalidationReason(selected, captured, capabilities);
   const stopped = control.signal.aborted
     ? 'cancelled'
     : Date.now() >= control.deadlineMs

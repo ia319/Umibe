@@ -11,12 +11,15 @@ import { createRunControl, transitionRun } from './state.js';
 import type { RunCommand, RunControlState } from './state.js';
 import { captureLimits } from './limits.js';
 import type { RuntimeLimits } from './limits.js';
+import type { ExecutionSnapshot } from './execution.js';
 
 export interface SessionState {
   readonly control: RunControlState;
   readonly decision: CandidateGenerationInput;
   readonly limits: RuntimeLimits;
   readonly modelAttempts: number;
+  readonly actionAttempts: number;
+  readonly execution: ExecutionSnapshot | null;
 }
 
 export interface RuntimeDiagnostic {
@@ -43,6 +46,7 @@ export class RunSession {
   #tail: Promise<void> = Promise.resolve();
   #pending = 0;
   #closed = false;
+  #executionOwned = false;
   #failure: ContractError | null = null;
   #controller = new AbortController();
   readonly #listeners = new Set<(record: RunRecord) => void>();
@@ -62,6 +66,8 @@ export class RunSession {
       decision,
       limits,
       modelAttempts: 0,
+      actionAttempts: 0,
+      execution: null,
     });
     this.beginInterval();
   }
@@ -116,9 +122,44 @@ export class RunSession {
     return this.#failure;
   }
 
+  get hasExecution(): boolean {
+    return this.#executionOwned;
+  }
+
+  /** Holds the run across preparation, dispatch and uncertain external effects. */
+  claimExecution(): () => void {
+    this.ensureOpen();
+    if (this.#executionOwned)
+      throw new ContractError(
+        validation.code,
+        validation.stage,
+        '/execution',
+        'execution_busy',
+      );
+    this.#executionOwned = true;
+    let released = false;
+    return () => {
+      if (!released) {
+        released = true;
+        this.#executionOwned = false;
+      }
+    };
+  }
+
   /** Resolves after commit; invalid commands reject without changing admitted state. */
   async transition(command: RunCommand): Promise<void> {
     this.ensureOpen();
+    if (
+      (command.kind === 'resume' || command.kind === 'succeed') &&
+      this.#executionOwned
+    ) {
+      throw new ContractError(
+        validation.code,
+        validation.stage,
+        '/execution',
+        'execution_unsettled',
+      );
+    }
     if (
       command.kind === 'resume' &&
       (this.#pending !== 0 || this.#checkpoint?.status !== 'paused')
@@ -129,6 +170,19 @@ export class RunSession {
         '/status',
         'pause_not_committed',
       );
+    }
+    if (command.kind === 'succeed') {
+      const observation = this.#state.decision.context.observation;
+      if (
+        command.observationRef.id !== observation.id ||
+        command.observationRef.revision !== observation.revision
+      )
+        throw new ContractError(
+          validation.code,
+          validation.stage,
+          '/observationRef',
+          'stale_assessment',
+        );
     }
     const control = transitionRun(this.#state.control, command);
     if (control === this.#state.control) return;
@@ -307,6 +361,7 @@ export class RunSession {
     if (this.#closed) return;
     if (
       this.#pending > 0 ||
+      this.#executionOwned ||
       (this.#failure === null &&
         ['running', 'pausing', 'cancelling'].includes(
           this.#state.control.status,
