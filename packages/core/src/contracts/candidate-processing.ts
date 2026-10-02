@@ -1,7 +1,12 @@
 import type { ActionCheck, ParameterChange } from './action.js';
 import type { CandidateRequest } from './adapters.js';
-import type { CandidateCoverage, CandidateSet } from './candidate.js';
+import type {
+  Candidate,
+  CandidateCoverage,
+  CandidateSet,
+} from './candidate.js';
 import type { CandidateFilterEntry } from './candidate-filter.js';
+import type { SelectionResult } from './selection.js';
 import type { ContractErrorCode } from '../errors.js';
 
 export type CandidateGenerationInput = Omit<CandidateRequest, 'capabilities'>;
@@ -52,7 +57,8 @@ export interface PreparedCandidates {
 
 export interface CandidateStageFailure {
   readonly outcome: 'failed' | 'cancelled' | 'deadlineExceeded';
-  readonly stage: 'generation' | 'preparation' | 'checking' | 'filtering';
+  readonly stage:
+    'generation' | 'preparation' | 'checking' | 'filtering' | 'selection';
   /** Provider candidate ID during preparation, normalized ID during checking. */
   readonly candidateId: string | null;
   readonly reason:
@@ -118,6 +124,7 @@ export interface CandidateFilteringReport {
   readonly entries: readonly CandidateFilterEntry[];
 }
 
+/** Selection requires this exact in-process token; copies lose its filter binding. */
 export interface FilteredCandidates {
   readonly checked: CheckedCandidates;
   /** A fresh set identity, with retained call IDs, parameters and decision basis. */
@@ -131,3 +138,25 @@ export type CandidateFilteringResult =
       readonly checked: CheckedCandidates;
       readonly report: CandidateFilteringReport;
     });
+
+/** Selection reports a decision or a stopping condition; it never dispatches an action. */
+export type CandidateSelectionResult =
+  | {
+      readonly outcome: 'selected';
+      readonly filtered: FilteredCandidates;
+      readonly selection: Extract<SelectionResult, { outcome: 'selected' }>;
+      readonly candidate: Candidate;
+    }
+  | {
+      readonly outcome: 'abstain';
+      readonly filtered: FilteredCandidates;
+      readonly selection: Extract<SelectionResult, { outcome: 'abstain' }>;
+    }
+  | { readonly outcome: 'no_candidates'; readonly filtered: FilteredCandidates }
+  | {
+      readonly outcome: 'candidate_limit';
+      readonly filtered: FilteredCandidates;
+      readonly count: number;
+      readonly capacity: number;
+    }
+  | (CandidateStageFailure & { readonly filtered: FilteredCandidates });

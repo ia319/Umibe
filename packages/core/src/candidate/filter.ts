@@ -19,7 +19,10 @@ import {
 import { isJsonArray, parseJsonValue } from '#internal/validation/json';
 import { captureControl, invokeControlled } from './control.js';
 import { candidateContractIssue, invocationFailure } from './diagnostics.js';
-import { assertCheckedCandidates } from './handles.js';
+import {
+  assertCheckedCandidates,
+  registerFilteredCandidates,
+} from './handles.js';
 
 function parseFilterEntries(
   input: unknown,
@@ -220,7 +223,7 @@ export async function filterCandidates(
   }
   return Object.freeze({
     outcome: 'filtered',
-    filtered: Object.freeze({
+    filtered: registerFilteredCandidates({
       checked,
       set,
       report: Object.freeze({

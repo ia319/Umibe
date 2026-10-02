@@ -1,6 +1,7 @@
 import type { PreparedAction } from '#internal/contracts/action';
 import type {
   CheckedCandidates,
+  FilteredCandidates,
   PreparedCandidates,
 } from '#internal/contracts/candidate-processing';
 import { ContractError } from '#internal/errors';
@@ -11,6 +12,26 @@ const preparedCalls = new WeakMap<
 >();
 
 const checkedCandidates = new WeakSet<CheckedCandidates>();
+const filteredCandidates = new WeakSet<FilteredCandidates>();
+
+export function registerFilteredCandidates(
+  data: FilteredCandidates,
+): FilteredCandidates {
+  const token = Object.freeze(data);
+  filteredCandidates.add(token);
+  return token;
+}
+
+export function assertFilteredCandidates(filtered: FilteredCandidates): void {
+  if (!filteredCandidates.has(filtered)) {
+    throw new ContractError(
+      'INVALID_CANDIDATE_REQUEST',
+      'candidate_selection',
+      '',
+      'unfiltered_candidates',
+    );
+  }
+}
 
 export function registerCheckedCandidates(
   data: CheckedCandidates,

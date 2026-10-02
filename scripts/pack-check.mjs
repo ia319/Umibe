@@ -138,7 +138,7 @@ try {
   writeFileSync(
     join(consumerRoot, 'consumer.mjs'),
     `import assert from 'node:assert/strict';
-import { ActionRegistry, defineAction, MemoryRunStore, parseJsonValue, parseGoalGraph, parseObservation, prepareCandidates, checkCandidates, filterCandidates } from '@umibe/core';
+import { ActionRegistry, defineAction, MemoryRunStore, parseJsonValue, parseGoalGraph, parseObservation, prepareCandidates, checkCandidates, filterCandidates, selectCandidates } from '@umibe/core';
 import { z } from 'zod';
 
 let defaultCalls = 0;
@@ -211,6 +211,13 @@ assert.equal(filtering.outcome, 'filtered');
 assert.equal(filtering.filtered.report.kept, 1);
 assert.notEqual(filtering.filtered.set.id, checking.checked.set.id);
 assert.equal(filtering.filtered.set.candidates[0].params, checking.checked.set.candidates[0].params);
+const selection = await selectCandidates(filtering.filtered, {
+  select: (request) => Promise.resolve({ outcome: 'selected', decisionId: 'consumer-decision', candidateSetId: request.candidates.id, candidateId: request.candidates.candidates[0].id }),
+}, { signal: new AbortController().signal, deadlineAt: new Date(Date.now() + 30_000).toISOString() }, 1);
+assert.equal(selection.outcome, 'selected');
+assert.equal(selection.candidate.params, generation.prepared.set.candidates[0].params);
+assert.equal(checks, 1);
+assert.equal(defaultCalls, defaultsAfterPreparation);
 await assert.rejects(checkCandidates({ ...generation.prepared }, { signal: new AbortController().signal, deadlineAt: new Date(Date.now() + 30_000).toISOString() }), { reason: 'unprepared_candidates' });
 
 const snapshot = parseJsonValue({ ready: true }, 'consumer');
@@ -247,7 +254,7 @@ try {
 
   writeFileSync(
     join(consumerRoot, 'consumer.mts'),
-    `import { ActionRegistry, defineAction, MemoryRunStore, prepareCandidates, checkCandidates, filterCandidates, type CandidateProvider, type CandidateGenerationInput, type CandidatePreparationResult, type CandidateCheckingResult, type CandidateFilteringResult, type PreparedAction, type RecordPage, type RunCommit } from '@umibe/core';
+    `import { ActionRegistry, defineAction, MemoryRunStore, prepareCandidates, checkCandidates, filterCandidates, selectCandidates, type CandidateProvider, type CandidateGenerationInput, type CandidatePreparationResult, type CandidateCheckingResult, type CandidateFilteringResult, type CandidateSelectionResult, type Selector, type PreparedAction, type RecordPage, type RunCommit } from '@umibe/core';
 import { z } from 'zod';
 
 const action = defineAction({
@@ -288,6 +295,12 @@ if (checkingResult.outcome !== 'checked') {
 } else {
   const filtering: Promise<CandidateFilteringResult> = filterCandidates(checkingResult.checked, { signal: new AbortController().signal, deadlineAt: new Date().toISOString() });
   void filtering;
+}
+declare const filteringResult: CandidateFilteringResult;
+declare const selector: Selector;
+if (filteringResult.outcome === 'filtered') {
+  const selection: Promise<CandidateSelectionResult> = selectCandidates(filteringResult.filtered, selector, { signal: new AbortController().signal, deadlineAt: new Date().toISOString() }, 5);
+  void selection;
 }
 
 const input: RunCommit = {

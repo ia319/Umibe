@@ -75,6 +75,7 @@ export { parseCandidateSet } from '#internal/validation/candidate';
 export { prepareCandidates } from '#internal/candidate/prepare';
 export { checkCandidates } from '#internal/candidate/check';
 export { filterCandidates } from '#internal/candidate/filter';
+export { selectCandidates } from '#internal/candidate/select';
 export type {
   CandidateFilterEntry,
   CandidateFilterResult,
@@ -86,6 +87,7 @@ export type {
 export type {
   CandidateFilteringReport,
   CandidateFilteringResult,
+  CandidateSelectionResult,
   FilteredCandidates,
   CandidateCheckEntry,
   CandidateCheckingReport,
