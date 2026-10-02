@@ -9,10 +9,14 @@ import { requireObject } from '#internal/validation/fields';
 import { parseJsonValue } from '#internal/validation/json';
 import { createRunControl, transitionRun } from './state.js';
 import type { RunCommand, RunControlState } from './state.js';
+import { captureLimits } from './limits.js';
+import type { RuntimeLimits } from './limits.js';
 
 export interface SessionState {
   readonly control: RunControlState;
   readonly decision: CandidateGenerationInput;
+  readonly limits: RuntimeLimits;
+  readonly modelAttempts: number;
 }
 
 export interface RuntimeDiagnostic {
@@ -50,11 +54,14 @@ export class RunSession {
     private readonly store: RunStore,
     decision: CandidateGenerationInput,
     private readonly diagnose: (diagnostic: RuntimeDiagnostic) => void,
+    limits: RuntimeLimits,
   ) {
     this.runId = decision.context.graph.runId;
     this.#state = Object.freeze({
       control: createRunControl(decision.context.graph.rootGoalRef),
       decision,
+      limits,
+      modelAttempts: 0,
     });
     this.beginInterval();
   }
@@ -63,8 +70,10 @@ export class RunSession {
     store: RunStore,
     input: CandidateGenerationInput,
     diagnose: (diagnostic: RuntimeDiagnostic) => void,
+    limits: Partial<RuntimeLimits> = {},
   ): Promise<RunSession> {
     const decision = captureDecisionRequest(input);
+    const capturedLimits = captureLimits(limits);
     const runId = decision.context.graph.runId;
     let owned = owners.get(store);
     if (owned === undefined) {
@@ -79,7 +88,7 @@ export class RunSession {
         'run_owned',
       );
     owned.add(runId);
-    const session = new RunSession(store, decision, diagnose);
+    const session = new RunSession(store, decision, diagnose, capturedLimits);
     try {
       await session.commit(session.state, [
         session.event('run_created', 'created', {}),
