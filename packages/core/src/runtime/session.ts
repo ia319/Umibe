@@ -13,6 +13,7 @@ import { captureLimits } from './limits.js';
 import type { RuntimeLimits } from './limits.js';
 import type { ExecutionSnapshot } from './execution.js';
 import type { SchedulingState } from './scheduling.js';
+import type { GoalState } from './goals.js';
 
 export interface SessionState {
   readonly control: RunControlState;
@@ -22,6 +23,7 @@ export interface SessionState {
   readonly actionAttempts: number;
   readonly execution: ExecutionSnapshot | null;
   readonly scheduling: SchedulingState;
+  readonly goals: GoalState;
 }
 
 export interface RuntimeDiagnostic {
@@ -76,6 +78,11 @@ export class RunSession {
       modelAttempts: 0,
       actionAttempts: 0,
       execution: null,
+      goals: {
+        created: decision.context.graph.goals.length - 1,
+        pending: [],
+        order: [],
+      },
       scheduling: {
         policyVersion: 1,
         planning: { kind: 'initial', assessment: 'notYet' },

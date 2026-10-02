@@ -29,6 +29,12 @@ import { ActionCoordinator } from './execution.js';
 import { invokeModel } from './model.js';
 import type { RunSession } from './session.js';
 import { selectionBasis } from './scheduling.js';
+import {
+  assertAssessmentEvidence,
+  focusGoal,
+  nextPlannedGoal,
+  preparePlan,
+} from './goals.js';
 
 const validation = { code: 'INVALID_RUN_CONTROL', stage: 'run_loop' } as const;
 class CallStopped extends Error {}
@@ -314,9 +320,7 @@ export class RunDriver<TCriteria extends JsonValue> {
     return result.value;
   }
 
-  private async support(goal: GoalRecord): Promise<void> {
-    const key = `${goal.id}:${goal.version}`;
-    if (this.#criteria.has(key)) return;
+  private async support(goal: GoalRecord): Promise<TCriteria> {
     const result = await this.call('support', (control) =>
       this.options.verifier.support(goal.criteria, control),
     );
@@ -351,7 +355,7 @@ export class RunDriver<TCriteria extends JsonValue> {
         'invalid_support',
       );
     // The verifier owns the decoded type; JSON capture preserves its structure and detaches ownership.
-    this.#criteria.set(key, raw.criteria as TCriteria);
+    return raw.criteria as TCriteria;
   }
 
   private async observe(): Promise<void> {
@@ -382,14 +386,12 @@ export class RunDriver<TCriteria extends JsonValue> {
     });
   }
 
-  private async verify(): Promise<GoalAssessment> {
+  private async verifyGoal(goal: GoalRecord): Promise<GoalAssessment> {
     const session = this.session;
     const context = session.state.decision.context;
-    const goal = context.graph.goals.find(
-      (goal) => goal.id === context.graph.currentGoalRef.id,
-    )!;
-    await this.support(goal);
-    const criteria = this.#criteria.get(`${goal.id}:${goal.version}`)!;
+    const key = `${goal.id}:${goal.version}`;
+    const criteria = this.#criteria.get(key) ?? (await this.support(goal));
+    this.#criteria.set(key, criteria);
     const result = await this.call('verification', (control) =>
       this.options.verifier.verify(
         {
@@ -419,6 +421,17 @@ export class RunDriver<TCriteria extends JsonValue> {
         '/assessment',
         'stale_assessment',
       );
+    assertAssessmentEvidence(assessment, context);
+    const closed = new Set<string>();
+    if (assessment.outcome === 'passed') {
+      closed.add(goal.id);
+      for (let size = -1; size !== closed.size;) {
+        size = closed.size;
+        for (const item of context.graph.goals)
+          if (item.kind === 'child' && closed.has(item.parentGoalRef.id))
+            closed.add(item.id);
+      }
+    }
     const graph = parseGoalGraph({
       runId: context.graph.runId,
       rootGoalRef: context.graph.rootGoalRef,
@@ -431,33 +444,110 @@ export class RunDriver<TCriteria extends JsonValue> {
               lifecycle:
                 assessment.outcome === 'passed' ? 'succeeded' : 'inProgress',
             }
-          : item,
+          : closed.has(item.id) &&
+              (item.lifecycle === 'pending' || item.lifecycle === 'inProgress')
+            ? { ...item, lifecycle: 'cancelled' }
+            : item,
       ),
     });
     const decision = {
       ...session.state.decision,
       context: { ...session.state.decision.context, graph },
     };
-    await session.commit({ ...session.state, decision }, [
+    const epoch = session.state.decision.decisionEpoch;
+    await session.commit(
       {
-        formatVersion: 1,
-        runId: session.runId,
-        eventId: randomUUID(),
-        kind: 'goalAssessment',
-        data: assessment,
+        ...session.state,
+        decision,
+        goals: {
+          ...session.state.goals,
+          order: session.state.goals.order.filter((ref) => !closed.has(ref.id)),
+        },
       },
-    ]);
+      [
+        {
+          formatVersion: 1,
+          runId: session.runId,
+          eventId: randomUUID(),
+          kind: 'goalAssessment',
+          data: assessment,
+        },
+      ],
+    );
+    if (!session.canDispatch(epoch)) throw new CallStopped();
     if (assessment.outcome === 'needsInput') {
       await this.block(assessment.reason);
       throw new CallStopped();
     }
-    if (assessment.outcome === 'passed')
+    if (assessment.outcome === 'passed' && goal.kind === 'root')
       await session.transition({
         kind: 'succeed',
         assessment,
         observationRef: assessment.observationRef,
       });
     return assessment;
+  }
+
+  private async verify(): Promise<void> {
+    const session = this.session;
+    const path = [...session.state.decision.context.graph.goalPath].reverse();
+    for (const ref of path) {
+      const goal = session.state.decision.context.graph.goals.find(
+        (item) => item.id === ref.id,
+      )!;
+      await this.verifyGoal(goal);
+      if (session.state.control.status !== 'running') return;
+    }
+    const graph = session.state.decision.context.graph;
+    const current = graph.goals.find(
+      (goal) => goal.id === graph.currentGoalRef.id,
+    )!;
+    if (current.lifecycle === 'pending' || current.lifecycle === 'inProgress')
+      return;
+    const planned = nextPlannedGoal(graph, session.state.goals.order);
+    const fallback = path
+      .map((ref) => graph.goals.find((goal) => goal.id === ref.id)!)
+      .find(
+        (goal) =>
+          goal.lifecycle === 'pending' || goal.lifecycle === 'inProgress',
+      )!;
+    const next = planned ?? { id: fallback.id, version: fallback.version };
+    const focused = focusGoal(graph, next);
+    const decision = captureDecisionRequest({
+      requestId: randomUUID(),
+      decisionEpoch: session.state.decision.decisionEpoch + 1,
+      context: { ...session.state.decision.context, graph: focused },
+    });
+    await session.commit(
+      {
+        ...session.state,
+        decision,
+        goals: {
+          ...session.state.goals,
+          order: session.state.goals.order.filter(
+            (ref) =>
+              !focused.goalPath.some((ancestor) => ancestor.id === ref.id),
+          ),
+        },
+        scheduling: {
+          ...session.state.scheduling,
+          planning:
+            planned === null
+              ? { kind: 'branchExhausted', goalRef: next }
+              : session.state.scheduling.planning,
+          lastSelectionBasis: null,
+          selectionCause: 'candidates_changed',
+        },
+      },
+      [
+        session.event(
+          'goal_advanced',
+          planned === null ? 'branch_exhausted' : 'accepted_order',
+          { nextGoalRef: { ...next } },
+        ),
+      ],
+    );
+    if (planned !== null) await this.verify();
   }
 
   private async plan(trigger: PlanningTrigger): Promise<void> {
@@ -467,6 +557,7 @@ export class RunDriver<TCriteria extends JsonValue> {
       requestId: randomUUID(),
       capabilities: this.registry.capabilities,
       trigger,
+      pendingGoals: session.state.goals.pending,
     });
     const proposal = parsePlanProposal(
       await this.call(
@@ -475,40 +566,72 @@ export class RunDriver<TCriteria extends JsonValue> {
         request.requestId,
       ),
       request,
-      { maxDepth: 1, maxNewGoals: 1, maxTotalGoals: 1 },
+      {
+        maxDepth: session.state.limits.maxGoalDepth + 1,
+        maxNewGoals: Math.max(1, session.state.limits.maxSubgoals),
+        maxTotalGoals: session.state.limits.maxSubgoals + 1,
+      },
     );
     if (proposal.outcome === 'blocked') {
       await this.block(proposal.reason);
       throw new CallStopped();
     }
     if (proposal.outcome === 'claimComplete') {
-      await this.observe();
-      const assessment = await this.verify();
-      if (assessment.outcome !== 'passed')
-        await this.block('completion_not_verified');
-      throw new CallStopped();
-    }
-    if (proposal.outcome !== 'continue')
-      throw new ContractError(
-        validation.code,
-        validation.stage,
-        '/proposal',
-        'invalid_goal_transition',
+      await session.commit(
+        {
+          ...session.state,
+          scheduling: { ...session.state.scheduling, planning: null },
+        },
+        [
+          session.event('completion_claimed', 'planner_claim', {
+            goalRef: { ...proposal.goalRef },
+          }),
+        ],
       );
+      await this.observe();
+      await this.verify();
+      if (
+        session.state.decision.context.graph.goals.find(
+          (goal) => goal.id === proposal.goalRef.id,
+        )?.lastAssessment?.outcome !== 'passed'
+      ) {
+        await this.block('completion_not_verified');
+        throw new CallStopped();
+      }
+      return;
+    }
     const current = session.state.decision.context;
     const planRef = Object.freeze({
       id: current.planRef?.id ?? randomUUID(),
       version: (current.planRef?.version ?? 0) + 1,
       rootGoalVersion: current.graph.rootGoalRef.version,
     });
-    await session.replaceDecision({
+    const prepared = preparePlan(
+      current.graph,
+      session.state.goals,
+      proposal,
+      planRef,
+      session.state.limits.maxSubgoals,
+    );
+    const supported = new Map<string, TCriteria>();
+    for (const goal of prepared.changed)
+      supported.set(`${goal.id}:${goal.version}`, await this.support(goal));
+    if (!session.canDispatch(request.decisionEpoch)) throw new CallStopped();
+    const decision = captureDecisionRequest({
       requestId: randomUUID(),
       decisionEpoch: session.state.decision.decisionEpoch + 1,
-      context: { ...current, planRef, planGuidance: proposal.guidance },
+      context: {
+        ...session.state.decision.context,
+        graph: prepared.graph,
+        planRef,
+        planGuidance: proposal.guidance,
+      },
     });
     await session.commit(
       {
         ...session.state,
+        decision,
+        goals: prepared.state,
         scheduling: {
           ...session.state.scheduling,
           planning:
@@ -525,6 +648,23 @@ export class RunDriver<TCriteria extends JsonValue> {
         }),
       ],
     );
+    for (const [key, criteria] of supported) this.#criteria.set(key, criteria);
+    const liveCriteria = new Set(
+      prepared.graph.goals
+        .filter(
+          (goal) =>
+            goal.lifecycle === 'pending' || goal.lifecycle === 'inProgress',
+        )
+        .map((goal) => `${goal.id}:${goal.version}`),
+    );
+    for (const key of this.#criteria.keys())
+      if (!liveCriteria.has(key)) this.#criteria.delete(key);
+    if (!session.canDispatch(decision.decisionEpoch)) throw new CallStopped();
+    if (
+      prepared.changed.length > 0 ||
+      current.graph.currentGoalRef.id !== prepared.graph.currentGoalRef.id
+    )
+      await this.verify();
   }
 
   private async run(): Promise<void> {
@@ -542,7 +682,12 @@ export class RunDriver<TCriteria extends JsonValue> {
         if (session.state.control.status !== 'running') break;
         const planning = session.state.scheduling.planning;
         if (planning !== null) await this.plan(planning);
-        if (this.#refresh) continue;
+        if (
+          this.#refresh ||
+          session.state.control.status !== 'running' ||
+          session.state.scheduling.planning !== null
+        )
+          continue;
         const input = { ...session.state.decision, requestId: randomUUID() };
         const prepared = await prepareCandidates(
           input,

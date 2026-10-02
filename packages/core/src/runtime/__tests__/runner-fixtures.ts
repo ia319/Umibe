@@ -11,6 +11,7 @@ import type {
   Selector,
   Verifier,
 } from '#internal/contracts/adapters';
+import type { PlannerRequest } from '#internal/contracts/adapters';
 import {
   candidateSet,
   generationInput,
@@ -40,6 +41,20 @@ export function applicationEvent(
     affectedGoalRefs: [],
     details: {},
     ...overrides,
+  };
+}
+
+export function proposalBasis(request: PlannerRequest) {
+  return {
+    requestId: request.requestId,
+    decisionEpoch: request.decisionEpoch,
+    rootGoalRef: request.context.graph.rootGoalRef,
+    currentGoalRef: request.context.graph.currentGoalRef,
+    planRef: request.context.planRef,
+    observationRef: {
+      id: request.context.observation.id,
+      revision: request.context.observation.revision,
+    },
   };
 }
 

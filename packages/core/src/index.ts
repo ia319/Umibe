@@ -25,6 +25,7 @@ export { parseGoalGraph } from '#internal/validation/goal';
 export type {
   PlanProposal,
   PlanningTrigger,
+  GoalRevision,
   ProposedGoal,
   ProposedParent,
 } from '#internal/contracts/planning';

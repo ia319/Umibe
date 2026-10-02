@@ -10,6 +10,10 @@ export interface RuntimeLimits {
   readonly actionTimeoutMs: number;
   readonly stopGraceMs: number;
   readonly actionRetries: number;
+  /** Root depth is zero. */
+  readonly maxGoalDepth: number;
+  /** Cumulative new child IDs, including closed and invalidated goals. */
+  readonly maxSubgoals: number;
 }
 
 export function captureLimits(input: Partial<RuntimeLimits>): RuntimeLimits {
@@ -23,6 +27,8 @@ export function captureLimits(input: Partial<RuntimeLimits>): RuntimeLimits {
     actionTimeoutMs: 60_000,
     stopGraceMs: 5_000,
     actionRetries: 0,
+    maxGoalDepth: 8,
+    maxSubgoals: 100,
   };
   for (const key of Object.keys(input))
     if (!Object.hasOwn(defaults, key))

@@ -1,6 +1,7 @@
 import type { PlannerRequest } from '#internal/contracts/adapters';
 import type {
   PlanProposal,
+  GoalRevision,
   ProposedGoal,
   ProposedParent,
 } from '#internal/contracts/planning';
@@ -16,6 +17,7 @@ import {
 import type { FieldContext } from './fields.js';
 import { isJsonArray, parseJsonValue } from './json.js';
 import { readGoalRef, readObservationRef, readPlanRef } from './references.js';
+import { reviseGoalGraph } from '#internal/goal/revisions';
 
 const context: FieldContext = {
   code: 'INVALID_PLAN_PROPOSAL',
@@ -202,14 +204,27 @@ export function parsePlanProposal(
     'planRef',
     'observationRef',
     'outcome',
+    ...(object.goalOrder === undefined ? [] : ['goalOrder']),
   ];
   const outcome = object.outcome;
+  if (
+    object.goalOrder !== undefined &&
+    (outcome === 'blocked' || outcome === 'claimComplete')
+  )
+    fail('/goalOrder', 'unexpected_field');
   if (outcome === 'continue' || outcome === 'switch') {
     requireKeys(object, [...common, 'nextGoalRef', 'guidance'], context, '');
   } else if (outcome === 'decompose') {
     requireKeys(
       object,
       [...common, 'goals', 'nextTempId', 'guidance'],
+      context,
+      '',
+    );
+  } else if (outcome === 'revise' || outcome === 'reconfirm') {
+    requireKeys(
+      object,
+      [...common, 'revisions', 'nextGoalRef', 'guidance'],
       context,
       '',
     );
@@ -273,6 +288,9 @@ export function parsePlanProposal(
       outcome,
       nextGoalRef,
       guidance: requireString(object.guidance, context, '/guidance'),
+      ...(object.goalOrder === undefined
+        ? {}
+        : { goalOrder: readGoalOrder(object.goalOrder, request) }),
     });
   }
   if (outcome === 'decompose') {
@@ -283,12 +301,95 @@ export function parsePlanProposal(
     if (!goals.some((goal) => goal.tempId === nextTempId)) {
       fail('/nextTempId', 'missing_next_goal');
     }
+    let goalOrder: readonly string[] | undefined;
+    if (object.goalOrder !== undefined) {
+      if (!isJsonArray(object.goalOrder)) fail('/goalOrder', 'expected_array');
+      goalOrder = Object.freeze(
+        object.goalOrder.map((value, index) =>
+          requireString(value, context, `/goalOrder/${index}`),
+        ),
+      );
+      if (
+        new Set(goalOrder).size !== goalOrder.length ||
+        goalOrder.some((id) => !goals.some((goal) => goal.tempId === id))
+      )
+        fail('/goalOrder', 'invalid_goal_order');
+    }
     return Object.freeze({
       ...basis,
       outcome,
       goals,
       nextTempId,
       guidance: requireString(object.guidance, context, '/guidance'),
+      ...(goalOrder === undefined ? {} : { goalOrder }),
+    });
+  }
+  if (outcome === 'revise' || outcome === 'reconfirm') {
+    if (!isJsonArray(object.revisions)) fail('/revisions', 'expected_array');
+    const revisions: readonly GoalRevision[] = Object.freeze(
+      object.revisions.map((value, index) => {
+        const path = `/revisions/${index}`;
+        const item = requireObject(value, context, path);
+        requireKeys(
+          item,
+          ['goalRef', 'parentGoalRef', 'description', 'criteria'],
+          context,
+          path,
+        );
+        if (item.criteria === null || item.criteria === undefined)
+          fail(`${path}/criteria`, 'missing_criteria');
+        return Object.freeze({
+          goalRef: readGoalRef(item.goalRef, context, `${path}/goalRef`),
+          parentGoalRef: readGoalRef(
+            item.parentGoalRef,
+            context,
+            `${path}/parentGoalRef`,
+          ),
+          description: requireString(
+            item.description,
+            context,
+            `${path}/description`,
+          ),
+          criteria: item.criteria,
+        });
+      }),
+    );
+    const nextGoalRef = readGoalRef(
+      object.nextGoalRef,
+      context,
+      '/nextGoalRef',
+    );
+    const revised = reviseGoalGraph(
+      graph,
+      request.pendingGoals ?? [],
+      revisions,
+      nextGoalRef,
+      {
+        id: request.context.planRef?.id ?? 'proposed',
+        version: (request.context.planRef?.version ?? 0) + 1,
+        rootGoalVersion: graph.rootGoalRef.version,
+      },
+      outcome,
+    );
+    for (const goal of revised.graph.goals) {
+      let cursor = goal;
+      let depth = 1;
+      while (cursor.kind === 'child') {
+        const parentId = cursor.parentGoalRef.id;
+        cursor = revised.graph.goals.find((item) => item.id === parentId)!;
+        depth++;
+      }
+      if (depth > limits.maxDepth) fail('/revisions', 'depth_limit');
+    }
+    return Object.freeze({
+      ...basis,
+      outcome,
+      revisions,
+      nextGoalRef,
+      guidance: requireString(object.guidance, context, '/guidance'),
+      ...(object.goalOrder === undefined
+        ? {}
+        : { goalOrder: readGoalOrder(object.goalOrder, request, revisions) }),
     });
   }
   if (outcome === 'blocked') {
@@ -303,4 +404,21 @@ export function parsePlanProposal(
     fail('/goalRef', 'completion_outside_current_path');
   }
   return Object.freeze({ ...basis, outcome: 'claimComplete', goalRef });
+}
+
+function readGoalOrder(
+  value: JsonValue,
+  request: PlannerRequest,
+  revisions: readonly GoalRevision[] = [],
+): readonly GoalRef[] {
+  if (!isJsonArray(value)) fail('/goalOrder', 'expected_array');
+  const refs = value.map((item, index) =>
+    readGoalRef(item, context, `/goalOrder/${index}`),
+  );
+  if (new Set(refs.map((ref) => ref.id)).size !== refs.length)
+    fail('/goalOrder', 'duplicate_goal_ref');
+  for (const ref of refs)
+    if (!revisions.some((revision) => sameGoalRef(revision.goalRef, ref)))
+      acceptedGoal(ref, request, '/goalOrder');
+  return Object.freeze(refs);
 }

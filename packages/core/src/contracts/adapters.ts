@@ -1,6 +1,11 @@
 import type { ActionResult } from './record.js';
 import type { ApplicationEvent } from './event.js';
-import type { GoalAssessment, GoalGraphSnapshot, GoalRecord } from './goal.js';
+import type {
+  ChildGoalRecord,
+  GoalAssessment,
+  GoalGraphSnapshot,
+  GoalRecord,
+} from './goal.js';
 import type { JsonObject, JsonValue } from './json.js';
 import type { Observation } from './observation.js';
 import type { PlanRef } from './references.js';
@@ -45,6 +50,8 @@ export interface PlannerRequest {
   readonly context: DecisionContext;
   readonly capabilities: readonly ActionCapability[];
   readonly trigger: PlanningTrigger;
+  /** Invalidated descendants retained for explicit revision or reconfirmation. */
+  readonly pendingGoals?: readonly ChildGoalRecord[];
 }
 
 /** The core validates and accepts a proposal; the planner never mutates accepted goals. */
