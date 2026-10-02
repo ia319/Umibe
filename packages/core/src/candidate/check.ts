@@ -19,7 +19,7 @@ import {
 import { parseJsonValue } from '#internal/validation/json';
 import { captureControl, invokeControlled } from './control.js';
 import { candidateContractIssue, invocationFailure } from './diagnostics.js';
-import { getPreparedCalls } from './handles.js';
+import { getPreparedCalls, registerCheckedCandidates } from './handles.js';
 
 function parseActionCheck(input: unknown): ActionCheck {
   const context = {
@@ -191,6 +191,6 @@ export async function checkCandidates(
   }
   return Object.freeze({
     outcome: 'checked',
-    checked: Object.freeze({ prepared, set, report }),
+    checked: registerCheckedCandidates({ prepared, set, report }),
   });
 }

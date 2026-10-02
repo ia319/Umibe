@@ -1,11 +1,35 @@
 import type { PreparedAction } from '#internal/contracts/action';
-import type { PreparedCandidates } from '#internal/contracts/candidate-processing';
+import type {
+  CheckedCandidates,
+  PreparedCandidates,
+} from '#internal/contracts/candidate-processing';
 import { ContractError } from '#internal/errors';
 
 const preparedCalls = new WeakMap<
   PreparedCandidates,
   ReadonlyMap<string, PreparedAction>
 >();
+
+const checkedCandidates = new WeakSet<CheckedCandidates>();
+
+export function registerCheckedCandidates(
+  data: CheckedCandidates,
+): CheckedCandidates {
+  const token = Object.freeze(data);
+  checkedCandidates.add(token);
+  return token;
+}
+
+export function assertCheckedCandidates(checked: CheckedCandidates): void {
+  if (!checkedCandidates.has(checked)) {
+    throw new ContractError(
+      'INVALID_CANDIDATE_REQUEST',
+      'candidate_filtering',
+      '',
+      'unchecked_candidates',
+    );
+  }
+}
 
 /** Attach implementations only to the exact immutable token created by preparation. */
 export function registerPreparedCandidates(

@@ -74,7 +74,19 @@ export type { SelectionResult } from '#internal/contracts/selection';
 export { parseCandidateSet } from '#internal/validation/candidate';
 export { prepareCandidates } from '#internal/candidate/prepare';
 export { checkCandidates } from '#internal/candidate/check';
+export { filterCandidates } from '#internal/candidate/filter';
 export type {
+  CandidateFilterEntry,
+  CandidateFilterResult,
+} from '#internal/contracts/candidate-filter';
+export type {
+  CandidateFilter,
+  CandidateFilterRequest,
+} from '#internal/contracts/adapters';
+export type {
+  CandidateFilteringReport,
+  CandidateFilteringResult,
+  FilteredCandidates,
   CandidateCheckEntry,
   CandidateCheckingReport,
   CandidateCheckingResult,

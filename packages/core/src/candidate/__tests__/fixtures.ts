@@ -10,6 +10,8 @@ import type { CandidateGenerationInput } from '#internal/contracts/candidate-pro
 import type { JsonValue } from '#internal/contracts/json';
 import { parseGoalGraph } from '#internal/validation/goal';
 import { parseObservation } from '#internal/validation/observation';
+import { prepareCandidates } from '../prepare.js';
+import { checkCandidates } from '../check.js';
 
 export function generationInput(
   rootVersion = 1,
@@ -193,4 +195,33 @@ export function actionRegistry(
       },
     }),
   ]);
+}
+
+export async function checkedBatch(
+  registry: ActionRegistry,
+  targets: readonly string[],
+) {
+  const preparation = await prepareCandidates(
+    generationInput(),
+    registry,
+    {
+      generate: (request) =>
+        Promise.resolve(
+          candidateSet(
+            request,
+            targets.map((target, index) => ({
+              id: `proposal-${index}`,
+              params: { target },
+            })),
+          ),
+        ),
+    },
+    callControl(),
+  );
+  if (preparation.outcome !== 'prepared')
+    throw new Error('Expected prepared fixture');
+  const checking = await checkCandidates(preparation.prepared, callControl());
+  if (checking.outcome !== 'checked')
+    throw new Error('Expected checked fixture');
+  return checking.checked;
 }

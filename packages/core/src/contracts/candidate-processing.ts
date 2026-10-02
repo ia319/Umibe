@@ -1,6 +1,7 @@
 import type { ActionCheck, ParameterChange } from './action.js';
 import type { CandidateRequest } from './adapters.js';
 import type { CandidateCoverage, CandidateSet } from './candidate.js';
+import type { CandidateFilterEntry } from './candidate-filter.js';
 import type { ContractErrorCode } from '../errors.js';
 
 export type CandidateGenerationInput = Omit<CandidateRequest, 'capabilities'>;
@@ -51,7 +52,7 @@ export interface PreparedCandidates {
 
 export interface CandidateStageFailure {
   readonly outcome: 'failed' | 'cancelled' | 'deadlineExceeded';
-  readonly stage: 'generation' | 'preparation' | 'checking';
+  readonly stage: 'generation' | 'preparation' | 'checking' | 'filtering';
   /** Provider candidate ID during preparation, normalized ID during checking. */
   readonly candidateId: string | null;
   readonly reason:
@@ -89,7 +90,10 @@ export interface CandidateCheckingReport {
   readonly coverage: CandidateCoverage;
 }
 
-/** Completed checks against the preparation context, without execution authority. */
+/**
+ * Completed checks against the preparation context, without execution authority.
+ * Filtering requires this exact in-process token; copies lose its check binding.
+ */
 export interface CheckedCandidates {
   readonly prepared: PreparedCandidates;
   /** Only allowed calls, with the original normalized parameters and basis. */
@@ -102,4 +106,28 @@ export type CandidateCheckingResult =
   | (CandidateStageFailure & {
       readonly prepared: PreparedCandidates;
       readonly report: CandidateCheckingReport;
+    });
+
+export interface CandidateFilteringReport {
+  readonly configured: boolean;
+  readonly before: number;
+  /** Null until the whole filter result is accepted. */
+  readonly kept: number | null;
+  readonly excluded: number | null;
+  /** Input order; empty when no filter is configured or no result is accepted. */
+  readonly entries: readonly CandidateFilterEntry[];
+}
+
+export interface FilteredCandidates {
+  readonly checked: CheckedCandidates;
+  /** A fresh set identity, with retained call IDs, parameters and decision basis. */
+  readonly set: CandidateSet;
+  readonly report: CandidateFilteringReport;
+}
+
+export type CandidateFilteringResult =
+  | { readonly outcome: 'filtered'; readonly filtered: FilteredCandidates }
+  | (CandidateStageFailure & {
+      readonly checked: CheckedCandidates;
+      readonly report: CandidateFilteringReport;
     });

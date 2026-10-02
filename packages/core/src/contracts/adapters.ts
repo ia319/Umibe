@@ -5,6 +5,7 @@ import type { JsonObject, JsonValue } from './json.js';
 import type { Observation } from './observation.js';
 import type { PlanRef } from './references.js';
 import type { CandidateSet } from './candidate.js';
+import type { CandidateFilterResult } from './candidate-filter.js';
 import type { SelectionResult } from './selection.js';
 import type { PlanProposal, PlanningTrigger } from './planning.js';
 
@@ -69,6 +70,18 @@ export interface SelectorRequest {
   readonly decisionEpoch: number;
   readonly context: DecisionContext;
   readonly candidates: CandidateSet;
+}
+
+export interface CandidateFilterRequest extends CandidateRequest {
+  readonly candidates: CandidateSet;
+}
+
+/** Return IDs and reasons for every input member; the core retains all call data. */
+export interface CandidateFilter {
+  filter(
+    request: CandidateFilterRequest,
+    control: CallControl,
+  ): Promise<CandidateFilterResult>;
 }
 
 export interface Selector {

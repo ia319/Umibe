@@ -138,7 +138,7 @@ try {
   writeFileSync(
     join(consumerRoot, 'consumer.mjs'),
     `import assert from 'node:assert/strict';
-import { ActionRegistry, defineAction, MemoryRunStore, parseJsonValue, parseGoalGraph, parseObservation, prepareCandidates, checkCandidates } from '@umibe/core';
+import { ActionRegistry, defineAction, MemoryRunStore, parseJsonValue, parseGoalGraph, parseObservation, prepareCandidates, checkCandidates, filterCandidates } from '@umibe/core';
 import { z } from 'zod';
 
 let defaultCalls = 0;
@@ -206,6 +206,11 @@ assert.equal(checking.checked.set.candidates[0].params, generation.prepared.set.
 assert.equal(checking.checked.set.coverage.checking, 'complete');
 assert.equal(checks, 1);
 assert.equal(defaultCalls, defaultsAfterPreparation);
+const filtering = await filterCandidates(checking.checked, { signal: new AbortController().signal, deadlineAt: new Date(Date.now() + 30_000).toISOString() });
+assert.equal(filtering.outcome, 'filtered');
+assert.equal(filtering.filtered.report.kept, 1);
+assert.notEqual(filtering.filtered.set.id, checking.checked.set.id);
+assert.equal(filtering.filtered.set.candidates[0].params, checking.checked.set.candidates[0].params);
 await assert.rejects(checkCandidates({ ...generation.prepared }, { signal: new AbortController().signal, deadlineAt: new Date(Date.now() + 30_000).toISOString() }), { reason: 'unprepared_candidates' });
 
 const snapshot = parseJsonValue({ ready: true }, 'consumer');
@@ -242,7 +247,7 @@ try {
 
   writeFileSync(
     join(consumerRoot, 'consumer.mts'),
-    `import { ActionRegistry, defineAction, MemoryRunStore, prepareCandidates, checkCandidates, type CandidateProvider, type CandidateGenerationInput, type CandidatePreparationResult, type CandidateCheckingResult, type PreparedAction, type RecordPage, type RunCommit } from '@umibe/core';
+    `import { ActionRegistry, defineAction, MemoryRunStore, prepareCandidates, checkCandidates, filterCandidates, type CandidateProvider, type CandidateGenerationInput, type CandidatePreparationResult, type CandidateCheckingResult, type CandidateFilteringResult, type PreparedAction, type RecordPage, type RunCommit } from '@umibe/core';
 import { z } from 'zod';
 
 const action = defineAction({
@@ -280,6 +285,9 @@ declare const checkingResult: CandidateCheckingResult;
 if (checkingResult.outcome !== 'checked') {
   // @ts-expect-error Interrupted checks expose diagnostics without an allowed set.
   void checkingResult.checked;
+} else {
+  const filtering: Promise<CandidateFilteringResult> = filterCandidates(checkingResult.checked, { signal: new AbortController().signal, deadlineAt: new Date().toISOString() });
+  void filtering;
 }
 
 const input: RunCommit = {
