@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { monitorEventLoopDelay } from 'node:perf_hooks';
+import type { IntervalHistogram } from 'node:perf_hooks';
 import type { ActionRegistry } from '#internal/action/registry';
 import type {
   AgentOptions,
@@ -62,6 +64,7 @@ export class RunDriver<TCriteria extends JsonValue> {
   #progressAttempt: { before: GoalGraphSnapshot; failed: boolean } | null =
     null;
   #resumeController: AbortController | null = null;
+  #loopDelay: IntervalHistogram | null = null;
 
   constructor(
     readonly session: RunSession,
@@ -76,13 +79,15 @@ export class RunDriver<TCriteria extends JsonValue> {
   }
 
   handle(): RunHandle {
-    const result = this.session.result.then((control) =>
-      Object.freeze({
+    const result = this.session.result.then(async (control) => {
+      const snapshot = Object.freeze({
         ...control,
         runId: this.session.runId,
         execution: this.session.committedState.execution,
-      }),
-    );
+      });
+      await this.#task;
+      return snapshot;
+    });
     void result.catch(() => undefined);
     return Object.freeze({ runId: this.session.runId, result });
   }
@@ -93,7 +98,11 @@ export class RunDriver<TCriteria extends JsonValue> {
 
   start(): void {
     if (this.#task !== null) return;
+    this.#loopDelay = monitorEventLoopDelay({ resolution: 20 });
+    this.#loopDelay.enable();
     this.#task = this.run().finally(() => {
+      this.#loopDelay?.disable();
+      this.#loopDelay = null;
       this.#task = null;
       if (
         this.#refresh &&
@@ -200,13 +209,15 @@ export class RunDriver<TCriteria extends JsonValue> {
         ),
       ],
     );
-    this.#events.set(event.eventId, { fingerprint, committed });
+    let controlCommit: Promise<void> | undefined;
+    const receipt = committed.then(() => controlCommit);
+    void receipt.catch(() => undefined);
+    this.#events.set(event.eventId, { fingerprint, committed: receipt });
     if (invalidates) {
       this.#refresh = true;
       this.#decisionController.abort();
       this.#decisionController = new AbortController();
     }
-    let controlCommit: Promise<void> | undefined;
     if (applicable && event.control !== 'none') {
       const cause = { eventId: event.eventId, reasonCode: event.reasonCode };
       if (event.control === 'pauseRun' || event.control === 'cancelRun') {
@@ -215,14 +226,14 @@ export class RunDriver<TCriteria extends JsonValue> {
           kind: event.control === 'pauseRun' ? 'pause' : 'cancel',
           cause,
         });
+        void controlCommit.catch(() => undefined);
       } else if (session.state.execution !== null)
         this.execution.interrupt(
           session.state.execution.intent.executionId,
           cause,
         );
     }
-    await committed;
-    await controlCommit;
+    await receipt;
     if (this.#task === null) {
       if (active && invalidates) this.start();
       else await this.settleStop();
@@ -363,6 +374,7 @@ export class RunDriver<TCriteria extends JsonValue> {
 
   private async call<T>(
     stage: CallbackStage,
+    input: unknown,
     invoke: (control: CallControl) => Promise<T>,
     requestId: string = randomUUID(),
   ): Promise<T> {
@@ -374,6 +386,7 @@ export class RunDriver<TCriteria extends JsonValue> {
       session.event('callback_started', stage, {
         requestId,
         decisionEpoch: epoch,
+        input: parseJsonValue(input, stage),
       }),
     ]);
     if (!session.canDispatch(epoch)) throw new CallStopped();
@@ -395,14 +408,23 @@ export class RunDriver<TCriteria extends JsonValue> {
           async (control) => ({ value: await invoke(control), usage: null }),
         )
       : await invokeControlled(captureControl(control), invoke);
-    if (!session.canDispatch(epoch)) throw new CallStopped();
+    if (session.failure !== null) throw new CallStopped();
+    const accepted = session.canDispatch(epoch);
+    const delay = this.#loopDelay;
+    const sampled = delay !== null && delay.count > 0;
     await session.commit(session.state, [
       session.event('callback_finished', stage, {
         requestId,
         decisionEpoch: epoch,
         outcome: result.outcome,
-        durationMs: Date.now() - startedAt,
-        ...(result.outcome === 'returned'
+        currentAtReceipt: accepted,
+        durationMs: Math.max(0, Date.now() - startedAt),
+        eventLoopDelay: {
+          samples: delay?.count ?? 0,
+          meanMs: sampled ? delay.mean / 1_000_000 : null,
+          maxMs: sampled ? delay.max / 1_000_000 : null,
+        },
+        ...(accepted && result.outcome === 'returned'
           ? { response: parseJsonValue(result.value, stage) }
           : {}),
       }),
@@ -416,7 +438,7 @@ export class RunDriver<TCriteria extends JsonValue> {
   }
 
   private async support(goal: GoalRecord): Promise<TCriteria> {
-    const result = await this.call('support', (control) =>
+    const result = await this.call('support', goal, (control) =>
       this.options.verifier.support(goal.criteria, control),
     );
     return this.decodeSupport(result);
@@ -463,7 +485,7 @@ export class RunDriver<TCriteria extends JsonValue> {
     const session = this.session;
     const context = session.state.decision.context;
     const observation = parseObservation(
-      await this.call('observation', (control) =>
+      await this.call('observation', context, (control) =>
         this.options.environment.observe(context, control),
       ),
     );
@@ -481,10 +503,24 @@ export class RunDriver<TCriteria extends JsonValue> {
         '/observation',
         'stale_observation',
       );
-    await session.replaceDecision({
-      ...session.state.decision,
-      context: { ...session.state.decision.context, observation },
-    });
+    const acceptedAt = Date.now();
+    await session.replaceDecision(
+      {
+        ...session.state.decision,
+        context: { ...session.state.decision.context, observation },
+      },
+      [
+        session.event('observation_accepted', 'run_observation', {
+          observationRef: {
+            id: observation.id,
+            revision: observation.revision,
+          },
+          observedAt: observation.observedAt,
+          acceptedAt: new Date(acceptedAt).toISOString(),
+          observationLagMs: acceptedAt - Date.parse(observation.observedAt),
+        }),
+      ],
+    );
   }
 
   private async verifyGoal(goal: GoalRecord): Promise<GoalAssessment> {
@@ -493,16 +529,14 @@ export class RunDriver<TCriteria extends JsonValue> {
     const key = `${goal.id}:${goal.version}`;
     const criteria = this.#criteria.get(key) ?? (await this.support(goal));
     this.#criteria.set(key, criteria);
-    const result = await this.call('verification', (control) =>
-      this.options.verifier.verify(
-        {
-          goal,
-          criteria,
-          context,
-          actionResults: session.state.recentResults,
-        },
-        control,
-      ),
+    const request = Object.freeze({
+      goal,
+      criteria,
+      context,
+      actionResults: session.state.recentResults,
+    });
+    const result = await this.call('verification', request, (control) =>
+      this.options.verifier.verify(request, control),
     );
     const assessment = readGoalAssessment(
       parseJsonValue(result, 'verification'),
@@ -586,6 +620,22 @@ export class RunDriver<TCriteria extends JsonValue> {
           kind: 'goalAssessment',
           data: assessment,
         },
+        ...(closed.size === 0
+          ? []
+          : [
+              session.event('goal_scope_closed', 'goal_passed', {
+                goalRef: { id: goal.id, version: goal.version },
+                cancelledGoalRefs: context.graph.goals
+                  .filter(
+                    (item) =>
+                      item.id !== goal.id &&
+                      closed.has(item.id) &&
+                      (item.lifecycle === 'pending' ||
+                        item.lifecycle === 'inProgress'),
+                  )
+                  .map((item) => ({ id: item.id, version: item.version })),
+              }),
+            ]),
       ],
     );
     if (!session.canDispatch(epoch)) throw new CallStopped();
@@ -743,6 +793,7 @@ export class RunDriver<TCriteria extends JsonValue> {
     const proposal = parsePlanProposal(
       await this.call(
         'planning',
+        request,
         (control) => this.options.planner.plan(request, control),
         request.requestId,
       ),
@@ -826,6 +877,9 @@ export class RunDriver<TCriteria extends JsonValue> {
           requestId: request.requestId,
           planRef: { ...planRef },
           proposal: parseJsonValue(proposal, 'planning'),
+          acceptedGoals: parseJsonValue(prepared.changed, 'planning'),
+          nextGoalRef: { ...prepared.graph.currentGoalRef },
+          goalOrder: prepared.state.order.map((ref) => ({ ...ref })),
         }),
       ],
     );
@@ -883,6 +937,7 @@ export class RunDriver<TCriteria extends JsonValue> {
             generate: (request) =>
               this.call(
                 'candidates',
+                request,
                 (control) =>
                   this.options.candidateProvider.generate(request, control),
                 request.requestId,
@@ -899,10 +954,12 @@ export class RunDriver<TCriteria extends JsonValue> {
             await this.block(`candidates_${prepared.outcome}`);
           break;
         }
+        const checkingStartedAt = Date.now();
         const checked = await checkCandidates(
           prepared.prepared,
           this.control('checking'),
         );
+        const checkingDurationMs = Math.max(0, Date.now() - checkingStartedAt);
         if (!session.canDispatch(input.decisionEpoch)) {
           if (this.#refresh) continue;
           break;
@@ -915,7 +972,18 @@ export class RunDriver<TCriteria extends JsonValue> {
         const filtered = await filterCandidates(
           checked.checked,
           this.control('filtering'),
-          this.options.candidateFilter,
+          this.options.candidateFilter === undefined
+            ? undefined
+            : {
+                filter: (request) =>
+                  this.call(
+                    'filtering',
+                    request,
+                    (control) =>
+                      this.options.candidateFilter!.filter(request, control),
+                    request.requestId,
+                  ),
+              },
         );
         if (!session.canDispatch(input.decisionEpoch)) {
           if (this.#refresh) continue;
@@ -935,6 +1003,7 @@ export class RunDriver<TCriteria extends JsonValue> {
             requestId: input.requestId,
             generation: parseJsonValue(prepared.prepared.report, 'generation'),
             checking: parseJsonValue(checked.checked.report, 'checking'),
+            checkingDurationMs,
             filtering: parseJsonValue(filtered.filtered.report, 'filtering'),
             candidates: parseJsonValue(filtered.filtered.set, 'candidates'),
           }),
@@ -962,6 +1031,7 @@ export class RunDriver<TCriteria extends JsonValue> {
             select: (request) =>
               this.call(
                 'selection',
+                request,
                 (control) => this.options.selector.select(request, control),
                 request.requestId,
               ),
@@ -1047,7 +1117,7 @@ export class RunDriver<TCriteria extends JsonValue> {
         );
         this.#progressAttempt = {
           before,
-          failed: result.result.outcome !== 'succeeded',
+          failed: result.result.outcome === 'failed',
         };
         if (this.#refresh) continue;
         await this.verify();

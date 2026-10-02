@@ -58,7 +58,7 @@ export function assessProgress(
       assessment?.outcome === 'passed' ||
       (value !== null
         ? highWater !== null && value > highWater
-        : stageProgress);
+        : highWater === null && stageProgress);
     const passed = assessment?.outcome === 'passed';
     progress.set(goal.id, {
       goalRef: { id: goal.id, version: goal.version },

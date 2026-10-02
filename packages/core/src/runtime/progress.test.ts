@@ -177,3 +177,52 @@ test('bounds result context while retaining complete queryable action history', 
       ),
   ).toBe(false);
 });
+
+test('does not replace a temporarily missing progress measure with sibling completions', async () => {
+  const h = runnerFixture(0, 10);
+  h.plan.mockImplementationOnce((request) =>
+    Promise.resolve({
+      ...proposalBasis(request),
+      outcome: 'decompose',
+      nextTempId: 'step-1',
+      guidance: 'Complete three stages',
+      goals: [1, 2, 3].map((count) => ({
+        tempId: `step-${count}`,
+        parent: {
+          kind: 'accepted',
+          goalRef: request.context.graph.rootGoalRef,
+        },
+        description: `Stage ${count}`,
+        criteria: { count },
+      })),
+    }),
+  );
+  const verify = h.verify.getMockImplementation()!;
+  h.verify.mockImplementation(async (...args) => {
+    const result = await verify(...args);
+    const fact = args[0].context.observation.data.count;
+    if (
+      args[0].goal.kind !== 'root' ||
+      fact?.status !== 'known' ||
+      typeof fact.value !== 'number' ||
+      fact.value > 1
+    )
+      return result;
+    return {
+      ...result,
+      progress: fact.value,
+      evidence: {
+        source: 'application' as const,
+        observationPaths: ['/count'],
+        executionIds: [],
+        details: {},
+      },
+    };
+  });
+  const agent = h.create();
+  await expect((await agent.start(h.input)).result).resolves.toMatchObject({
+    status: 'paused',
+    blocker: { reasonCode: 'no_progress' },
+  });
+  expect(h.execute).toHaveBeenCalledTimes(4);
+});

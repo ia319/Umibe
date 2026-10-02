@@ -7,6 +7,7 @@ import { ContractError } from '#internal/errors';
 import type { RunRecordDraft, RunStore } from '#internal/storage/contracts';
 import { requireObject } from '#internal/validation/fields';
 import { parseJsonValue } from '#internal/validation/json';
+import { parseGoalGraph } from '#internal/validation/goal';
 import { createRunControl, transitionRun } from './state.js';
 import type { RunCommand, RunControlState } from './state.js';
 import { captureLimits } from './limits.js';
@@ -225,14 +226,57 @@ export class RunSession {
       stopCause: control.stopCause === null ? null : { ...control.stopCause },
       blocker: control.blocker === null ? null : { ...control.blocker },
     });
-    const committed = this.commit({ ...this.#state, control }, [record]);
+    let state = { ...this.#state, control };
+    const closed =
+      control.status === 'cancelled'
+        ? state.decision.context.graph.goals.filter(
+            (goal) =>
+              goal.lifecycle === 'pending' || goal.lifecycle === 'inProgress',
+          )
+        : [];
+    if (closed.length > 0) {
+      const current = state.decision.context.graph;
+      const graph = parseGoalGraph({
+        runId: current.runId,
+        rootGoalRef: current.rootGoalRef,
+        currentGoalRef: current.currentGoalRef,
+        goals: current.goals.map((goal) =>
+          closed.includes(goal) ? { ...goal, lifecycle: 'cancelled' } : goal,
+        ),
+      });
+      state = {
+        ...state,
+        decision: {
+          ...state.decision,
+          context: { ...state.decision.context, graph },
+        },
+        goals: { ...state.goals, order: [] },
+        progress: [],
+      };
+    }
+    const committed = this.commit(state, [
+      record,
+      ...(closed.length === 0
+        ? []
+        : [
+            this.event('goal_scope_closed', 'run_cancelled', {
+              cancelledGoalRefs: closed.map((goal) => ({
+                id: goal.id,
+                version: goal.version,
+              })),
+            }),
+          ]),
+    ]);
     if (control.status !== 'running' && control.status !== 'created')
       this.#controller.abort();
     await committed;
   }
 
   /** Context owners must advance the epoch for semantic changes, never for sampling alone. */
-  async replaceDecision(input: CandidateGenerationInput): Promise<void> {
+  async replaceDecision(
+    input: CandidateGenerationInput,
+    records: readonly RunRecordDraft[] = [],
+  ): Promise<void> {
     const decision = captureDecisionRequest(input);
     if (
       decision.context.graph.runId !== this.runId ||
@@ -265,6 +309,7 @@ export class RunSession {
         this.event('context_accepted', 'context_updated', {
           decisionEpoch: decision.decisionEpoch,
         }),
+        ...records,
       ],
     );
   }
@@ -345,6 +390,19 @@ export class RunSession {
       validation,
       '/state',
     );
+    // Preserve execution identity while freezing nested policy state exposed to adapters.
+    const pendingObjects: object[] = [state];
+    const frozen = new Set<object>();
+    while (pendingObjects.length > 0) {
+      const value = pendingObjects.pop()!;
+      if (frozen.has(value)) continue;
+      frozen.add(value);
+      Object.freeze(value);
+      const children: unknown[] = Object.values(value);
+      for (const child of children)
+        if (child !== null && typeof child === 'object')
+          pendingObjects.push(child);
+    }
     this.#state = Object.freeze(state);
     this.#pending += 1;
     const pending = this.#tail.then(async () => {

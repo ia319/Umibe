@@ -412,6 +412,7 @@ export class ActionCoordinator {
   private async refreshObservation(epoch: number): Promise<string | null> {
     const session = this.session;
     const context = session.state.decision.context;
+    const startedAt = Date.now();
     const result = await invokeControlled(
       captureControl({
         signal: session.signal,
@@ -437,10 +438,25 @@ export class ActionCoordinator {
             canonicalJson(parseJsonValue(latest, validation.stage)))
       )
         throw new Error('Stale observation');
-      await session.replaceDecision({
-        ...session.state.decision,
-        context: { ...session.state.decision.context, observation },
-      });
+      const acceptedAt = Date.now();
+      await session.replaceDecision(
+        {
+          ...session.state.decision,
+          context: { ...session.state.decision.context, observation },
+        },
+        [
+          session.event('observation_accepted', 'execution_observation', {
+            observationRef: {
+              id: observation.id,
+              revision: observation.revision,
+            },
+            observedAt: observation.observedAt,
+            acceptedAt: new Date(acceptedAt).toISOString(),
+            observationLagMs: acceptedAt - Date.parse(observation.observedAt),
+            durationMs: Math.max(0, Date.now() - startedAt),
+          }),
+        ],
+      );
       return null;
     } catch (error) {
       if (session.failure !== null) throw error;

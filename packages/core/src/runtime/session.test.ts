@@ -42,7 +42,7 @@ test('admits cancellation while a commit is pending and publishes only committed
   await Promise.all([start, cancel]);
   await session.transition({ kind: 'stopSettled', blocker: null });
   await expect(session.result).resolves.toMatchObject({ status: 'cancelled' });
-  expect(seen).toEqual([2, 3, 4]);
+  expect(seen).toEqual([2, 3, 4, 5]);
   expect(session.checkpoint?.status).toBe('cancelled');
 });
 

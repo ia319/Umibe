@@ -151,6 +151,7 @@ export async function invokeModel<T>(
       ).toISOString(),
     });
     let dispatchCommit: Promise<void> | undefined;
+    const startedAt = Date.now();
     const result = await invokeControlled(control, (attemptControl) => {
       dispatchCommit = session.commit(session.state, [
         session.event('model_dispatched', 'request_dispatched', details),
@@ -192,7 +193,7 @@ export async function invokeModel<T>(
       session.event(
         'model_finished',
         invalidated ?? failure ?? result.outcome,
-        { ...details, usage },
+        { ...details, usage, durationMs: Math.max(0, Date.now() - startedAt) },
       ),
     ]);
     const afterCommit = interruption();
