@@ -159,10 +159,15 @@ export function createAgent<TCriteria extends JsonValue>(
         options.onDiagnostic ?? (() => undefined),
         identity,
       );
-      const driver = new RunDriver(session, registry, options);
-      runs.set(runId, driver);
-      subscribeEnvironment(session);
-      return driver;
+      try {
+        const driver = new RunDriver(session, registry, options);
+        runs.set(runId, driver);
+        subscribeEnvironment(session);
+        return driver;
+      } catch (error) {
+        await session.close();
+        throw error;
+      }
     } finally {
       starting.delete(runId);
     }
@@ -317,8 +322,9 @@ export function createAgent<TCriteria extends JsonValue>(
       if (
         starting.size !== 0 ||
         [...runs.values()].some(
-          ({ session, restoring }) =>
+          ({ session, restoring, hasPendingEvents }) =>
             restoring ||
+            hasPendingEvents ||
             session.hasExecution ||
             session.hasPendingCommits ||
             (session.failure === null &&

@@ -112,7 +112,11 @@ export interface Agent {
   reconcile(runId: string): Promise<Reconciliation>;
   pause(runId: string, reasonCode: string): Promise<void>;
   cancel(runId: string, reasonCode: string): Promise<void>;
-  /** Commit a domain event; duplicate IDs are idempotent only for identical content. */
+  /**
+   * Check persisted IDs before admitting a domain event. Identical duplicates
+   * have no effect; conflicting content rejects. Commit accepted controls with
+   * the event and its scheduling changes in the same transaction.
+   */
   emit(event: ApplicationEvent): Promise<void>;
   /** Read the committed checkpoint without changing execution or acquiring a run. */
   inspect(runId: string): Promise<RunInspection | null>;

@@ -283,9 +283,26 @@ export class RunSession {
             })
           : null;
       const unresolved = unknown !== null || execution?.phase === 'unknown';
+      const records: RunRecordDraft[] = [record];
+      for (const request of state.pendingModels)
+        records.push(
+          session.event('model_interrupted', 'process_interrupted', {
+            ...request,
+            usage: null,
+          }),
+        );
+      if (unknown !== null)
+        records.push({
+          formatVersion: 1,
+          runId,
+          eventId: randomUUID(),
+          kind: 'actionResult',
+          data: unknown,
+        });
       await session.commit(
         {
           ...state,
+          pendingModels: [],
           control: {
             ...state.control,
             status: ['created', 'running', 'pausing'].includes(
@@ -317,20 +334,7 @@ export class RunSession {
               ? state.recentResults
               : [...state.recentResults, unknown].slice(-50),
         },
-        [
-          record,
-          ...(unknown === null
-            ? []
-            : [
-                {
-                  formatVersion: 1 as const,
-                  runId,
-                  eventId: randomUUID(),
-                  kind: 'actionResult' as const,
-                  data: unknown,
-                },
-              ]),
-        ],
+        records,
       );
       if (
         session.state.control.status === 'pausing' ||
@@ -404,8 +408,12 @@ export class RunSession {
     };
   }
 
-  /** Resolves after commit; invalid commands reject without changing admitted state. */
-  async transition(command: RunCommand): Promise<void> {
+  /** Atomically admit control with its cause records and any accompanying context. */
+  async transition(
+    command: RunCommand,
+    records: readonly RunRecordDraft[] = [],
+    input: SessionState = this.#state,
+  ): Promise<void> {
     this.ensureOpen();
     if (
       (command.kind === 'resume' || command.kind === 'succeed') &&
@@ -430,7 +438,7 @@ export class RunSession {
       );
     }
     if (command.kind === 'succeed') {
-      const observation = this.#state.decision.context.observation;
+      const observation = input.decision.context.observation;
       if (
         command.observationRef.id !== observation.id ||
         command.observationRef.revision !== observation.revision
@@ -442,24 +450,28 @@ export class RunSession {
           'stale_assessment',
         );
     }
-    const control = transitionRun(this.#state.control, command);
-    if (control === this.#state.control) return;
+    const control = transitionRun(input.control, command);
+    if (control === input.control) {
+      if (records.length > 0 || input !== this.#state)
+        await this.commit(input, records);
+      return;
+    }
     if (command.kind === 'resume') this.beginInterval();
     const record = this.event('run_transition', command.kind, {
-      previous: this.#state.control.status,
+      previous: input.control.status,
       status: control.status,
       stopCause: control.stopCause === null ? null : { ...control.stopCause },
       blocker: control.blocker === null ? null : { ...control.blocker },
     });
     let state = {
-      ...this.#state,
+      ...input,
       control,
       progressAttempt:
         control.status === 'succeeded' ||
         control.status === 'cancelled' ||
         control.status === 'failed'
           ? null
-          : this.#state.progressAttempt,
+          : input.progressAttempt,
     };
     const closed =
       control.status === 'cancelled'
@@ -489,6 +501,7 @@ export class RunSession {
       };
     }
     const committed = this.commit(state, [
+      ...records,
       record,
       ...(closed.length === 0
         ? []

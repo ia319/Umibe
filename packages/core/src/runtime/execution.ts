@@ -775,7 +775,14 @@ export class ActionCoordinator {
               ...current,
               phase: result.outcome,
               result,
-              reconciliation,
+              // A confirmed unsent reservation refunds this retry, not the
+              // ancestry of the original uncertain execution.
+              retries:
+                unsent && current.retries > 0
+                  ? current.retries - 1
+                  : current.retries,
+              reconciliation:
+                unsent && current.retries > 0 ? 'notPerformed' : reconciliation,
             })
           : current,
         decision: matches
@@ -804,11 +811,13 @@ export class ActionCoordinator {
     const session = this.session;
     if (session.state.control.status !== 'running') return;
     const record = session.event('run_blocked', reasonCode, {});
-    await session.transition({
-      kind: 'pause',
-      cause: { eventId: record.eventId, reasonCode },
-    });
-    await session.commit(session.state, [record]);
+    await session.transition(
+      {
+        kind: 'pause',
+        cause: { eventId: record.eventId, reasonCode },
+      },
+      [record],
+    );
   }
 
   private async settleStop(result: ActionResult | null): Promise<void> {

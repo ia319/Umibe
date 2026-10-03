@@ -111,11 +111,16 @@ export async function invokeModel<T>(
         'model_budget_exhausted',
         { ...request },
       );
-      await session.transition({
-        kind: 'pause',
-        cause: { eventId: cause.eventId, reasonCode: 'model_budget_exhausted' },
-      });
-      await session.commit(session.state, [cause]);
+      await session.transition(
+        {
+          kind: 'pause',
+          cause: {
+            eventId: cause.eventId,
+            reasonCode: 'model_budget_exhausted',
+          },
+        },
+        [cause],
+      );
       if (
         !session.hasExecution &&
         (session.state.control.status === 'pausing' ||

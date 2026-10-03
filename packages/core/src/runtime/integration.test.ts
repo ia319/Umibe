@@ -179,7 +179,7 @@ test('freezes nested runtime policy and pending goal data exposed to planners', 
   );
 });
 
-test('returns the same rejected control receipt for duplicate events after completion', async () => {
+test('rejects terminal controls without committing an event that never took effect', async () => {
   const h = runnerFixture(2);
   const agent = h.create();
   await (
@@ -190,12 +190,14 @@ test('returns the same rejected control receipt for duplicate events after compl
     .emit(event)
     .catch((error: unknown) => error);
   expect(rejected).toMatchObject({ code: 'INVALID_RUN_CONTROL' });
-  await expect(agent.emit(event)).rejects.toBe(rejected);
+  await expect(agent.emit(event)).rejects.toMatchObject({
+    code: 'INVALID_RUN_CONTROL',
+  });
   expect(
     (await agent.records('run', null, 1000)).records.filter(
       (record) => record.kind === 'applicationEvent',
     ),
-  ).toHaveLength(1);
+  ).toHaveLength(0);
   await agent.close();
 });
 
