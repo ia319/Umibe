@@ -109,8 +109,9 @@ export function runStoreContract(
         sequence: 1,
       });
       expect(await store.readRecord('run-1', 'absent')).toBeNull();
-      await first.release();
+      const releasing = first.release();
       expect(first.signal.aborted).toBe(true);
+      await releasing;
       await first.release();
       const second = await store.acquireRun('run-1');
       expect(second.token).not.toBe(first.token);

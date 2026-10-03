@@ -17,9 +17,15 @@ const database = new RunDatabase(workerData);
 function execute(command: StoreCommand): StoreReply {
   switch (command.op) {
     case 'acquireRun':
-      return database.acquireRun(command.runId);
+      return database.acquireRun(command.runId, command.clientId);
     case 'releaseRun':
-      return database.releaseRun(command.runId, command.token);
+      return database.releaseRun(
+        command.runId,
+        command.token,
+        command.clientId,
+      );
+    case 'releaseClient':
+      return database.releaseClient(command.clientId);
     case 'readRun':
       return database.readRun(command.runId);
     case 'readRecord':
@@ -31,7 +37,7 @@ function execute(command: StoreCommand): StoreReply {
         command.limit,
       );
     case 'commit':
-      return database.commit(command.input);
+      return database.commit(command.input, command.clientId);
     case 'inspect':
       return database.inspect();
     case 'close':
@@ -78,7 +84,10 @@ port.on('message', ({ id, command }: StoreRequest) => {
       id,
       ok: false,
       error: detail,
-      fatal: detail.type === 'storage' && detail.code !== 'STORE_OWNERSHIP',
+      fatal:
+        detail.type === 'storage' &&
+        (detail.code !== 'STORE_OWNERSHIP' ||
+          detail.reason === 'process_owner_lost'),
     };
   }
   port.postMessage(response);

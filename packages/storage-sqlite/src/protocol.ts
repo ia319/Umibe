@@ -12,16 +12,23 @@ import type {
 export interface SqliteInspection {
   readonly exists: boolean;
   readonly schemaVersion: number | null;
+  /** The persisted process claim; a PID alone does not prove Worker health or liveness. */
   readonly owner: { readonly pid: number } | null;
 }
 
 export type StoreCommand =
-  | { readonly op: 'acquireRun'; readonly runId: string }
+  | {
+      readonly op: 'acquireRun';
+      readonly runId: string;
+      readonly clientId: string;
+    }
   | {
       readonly op: 'releaseRun';
       readonly runId: string;
       readonly token: string;
+      readonly clientId: string;
     }
+  | { readonly op: 'releaseClient'; readonly clientId: string }
   | { readonly op: 'readRun'; readonly runId: string }
   | {
       readonly op: 'readRecord';
@@ -34,13 +41,18 @@ export type StoreCommand =
       readonly sequence: number;
       readonly limit: number;
     }
-  | { readonly op: 'commit'; readonly input: RunCommit }
+  | {
+      readonly op: 'commit';
+      readonly input: RunCommit;
+      readonly clientId: string;
+    }
   | { readonly op: 'inspect' }
   | { readonly op: 'close' };
 
 export interface StoreResults {
   acquireRun: string;
   releaseRun: null;
+  releaseClient: null;
   readRun: {
     readonly summary: RunSummary;
     readonly checkpoint: RunCheckpoint;

@@ -1,4 +1,4 @@
-import { resolve } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import {
   ContractError,
   parseJsonValue,
@@ -15,8 +15,12 @@ import type {
   RunStore,
 } from '@umibe/core';
 import { captureRunCommit } from '@umibe/core/storage-adapter';
-import { WorkerChannel } from './channel.js';
-import type { SqliteInspection, StoreResults } from './protocol.js';
+import { canonicalDatabasePath, retainWorker } from './pool.js';
+import type {
+  SqliteInspection,
+  StoreCommand,
+  StoreResults,
+} from './protocol.js';
 
 export type { SqliteInspection } from './protocol.js';
 
@@ -31,14 +35,20 @@ function queryId(value: unknown, path: string): string {
   return value;
 }
 
-/** Open explicitly with a database file path. Queries never create a missing database. */
+/**
+ * Retain a shared Worker for the canonical file path. Queries never create a missing database.
+ * Call close to release this handle's leases and reference; the final reference releases process ownership.
+ * A failed Worker never restarts or relinquishes a live process's ownership automatically.
+ */
 export class SqliteRunStore implements RunStore {
   readonly info: {
     readonly kind: 'sqlite';
     readonly durable: true;
     readonly path: string;
   };
-  private readonly channel: WorkerChannel;
+  private readonly clientId = randomUUID();
+  private readonly shared: ReturnType<typeof retainWorker>;
+  private readonly onFailure = () => this.abort(this.shared.signal.reason);
   private readonly controller = new AbortController();
   readonly signal = this.controller.signal;
   private readonly leases = new Set<AbortController>();
@@ -46,19 +56,23 @@ export class SqliteRunStore implements RunStore {
   private closing: Promise<void> | undefined;
 
   constructor(path: string) {
-    if (typeof path !== 'string' || path.length === 0)
-      throw new TypeError('SQLite requires a file path');
     this.info = Object.freeze({
       kind: 'sqlite',
       durable: true,
-      path: resolve(path),
+      path: canonicalDatabasePath(path),
     });
-    this.channel = new WorkerChannel(this.info.path);
-    this.channel.signal.addEventListener(
-      'abort',
-      () => this.abort(this.channel.signal.reason),
-      { once: true },
-    );
+    this.shared = retainWorker(this.info.path, this.clientId);
+    this.shared.signal.addEventListener('abort', this.onFailure, {
+      once: true,
+    });
+    if (this.shared.signal.aborted) this.onFailure();
+  }
+
+  // Register requests in call order even while a prior connection is finishing its close.
+  private request<K extends StoreCommand['op']>(
+    command: Extract<StoreCommand, { op: K }>,
+  ): Promise<StoreResults[K]> {
+    return this.shared.ready.then((channel) => channel.request(command));
   }
 
   private abort(reason: unknown): void {
@@ -74,7 +88,11 @@ export class SqliteRunStore implements RunStore {
   async acquireRun(runId: string): Promise<RunLease> {
     this.ensureOpen('acquireRun');
     const id = queryId(runId, '/runId');
-    const token = await this.channel.request({ op: 'acquireRun', runId: id });
+    const token = await this.request({
+      op: 'acquireRun',
+      runId: id,
+      clientId: this.clientId,
+    });
     const controller = new AbortController();
     this.leases.add(controller);
     if (this.signal.aborted) controller.abort(this.signal.reason);
@@ -85,10 +103,18 @@ export class SqliteRunStore implements RunStore {
       signal: controller.signal,
       release: (): Promise<void> => {
         releasing ??= (async () => {
-          if (!this.closed && !this.signal.aborted)
-            await this.channel.request({ op: 'releaseRun', runId: id, token });
           controller.abort(new StoreError('STORE_OWNERSHIP', 'released'));
-          this.leases.delete(controller);
+          try {
+            if (!this.closed && !this.signal.aborted)
+              await this.request({
+                op: 'releaseRun',
+                runId: id,
+                token,
+                clientId: this.clientId,
+              });
+          } finally {
+            this.leases.delete(controller);
+          }
         })();
         return releasing;
       },
@@ -97,7 +123,7 @@ export class SqliteRunStore implements RunStore {
 
   async readRun(runId: string): Promise<StoreResults['readRun']> {
     this.ensureOpen('readRun');
-    return this.channel.request({
+    return this.request({
       op: 'readRun',
       runId: queryId(runId, '/runId'),
     });
@@ -105,7 +131,7 @@ export class SqliteRunStore implements RunStore {
 
   async readRecord(runId: string, eventId: string): Promise<RunRecord | null> {
     this.ensureOpen('readRecord');
-    return this.channel.request({
+    return this.request({
       op: 'readRecord',
       runId: queryId(runId, '/runId'),
       eventId: queryId(eventId, '/eventId'),
@@ -163,7 +189,7 @@ export class SqliteRunStore implements RunStore {
         );
       sequence = value.sequence;
     }
-    return this.channel.request({
+    return this.request({
       op: 'readRecords',
       runId: id,
       sequence,
@@ -174,19 +200,24 @@ export class SqliteRunStore implements RunStore {
   async commit(input: RunCommit): Promise<CommitResult> {
     this.ensureOpen('commit');
     const captured = captureRunCommit(input);
-    return this.channel.request({ op: 'commit', input: captured });
+    return this.request({
+      op: 'commit',
+      input: captured,
+      clientId: this.clientId,
+    });
   }
 
   async inspect(): Promise<SqliteInspection> {
     this.ensureOpen('readRun');
-    return this.channel.request({ op: 'inspect' });
+    return this.request({ op: 'inspect' });
   }
 
   close(): Promise<void> {
     if (this.closing !== undefined) return this.closing;
     this.closed = true;
     this.abort(new StoreClosedError('commit'));
-    this.closing = this.channel.close();
+    this.shared.signal.removeEventListener('abort', this.onFailure);
+    this.closing = this.shared.release();
     return this.closing;
   }
 }

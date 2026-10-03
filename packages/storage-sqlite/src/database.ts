@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { statSync } from 'node:fs';
+import { dirname } from 'node:path';
 import Database from 'better-sqlite3';
 import {
   ContractError,
@@ -11,6 +12,7 @@ import {
 import type { CommitResult, RunCommit, RunRecord } from '@umibe/core';
 import { prepareRunCommit } from '@umibe/core/storage-adapter';
 import type { SqliteInspection, StoreResults } from './protocol.js';
+import { processHasExited } from './ownership.js';
 
 const schemaVersion = 1;
 const schema = `
@@ -60,7 +62,12 @@ function decodeStored<T>(decode: () => T): T {
 /** Owns the SQLite connection; instantiate only inside the storage Worker. */
 export class RunDatabase {
   private db: Database.Database | undefined;
-  private readonly leases = new Map<string, string>();
+  private readonly leases = new Map<
+    string,
+    { token: string; clientId: string }
+  >();
+  private readonly processToken = randomUUID();
+  private ownsDatabase = false;
 
   constructor(private readonly path: string) {}
 
@@ -70,8 +77,11 @@ export class RunDatabase {
       this.db.close();
       this.db = undefined;
     }
-    const existed = existsSync(this.path);
+    const existed =
+      statSync(this.path, { throwIfNoEntry: false }) !== undefined;
     if (!write && !existed) return undefined;
+    if (write && !existed && !statSync(dirname(this.path)).isDirectory())
+      throw new StoreError('STORE_FAILED', 'parent_not_directory');
     const db = new Database(this.path, {
       readonly: !write,
       fileMustExist: !write,
@@ -79,11 +89,40 @@ export class RunDatabase {
     });
     try {
       db.pragma('foreign_keys = ON');
-      if (existed) this.validateSchema(db);
+      const existingObjects = db
+        .prepare(
+          "SELECT 1 FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' LIMIT 1",
+        )
+        .get();
+      if (!write || existingObjects !== undefined) this.validateSchema(db);
       if (write) {
-        db.pragma('journal_mode = WAL');
+        if (
+          existingObjects === undefined &&
+          (db.pragma('user_version', { simple: true }) !== 0 ||
+            db.pragma('application_id', { simple: true }) !== 0)
+        )
+          throw new StoreError('STORE_CORRUPT', 'unknown_database_format');
+        if (db.pragma('journal_mode = WAL', { simple: true }) !== 'wal')
+          throw new StoreError('STORE_FAILED', 'wal_unavailable');
         db.pragma('synchronous = FULL');
-        if (!existed) db.transaction(() => db.exec(schema)).immediate();
+        db.transaction(() => {
+          // Another process may initialize the same empty file before this transaction obtains the lock.
+          if (
+            db
+              .prepare(
+                "SELECT 1 FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' LIMIT 1",
+              )
+              .get() === undefined
+          ) {
+            if (
+              db.pragma('user_version', { simple: true }) !== 0 ||
+              db.pragma('application_id', { simple: true }) !== 0
+            )
+              throw new StoreError('STORE_CORRUPT', 'unknown_database_format');
+            db.exec(schema);
+            this.claimProcess(db);
+          } else this.validateSchema(db);
+        }).immediate();
       }
       this.db = db;
       return db;
@@ -128,19 +167,58 @@ export class RunDatabase {
     }
   }
 
-  acquireRun(runId: string): string {
-    this.open(true);
+  private claimProcess(db: Database.Database): void {
+    const owner = db
+      .prepare<[], { pid: number; token: string }>(
+        'SELECT pid, token FROM runtime_owner WHERE singleton = 1',
+      )
+      .get();
+    if (owner?.pid === process.pid && owner.token === this.processToken) return;
+    if (this.ownsDatabase)
+      throw new StoreError('STORE_OWNERSHIP', 'process_owner_lost');
+    if (owner !== undefined && !processHasExited(owner.pid))
+      throw new StoreError('STORE_OWNERSHIP', 'process_owned');
+    db.prepare(
+      'INSERT INTO runtime_owner (singleton, pid, token) VALUES (1, ?, ?) ON CONFLICT (singleton) DO UPDATE SET pid = excluded.pid, token = excluded.token',
+    ).run(process.pid, this.processToken);
+  }
+
+  private assertProcessOwner(db: Database.Database): void {
+    if (
+      !this.ownsDatabase ||
+      db
+        .prepare(
+          'SELECT 1 FROM runtime_owner WHERE singleton = 1 AND pid = ? AND token = ?',
+        )
+        .get(process.pid, this.processToken) === undefined
+    )
+      throw new StoreError('STORE_OWNERSHIP', 'process_owner_lost');
+  }
+
+  acquireRun(runId: string, clientId: string): string {
+    const db = this.open(true);
+    if (db === undefined)
+      throw new StoreError('STORE_FAILED', 'database_not_open');
+    db.transaction(() => this.claimProcess(db)).immediate();
+    this.ownsDatabase = true;
     if (this.leases.has(runId))
       throw new StoreError('STORE_OWNERSHIP', 'run_owned');
     const token = randomUUID();
-    this.leases.set(runId, token);
+    this.leases.set(runId, { token, clientId });
     return token;
   }
 
-  releaseRun(runId: string, token: string): null {
-    if (this.leases.get(runId) !== token)
+  releaseRun(runId: string, token: string, clientId: string): null {
+    const lease = this.leases.get(runId);
+    if (lease?.token !== token || lease.clientId !== clientId)
       throw new StoreError('STORE_OWNERSHIP', 'invalid_owner');
     this.leases.delete(runId);
+    return null;
+  }
+
+  releaseClient(clientId: string): null {
+    for (const [runId, lease] of this.leases)
+      if (lease.clientId === clientId) this.leases.delete(runId);
     return null;
   }
 
@@ -246,14 +324,16 @@ export class RunDatabase {
     })();
   }
 
-  commit(input: RunCommit): CommitResult {
-    if (this.leases.get(input.runId) !== input.ownerToken)
+  commit(input: RunCommit, clientId: string): CommitResult {
+    const lease = this.leases.get(input.runId);
+    if (lease?.token !== input.ownerToken || lease.clientId !== clientId)
       throw new StoreError('STORE_OWNERSHIP', 'invalid_owner');
     const db = this.open(true);
     if (db === undefined)
       throw new StoreError('STORE_FAILED', 'database_not_open');
     return db
       .transaction(() => {
+        this.assertProcessOwner(db);
         const current = this.readRow(db, input.runId);
         const result = prepareRunCommit(input, {
           revision: current?.revision ?? null,
@@ -324,9 +404,21 @@ export class RunDatabase {
   }
 
   close(): null {
-    this.db?.close();
-    this.db = undefined;
-    this.leases.clear();
+    const db = this.db;
+    try {
+      if (db !== undefined && this.ownsDatabase)
+        db.transaction(() => {
+          this.assertProcessOwner(db);
+          db.prepare(
+            'DELETE FROM runtime_owner WHERE singleton = 1 AND pid = ? AND token = ?',
+          ).run(process.pid, this.processToken);
+        }).immediate();
+    } finally {
+      db?.close();
+      this.db = undefined;
+      this.leases.clear();
+      this.ownsDatabase = false;
+    }
     return null;
   }
 }
