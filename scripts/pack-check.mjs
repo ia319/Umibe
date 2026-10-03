@@ -433,10 +433,11 @@ void start; void resume; void cleanup;
 agent.resume('typed-run', { limits: { callbackTimeoutMs: 1000 } });
 declare const runtime: RuntimeContext;
 // @ts-expect-error Execution history is a readonly snapshot.
-runtime.recentResults.push({});
+runtime.recentResults.push(runtime.recentResults[0]!);
 declare const revision: Extract<PlanProposal, { outcome: 'revise' | 'reconfirm' }>;
-const revisions: readonly GoalRevision[] = revision.revisions;
-void revisions;
+declare const goalRevision: GoalRevision;
+// @ts-expect-error Revision entries cannot be appended.
+revision.revisions.push(goalRevision);
 `,
     { encoding: 'utf8' },
   );
