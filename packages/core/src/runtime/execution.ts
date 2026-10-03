@@ -40,8 +40,8 @@ export type ActionDispatchResult =
   | { readonly outcome: 'notExecuted'; readonly reasonCode: string };
 
 interface Attempt {
-  readonly selected: SelectedCandidate;
-  readonly call: PreparedAction;
+  readonly selected: SelectedCandidate | null;
+  readonly basis: CandidateGenerationInput;
   readonly intent: ActionIntent;
   readonly release: () => void;
   dispatched: boolean;
@@ -67,12 +67,28 @@ export class ActionCoordinator {
     private readonly session: RunSession,
     private readonly registry: ActionRegistry,
     private readonly environment: Environment,
-  ) {}
+  ) {
+    const execution = session.state.execution;
+    if (execution?.result?.outcome === 'unknown')
+      this.#attempt = {
+        selected: null,
+        basis: execution.basis,
+        intent: execution.intent,
+        release: session.claimExecution(),
+        dispatched: true,
+        result: execution.result,
+        stopCause: session.state.control.stopCause,
+        progress: execution.result.progress,
+        reconciled: false,
+        stop: null,
+      };
+  }
 
   /**
    * Intent admission consumes the selected token across all coordinators.
    * A denied recheck leaves the token reusable.
-   * A retry must name the last execution and retain its exact selected token.
+   * Live retries retain their selected token. Confirmed unperformed executions
+   * recovered without that token require a freshly checked call with identical parameters.
    * No automatic retries occur. Unknown effects retain the session's execution
    * lease until a late result or reconciliation confirms a complete boundary.
    */
@@ -86,6 +102,18 @@ export class ActionCoordinator {
     if (!session.canDispatch(epoch))
       return { outcome: 'notExecuted', reasonCode: 'run_or_decision_inactive' };
     let retries = 0;
+    const prior = session.state.execution;
+    if (prior?.reconciliation === 'notPerformed') {
+      if (
+        prior.intent.actionId !== call.call.actionId ||
+        prior.intent.actionVersion !== call.call.actionVersion ||
+        canonicalJson(prior.intent.params) !== canonicalJson(call.call.params)
+      ) {
+        await this.block('retry_call_changed');
+        return { outcome: 'notExecuted', reasonCode: 'retry_call_changed' };
+      }
+      retryOf ??= prior.intent.executionId;
+    }
     if (retryOf === null && consumedSelections.has(selected))
       throw new ContractError(
         validation.code,
@@ -97,12 +125,14 @@ export class ActionCoordinator {
       const previous = session.state.execution;
       if (
         previous?.intent.executionId !== retryOf ||
-        this.#attempt?.selected !== selected ||
+        (previous.reconciliation !== 'notPerformed' &&
+          this.#attempt?.selected !== selected) ||
         previous.result === null ||
         previous.result.outcome === 'unknown' ||
         previous.result.outcome === 'succeeded' ||
         previous.retries >= session.state.limits.actionRetries ||
-        call.retryMode === 'never' ||
+        call.retryMode !== previous.retryMode ||
+        previous.retryMode === 'never' ||
         (call.retryMode === 'reconcile' &&
           previous.reconciliation !== 'notPerformed')
       ) {
@@ -194,7 +224,7 @@ export class ActionCoordinator {
       });
       attempt = {
         selected,
-        call,
+        basis: recheck.request,
         intent,
         release,
         dispatched: false,
@@ -267,7 +297,7 @@ export class ActionCoordinator {
           }),
         ],
       );
-      const result = await this.runAction(attempt, dispatchCommit);
+      const result = await this.runAction(attempt, call, dispatchCommit);
       if (result.outcome !== 'unknown' && session.canDispatch(epoch))
         await this.refreshObservation(epoch);
       return { outcome: 'recorded', result };
@@ -301,7 +331,6 @@ export class ActionCoordinator {
       attempt === null ||
       attempt.result?.outcome !== 'unknown' ||
       this.session.state.execution?.result !== attempt.result ||
-      attempt.call.reconcile === undefined ||
       this.#reconciling
     ) {
       throw new ContractError(
@@ -331,7 +360,10 @@ export class ActionCoordinator {
     try {
       const answer = await invokeControlled(
         captureControl({
-          signal: supplied.signal,
+          signal: AbortSignal.any([
+            supplied.signal,
+            this.session.ownershipSignal,
+          ]),
           deadlineAt: new Date(
             Math.min(
               supplied.deadlineMs,
@@ -339,48 +371,53 @@ export class ActionCoordinator {
             ),
           ).toISOString(),
         }),
-        (control) => attempt.call.reconcile!(attempt.intent, control),
+        (control) => this.registry.reconcile(attempt.intent, control),
       );
       if (attempt.result !== previous)
         return { outcome: 'unknown', reason: 'execution_changed' };
       let reconciliation: Reconciliation;
       try {
         if (answer.outcome !== 'returned')
-          return { outcome: 'unknown', reason: answer.outcome };
-        const value = requireObject(
-          parseJsonValue(answer.value, validation.stage),
-          validation,
-          '/reconciliation',
-        );
-        if (value.outcome === 'unknown')
-          reconciliation = {
-            outcome: 'unknown',
-            reason: requireString(value.reason, validation, '/reason'),
-          };
-        else if (
-          value.outcome === 'notPerformed' &&
-          value.underlyingSettled === true
-        )
-          reconciliation = {
-            outcome: 'notPerformed',
-            underlyingSettled: true,
-            reason: requireString(value.reason, validation, '/reason'),
-          };
-        else if (
-          value.outcome === 'performed' &&
-          value.underlyingSettled === true
-        ) {
-          const result = this.captureResult(attempt, value.result);
-          if (result.outcome === 'unknown')
-            throw new Error('Unconfirmed reconciliation');
-          reconciliation = {
-            outcome: 'performed',
-            underlyingSettled: true,
-            result,
-          };
-        } else throw new Error('Invalid reconciliation');
+          reconciliation = { outcome: 'unknown', reason: answer.outcome };
+        else {
+          const value = requireObject(
+            parseJsonValue(answer.value, validation.stage),
+            validation,
+            '/reconciliation',
+          );
+          if (value.outcome === 'unknown')
+            reconciliation = {
+              outcome: 'unknown',
+              reason: requireString(value.reason, validation, '/reason'),
+            };
+          else if (
+            value.outcome === 'notPerformed' &&
+            value.underlyingSettled === true
+          )
+            reconciliation = {
+              outcome: 'notPerformed',
+              underlyingSettled: true,
+              reason: requireString(value.reason, validation, '/reason'),
+            };
+          else if (
+            value.outcome === 'performed' &&
+            value.underlyingSettled === true
+          ) {
+            const result = this.captureResult(attempt, value.result);
+            if (result.outcome === 'unknown')
+              throw new Error('Unconfirmed reconciliation');
+            reconciliation = {
+              outcome: 'performed',
+              underlyingSettled: true,
+              result,
+            };
+          } else throw new Error('Invalid reconciliation');
+        }
       } catch {
-        return { outcome: 'unknown', reason: 'invalid_reconciliation' };
+        reconciliation = {
+          outcome: 'unknown',
+          reason: 'invalid_reconciliation',
+        };
       }
       if (reconciliation.outcome === 'unknown') {
         await this.session.commit(this.session.state, [
@@ -476,6 +513,7 @@ export class ActionCoordinator {
 
   private runAction(
     attempt: Attempt,
+    call: PreparedAction,
     dispatchCommit: Promise<void>,
   ): Promise<ActionResult> {
     const session = this.session;
@@ -580,7 +618,7 @@ export class ActionCoordinator {
       attempt.dispatched = true;
       let returned: Promise<ActionResult>;
       try {
-        returned = attempt.call.execute({
+        returned = call.execute({
           executionId: attempt.intent.executionId,
           decision: session.state.decision.context,
           signal: controller.signal,
@@ -620,7 +658,7 @@ export class ActionCoordinator {
             try {
               result = this.captureResult(attempt, raw);
               observed = result;
-              if (attempt.call.verifyResult !== undefined) {
+              if (call.verifyResult !== undefined) {
                 const verified = await invokeControlled(
                   captureControl({
                     signal: new AbortController().signal,
@@ -629,7 +667,7 @@ export class ActionCoordinator {
                     ).toISOString(),
                   }),
                   (control) =>
-                    attempt.call.verifyResult!(attempt.intent, result, control),
+                    call.verifyResult!(attempt.intent, result, control),
                 );
                 result =
                   verified.outcome === 'returned'
@@ -720,9 +758,7 @@ export class ActionCoordinator {
           )
             ? {
                 executionId: result.executionId,
-                before:
-                  attempt.selected.filtered.checked.prepared.request.context
-                    .graph,
+                before: attempt.basis.context.graph,
                 failed: result.outcome === 'failed',
               }
             : session.state.progressAttempt,

@@ -3,6 +3,7 @@ import type { JsonObject } from '#internal/contracts/json';
 import type { CandidateGenerationInput } from '#internal/contracts/candidate-processing';
 import type { RunCheckpoint, RunRecord } from '#internal/contracts/record';
 import { captureDecisionRequest } from '#internal/candidate/context';
+import { canonicalJson } from '#internal/candidate/identity';
 import { ContractError } from '#internal/errors';
 import type {
   RunRecordDraft,
@@ -21,7 +22,10 @@ import type { SchedulingState } from './scheduling.js';
 import type { GoalState } from './goals.js';
 import type { GoalProgress, ProgressAttempt } from './progress.js';
 import type { ActionResult } from '#internal/contracts/record';
-import { runtimeStateSchemaVersion } from './checkpoint.js';
+import {
+  parseRuntimeCheckpoint,
+  runtimeStateSchemaVersion,
+} from './checkpoint.js';
 import type { RuntimeIdentity, PendingModelAttempt } from './checkpoint.js';
 
 export interface SessionState {
@@ -59,7 +63,8 @@ const validation = {
 /**
  * One in-process writer for a run. State admission is synchronous; persistence
  * is ordered separately so a pending commit cannot delay a stop signal.
- * The injected store remains owned by its caller. This is not a crash-recovery API.
+ * The injected store remains owned by its caller. Restoring requires a fresh lease
+ * and a validated checkpoint; construction alone never authorizes dispatch.
  */
 export class RunSession {
   readonly runId: string;
@@ -82,37 +87,14 @@ export class RunSession {
   private constructor(
     private readonly store: RunStore,
     private readonly lease: RunLease,
-    decision: CandidateGenerationInput,
+    state: SessionState,
     private readonly diagnose: (diagnostic: RuntimeDiagnostic) => void,
-    limits: RuntimeLimits,
-    identity: RuntimeIdentity,
+    checkpoint: RunCheckpoint | null,
   ) {
-    this.runId = decision.context.graph.runId;
-    this.#state = Object.freeze({
-      identity,
-      pendingModels: [],
-      control: createRunControl(decision.context.graph.rootGoalRef),
-      decision,
-      limits,
-      modelAttempts: 0,
-      actionAttempts: 0,
-      execution: null,
-      progress: [],
-      progressAttempt: null,
-      recentResults: [],
-      goals: {
-        created: decision.context.graph.goals.length - 1,
-        pending: [],
-        order: [],
-      },
-      scheduling: {
-        policyVersion: 1,
-        planning: { kind: 'initial', assessment: 'notYet' },
-        recoveryAttempts: 0,
-        lastSelectionBasis: null,
-        selectionCause: 'initial',
-      } satisfies SchedulingState,
-    });
+    this.runId = state.decision.context.graph.runId;
+    this.#state = state;
+    this.#checkpoint = checkpoint;
+    this.#committedState = checkpoint === null ? null : state;
     this.beginInterval();
     lease.signal.addEventListener('abort', this.#ownershipLost, { once: true });
     if (lease.signal.aborted) this.#ownershipLost();
@@ -139,15 +121,33 @@ export class RunSession {
         '/applicationId',
         'missing_application_id',
       );
-    const lease = await store.acquireRun(runId);
-    const session = new RunSession(
-      store,
-      lease,
-      decision,
-      diagnose,
-      capturedLimits,
+    const state: SessionState = Object.freeze({
       identity,
-    );
+      pendingModels: [],
+      control: createRunControl(decision.context.graph.rootGoalRef),
+      decision,
+      limits: capturedLimits,
+      modelAttempts: 0,
+      actionAttempts: 0,
+      execution: null,
+      progress: [],
+      progressAttempt: null,
+      recentResults: [],
+      goals: {
+        created: decision.context.graph.goals.length - 1,
+        pending: [],
+        order: [],
+      },
+      scheduling: {
+        policyVersion: 1,
+        planning: { kind: 'initial', assessment: 'notYet' },
+        recoveryAttempts: 0,
+        lastSelectionBasis: null,
+        selectionCause: 'initial',
+      } satisfies SchedulingState,
+    });
+    const lease = await store.acquireRun(runId);
+    const session = new RunSession(store, lease, state, diagnose, null);
     try {
       await session.commit(session.state, [
         session.event('run_created', 'created', {}),
@@ -160,6 +160,202 @@ export class RunSession {
     }
   }
 
+  /** Re-read under ownership so validation never authorizes an obsolete checkpoint. */
+  static async restore(
+    store: RunStore,
+    runId: string,
+    diagnose: (diagnostic: RuntimeDiagnostic) => void,
+    identity: RuntimeIdentity,
+  ): Promise<RunSession> {
+    const read = async () => {
+      const stored = await store.readRun(runId);
+      if (stored === null)
+        throw new ContractError(
+          validation.code,
+          'recovery',
+          '/runId',
+          'run_not_found',
+        );
+      const checkpoint = parseRuntimeCheckpoint(stored.checkpoint);
+      const state = checkpoint.state;
+      for (const key of [
+        'applicationId',
+        'actionVersions',
+        'modelStages',
+      ] as const)
+        if (
+          canonicalJson(parseJsonValue(state.identity[key], 'recovery')) !==
+          canonicalJson(parseJsonValue(identity[key], 'recovery'))
+        )
+          throw new ContractError(
+            validation.code,
+            'recovery',
+            `/identity/${key}`,
+            'identity_mismatch',
+          );
+      if (store.info.durable && identity.applicationId === null)
+        throw new ContractError(
+          validation.code,
+          'recovery',
+          '/applicationId',
+          'missing_application_id',
+        );
+      if (
+        state.control.status === 'succeeded' ||
+        state.control.status === 'failed'
+      )
+        throw new ContractError(
+          validation.code,
+          'recovery',
+          '/status',
+          'terminal_run',
+        );
+      const summary = stored.summary;
+      if (
+        summary.checkpointRevision !== checkpoint.revision ||
+        summary.lastSequence !== checkpoint.committedSequence ||
+        summary.status !== checkpoint.status ||
+        canonicalJson(parseJsonValue(summary.rootGoalRef, 'recovery')) !==
+          canonicalJson(
+            parseJsonValue(state.control.rootGoalRef, 'recovery'),
+          ) ||
+        canonicalJson(parseJsonValue(summary.currentGoalRef, 'recovery')) !==
+          canonicalJson(
+            parseJsonValue(
+              state.decision.context.graph.currentGoalRef,
+              'recovery',
+            ),
+          )
+      )
+        throw new ContractError(
+          validation.code,
+          'recovery',
+          '/checkpoint',
+          'checkpoint_summary_mismatch',
+        );
+      return { checkpoint: stored.checkpoint, state };
+    };
+    await read();
+    const lease = await store.acquireRun(runId);
+    let session: RunSession | undefined;
+    try {
+      const { checkpoint, state } = await read();
+      const tail = await store.readRecords(
+        runId,
+        checkpoint.committedSequence <= 1
+          ? null
+          : { runId, sequence: checkpoint.committedSequence - 1 },
+        2,
+      );
+      if (
+        (checkpoint.committedSequence === 0
+          ? tail.records.length !== 0
+          : tail.records.length !== 1 ||
+            tail.records[0]?.sequence !== checkpoint.committedSequence) ||
+        tail.nextCursor !== null
+      )
+        throw new ContractError(
+          validation.code,
+          'recovery',
+          '/committedSequence',
+          'history_mismatch',
+        );
+      session = new RunSession(store, lease, state, diagnose, checkpoint);
+      const record = session.event('run_restored', 'checkpoint_loaded', {
+        previous: state.control.status,
+      });
+      const cause = state.control.stopCause ?? {
+        eventId: record.eventId,
+        reasonCode: 'process_interrupted',
+      };
+      const execution = state.execution;
+      const unknown: ActionResult | null =
+        execution !== null && execution.result === null
+          ? Object.freeze({
+              executionId: execution.intent.executionId,
+              outcome: 'unknown',
+              reasonCode: 'process_interrupted',
+              underlyingSettled: false,
+              confirmedEffects: {},
+              unresolvedEffects: { execution: 'dispatch_unconfirmed' },
+              progress: {},
+              stopCauseEventId: cause.eventId,
+            })
+          : null;
+      const unresolved = unknown !== null || execution?.phase === 'unknown';
+      await session.commit(
+        {
+          ...state,
+          control: {
+            ...state.control,
+            status: ['created', 'running', 'pausing'].includes(
+              state.control.status,
+            )
+              ? 'pausing'
+              : state.control.status,
+            stopCause: cause,
+            blocker: unresolved
+              ? { eventId: cause.eventId, reasonCode: 'execution_unsettled' }
+              : state.control.blocker,
+          },
+          execution:
+            unknown !== null && execution !== null
+              ? { ...execution, result: unknown, phase: 'unknown' }
+              : execution,
+          decision:
+            unknown === null
+              ? state.decision
+              : {
+                  ...state.decision,
+                  context: {
+                    ...state.decision.context,
+                    lastActionResult: unknown,
+                  },
+                },
+          recentResults:
+            unknown === null
+              ? state.recentResults
+              : [...state.recentResults, unknown].slice(-50),
+        },
+        [
+          record,
+          ...(unknown === null
+            ? []
+            : [
+                {
+                  formatVersion: 1 as const,
+                  runId,
+                  eventId: randomUUID(),
+                  kind: 'actionResult' as const,
+                  data: unknown,
+                },
+              ]),
+        ],
+      );
+      if (
+        session.state.control.status === 'pausing' ||
+        session.state.control.status === 'cancelling'
+      )
+        await session.transition({
+          kind: 'stopSettled',
+          blocker:
+            session.state.control.blocker ??
+            (session.state.control.status === 'pausing' ? cause : null),
+        });
+      return session;
+    } catch (error) {
+      if (session !== undefined)
+        lease.signal.removeEventListener('abort', session.#ownershipLost);
+      await lease.release();
+      throw error;
+    }
+  }
+
+  /** Ownership cancellation also applies to cleanup while the run itself is paused. */
+  get ownershipSignal(): AbortSignal {
+    return this.lease.signal;
+  }
+
   get state(): SessionState {
     return this.#state;
   }
@@ -167,7 +363,7 @@ export class RunSession {
     return this.#checkpoint;
   }
   get committedState(): SessionState {
-    // create() returns only after the first checkpoint is acknowledged.
+    // Creation and restoration return only after a checkpoint is acknowledged.
     return this.#committedState!;
   }
   get signal(): AbortSignal {

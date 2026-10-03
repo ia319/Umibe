@@ -142,6 +142,7 @@ test('requires confirmed reconciliation before resume and preserves spent attemp
       target: z.string(),
       count: z.number().default(1),
     }),
+    retryMode: 'reconcile',
     check: () => Promise.resolve({ outcome: 'allowed' }),
     execute: h.execute,
     reconcile,
@@ -149,7 +150,7 @@ test('requires confirmed reconciliation before resume and preserves spent attemp
   const agent = createAgent({
     ...h.options,
     actions: [action],
-    limits: { actionTimeoutMs: 10, stopGraceMs: 5 },
+    limits: { actionTimeoutMs: 10, stopGraceMs: 5, actionRetries: 1 },
   });
   const first = await agent.start(h.input);
   await vi.advanceTimersByTimeAsync(15);

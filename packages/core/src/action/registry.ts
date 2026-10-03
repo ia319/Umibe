@@ -2,8 +2,13 @@ import { z } from 'zod';
 import type {
   ActionDefinition,
   PreparedAction,
+  Reconciliation,
 } from '#internal/contracts/action';
-import type { ActionCapability } from '#internal/contracts/adapters';
+import type {
+  ActionCapability,
+  CallControl,
+} from '#internal/contracts/adapters';
+import type { ActionIntent } from '#internal/contracts/record';
 import type { JsonObject } from '#internal/contracts/json';
 import { ContractError } from '#internal/errors';
 import {
@@ -18,6 +23,7 @@ import {
   jsonPointerChild,
   parseJsonValue,
 } from '#internal/validation/json';
+import { readActionIntent } from '#internal/validation/record';
 import { describeActionParameters } from './describe.js';
 import {
   assertPreservedParameterKeys,
@@ -31,7 +37,11 @@ export interface RegisteredAction {
 }
 
 type PrepareAction = (request: JsonObject) => Promise<PreparedAction>;
-const definitions = new WeakMap<RegisteredAction, PrepareAction>();
+interface ActionCallbacks {
+  readonly prepare: PrepareAction;
+  readonly reconcile?: PreparedAction['reconcile'];
+}
+const definitions = new WeakMap<RegisteredAction, ActionCallbacks>();
 const definitionContext: FieldContext = {
   code: 'INVALID_ACTION_DEFINITION',
   stage: 'action_definition',
@@ -174,7 +184,7 @@ export function defineAction<TSchema extends z.ZodObject>(
     ...(reconcile === undefined ? {} : { reconcile }),
   });
   const registration = Object.freeze({ capability, retryMode });
-  definitions.set(registration, async (request) => {
+  const prepare: PrepareAction = async (request) => {
     const inputParams = requireObject(
       request.params,
       parameterContext,
@@ -207,6 +217,12 @@ export function defineAction<TSchema extends z.ZodObject>(
         reconcileCall(intent, control);
     }
     return Object.freeze(prepared);
+  };
+  definitions.set(registration, {
+    prepare,
+    ...(definition.reconcile === undefined
+      ? {}
+      : { reconcile: definition.reconcile.bind(definition) }),
   });
   return registration;
 }
@@ -215,7 +231,7 @@ export function defineAction<TSchema extends z.ZodObject>(
 export class ActionRegistry {
   readonly #actions = new Map<
     string,
-    { registration: RegisteredAction; prepare: PrepareAction }
+    { registration: RegisteredAction; callbacks: ActionCallbacks }
   >();
 
   constructor(actions: readonly RegisteredAction[]) {
@@ -233,8 +249,8 @@ export class ActionRegistry {
 
   /** @throws ContractError for a duplicate ID or a value not created by defineAction. */
   register(action: RegisteredAction): void {
-    const prepare = definitions.get(action);
-    if (prepare === undefined) {
+    const callbacks = definitions.get(action);
+    if (callbacks === undefined) {
       throw new ContractError(
         'INVALID_ACTION_DEFINITION',
         'action_registration',
@@ -251,7 +267,7 @@ export class ActionRegistry {
         'duplicate_action_id',
       );
     }
-    this.#actions.set(id, { registration: action, prepare });
+    this.#actions.set(id, { registration: action, callbacks });
   }
 
   /** Each read returns a frozen catalog sorted by action ID, with JSON data only. */
@@ -307,6 +323,28 @@ export class ActionRegistry {
         'action_version_mismatch',
       );
     }
-    return action.prepare(request);
+    return action.callbacks.prepare(request);
+  }
+
+  /**
+   * Rebind a persisted intent to its exact action version without parsing its
+   * normalized parameters again. Missing capability leaves effects unknown.
+   */
+  async reconcile(
+    input: ActionIntent,
+    control: CallControl,
+  ): Promise<Reconciliation> {
+    const intent = readActionIntent(parseJsonValue(input, 'reconciliation'));
+    const action = this.#actions.get(intent.actionId);
+    if (action?.registration.capability.version !== intent.actionVersion)
+      throw new ContractError(
+        'INVALID_ACTION_DEFINITION',
+        'reconciliation',
+        '/actionVersion',
+        'action_version_mismatch',
+      );
+    return action.callbacks.reconcile === undefined
+      ? { outcome: 'unknown', reason: 'reconciliation_unavailable' }
+      : action.callbacks.reconcile(intent, control);
   }
 }

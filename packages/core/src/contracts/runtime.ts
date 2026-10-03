@@ -102,7 +102,11 @@ export interface RunInspection {
 export interface Agent {
   /** Wait for initialization, then return without waiting for goal completion. Invalid initialization rejects. */
   start(input: StartRun): Promise<RunHandle>;
-  /** Continue a paused run owned by this instance, preserving cumulative budgets and issuing a new result promise. */
+  /**
+   * Acquire a stored run when necessary and continue from its committed checkpoint.
+   * Requires matching application, action versions and model stages. Preserves
+   * stored limits and usage; uncertain executions must reconcile before dispatch.
+   */
   resume(runId: string, update?: ResumeRun): Promise<RunHandle>;
   /** Reconcile unresolved effects without resuming, including after cancellation. */
   reconcile(runId: string): Promise<Reconciliation>;
