@@ -4,18 +4,10 @@ import { join, resolve } from 'node:path';
 import { execPath } from 'node:process';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
-import { beforeAll, expect, test } from 'vitest';
+import { expect, test } from 'vitest';
 
 const packageRoot = fileURLToPath(new URL('../', import.meta.url));
-const compilerPath = fileURLToPath(import.meta.resolve('typescript/bin/tsc'));
-
-beforeAll(() => {
-  execFileSync(execPath, [compilerPath, '-p', 'tsconfig.build.json'], {
-    cwd: packageRoot,
-    encoding: 'utf8',
-    timeout: 15_000,
-  });
-}, 20_000);
+// pnpm test builds every package first; rebuilding here would race SQLite Workers importing dist.
 
 test('loads the built ESM entry through the package export', () => {
   expect(() =>
