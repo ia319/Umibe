@@ -1,4 +1,10 @@
-import { existsSync, mkdtempSync, mkdirSync, symlinkSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  realpathSync,
+  symlinkSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { Worker } from 'node:worker_threads';
@@ -86,6 +92,9 @@ test('canonicalizes directory links before creating the database', async () => {
   symlinkSync(target, alias, process.platform === 'win32' ? 'junction' : 'dir');
   const first = store(join(alias, 'shared.sqlite'));
   const second = store(join(target, 'shared.sqlite'));
+  expect(first.info.path).toBe(
+    join(realpathSync.native(target), 'shared.sqlite'),
+  );
   expect(first.info.path).toBe(second.info.path);
   await first.acquireRun('run');
   await expect(second.acquireRun('run')).rejects.toMatchObject({
@@ -93,17 +102,38 @@ test('canonicalizes directory links before creating the database', async () => {
   });
 });
 
-test('reports an absent parent directory without creating it or redirecting the database', async () => {
-  const parent = join(directory, 'absent-parent');
-  const database = store(join(parent, 'run.sqlite'));
-  expect(await database.readRun('missing')).toBeNull();
-  await expect(database.acquireRun('run')).rejects.toMatchObject({
-    code: 'STORE_FAILED',
-    reason: 'ENOENT',
-  });
-  expect(existsSync(parent)).toBe(false);
-  expect(database.info.path).toBe(join(parent, 'run.sqlite'));
-});
+test.each(['direct', 'linked'])(
+  'reports absent parents without creating or redirecting a %s path',
+  async (route) => {
+    const target = join(directory, `missing-parent-${route}`);
+    mkdirSync(target);
+    let inputRoot = target;
+    if (route === 'linked') {
+      inputRoot = join(directory, 'missing-parent-alias');
+      symlinkSync(
+        target,
+        inputRoot,
+        process.platform === 'win32' ? 'junction' : 'dir',
+      );
+    }
+    const parent = join(inputRoot, 'absent-parent', 'nested');
+    const database = store(join(parent, 'run.sqlite'));
+    expect(await database.readRun('missing')).toBeNull();
+    await expect(database.acquireRun('run')).rejects.toMatchObject({
+      code: 'STORE_FAILED',
+      reason: 'ENOENT',
+    });
+    expect(existsSync(join(target, 'absent-parent'))).toBe(false);
+    expect(database.info.path).toBe(
+      join(
+        realpathSync.native(target),
+        'absent-parent',
+        'nested',
+        'run.sqlite',
+      ),
+    );
+  },
+);
 
 test('lets two Agents share the database without sharing a run', async () => {
   const h = runnerFixture(2);
