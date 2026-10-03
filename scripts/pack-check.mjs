@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 
 const repositoryRoot = fileURLToPath(new URL('../', import.meta.url));
 const packageRoot = join(repositoryRoot, 'packages/core');
+const sqlitePackageRoot = join(repositoryRoot, 'packages/storage-sqlite');
 const compilerPath = fileURLToPath(import.meta.resolve('typescript/bin/tsc'));
 const coreManifest = /** @type {unknown} */ (
   JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8'))
@@ -51,8 +52,8 @@ function runPnpm(args) {
   });
 }
 
-/** @param {unknown} value */
-function checkPackManifest(value) {
+/** @param {unknown} value @param {string[]} requiredFiles */
+function checkPackManifest(value, requiredFiles) {
   if (
     typeof value !== 'object' ||
     value === null ||
@@ -82,7 +83,12 @@ function checkPackManifest(value) {
       /(^|\/)(?:tests?|__tests__|fixtures)(\/|$)|\.(?:test(?:-d)?|spec)\./,
     );
   }
-  for (const path of ['package.json', 'dist/index.js', 'dist/index.d.ts']) {
+  for (const path of [
+    'package.json',
+    'dist/index.js',
+    'dist/index.d.ts',
+    ...requiredFiles,
+  ]) {
     assert.ok(paths.includes(path), `missing archive entry: ${path}`);
   }
   return value.filename;
@@ -106,9 +112,35 @@ try {
       ]),
     )
   );
-  const tarball = resolve(temporaryRoot, checkPackManifest(packed));
+  const tarball = resolve(temporaryRoot, checkPackManifest(packed, []));
   assert.equal(dirname(tarball), temporaryRoot);
   assert.ok(existsSync(tarball), 'pnpm pack did not create the archive');
+
+  const sqlitePacked = /** @type {unknown} */ (
+    JSON.parse(
+      runPnpm([
+        '--dir',
+        sqlitePackageRoot,
+        'pack',
+        '--json',
+        '--pack-destination',
+        temporaryRoot,
+      ]),
+    )
+  );
+  const sqliteTarball = resolve(
+    temporaryRoot,
+    checkPackManifest(sqlitePacked, [
+      'dist/worker.js',
+      'dist/database.js',
+      'dist/channel.js',
+    ]),
+  );
+  assert.equal(dirname(sqliteTarball), temporaryRoot);
+  assert.ok(
+    existsSync(sqliteTarball),
+    'pnpm pack did not create the SQLite archive',
+  );
 
   // The consumer lives outside the workspace, so package exports and dependencies
   // must resolve from the installed archive rather than source aliases.
@@ -122,22 +154,32 @@ try {
     }),
     { encoding: 'utf8' },
   );
+  writeFileSync(
+    join(consumerRoot, 'pnpm-workspace.yaml'),
+    JSON.stringify({
+      packages: [],
+      overrides: { '@umibe/core': `file:${tarball.replaceAll('\\', '/')}` },
+    }),
+    { encoding: 'utf8' },
+  );
   runPnpm([
     '--dir',
     consumerRoot,
     '--store-dir',
     runPnpm(['store', 'path']).trim(),
-    '--ignore-workspace',
     'add',
     '--offline',
     '--ignore-scripts',
     tarball,
+    sqliteTarball,
     `zod@${coreManifest.dependencies.zod}`,
   ]);
 
   writeFileSync(
     join(consumerRoot, 'consumer.mjs'),
     `import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
+import { SqliteRunStore } from '@umibe/storage-sqlite';
 import { createAgent, ActionRegistry, defineAction, MemoryRunStore, parseJsonValue, parseGoalGraph, parseObservation, prepareCandidates, checkCandidates, filterCandidates, selectCandidates, recheckCandidate } from '@umibe/core';
 import { z } from 'zod';
 
@@ -351,6 +393,19 @@ try {
 } finally {
   await store.close();
 }
+
+assert.equal(existsSync('consumer.sqlite'), false);
+const durable = new SqliteRunStore('consumer.sqlite');
+assert.equal((await durable.inspect()).exists, false);
+assert.equal(existsSync('consumer.sqlite'), false);
+const durableLease = await durable.acquireRun('durable-run');
+await durable.commit({ ownerToken: durableLease.token, runId: durableLease.runId, expectedRevision: null, status: 'paused', rootGoalRef, currentGoalRef: rootGoalRef, stateSchemaVersion: 1, state: { retained: true }, records: [] });
+assert.equal((await durable.readRun('durable-run')).checkpoint.state.retained, true);
+await durable.close();
+const reopened = new SqliteRunStore('consumer.sqlite');
+assert.equal((await reopened.readRun('durable-run')).checkpoint.revision, 1);
+assert.ok(Object.isFrozen((await reopened.readRun('durable-run')).checkpoint.state));
+await reopened.close();
 `,
     { encoding: 'utf8' },
   );
@@ -359,6 +414,14 @@ try {
     join(consumerRoot, 'consumer.mts'),
     `import { createAgent, ActionRegistry, defineAction, MemoryRunStore, prepareCandidates, checkCandidates, filterCandidates, selectCandidates, recheckCandidate, type CandidateProvider, type CandidateGenerationInput, type CandidatePreparationResult, type CandidateCheckingResult, type CandidateFilteringResult, type CandidateSelectionResult, type CandidateRecheckInput, type CandidateRecheckResult, type SelectedCandidate, type Selector, type PreparedAction, type RecordPage, type RunCommit, type AgentOptions, type RunHandle, type ResumeRun, type Reconciliation, type PlanProposal, type GoalRevision, type RuntimeContext } from '@umibe/core';
 import { z } from 'zod';
+
+import { SqliteRunStore, type SqliteInspection } from '@umibe/storage-sqlite';
+import type { RunStore } from '@umibe/core';
+const sqlite = new SqliteRunStore('typed.sqlite');
+const storageContract: RunStore = sqlite;
+const inspection: Promise<SqliteInspection> = sqlite.inspect();
+const closed: Promise<void> = storageContract.close();
+void inspection; void closed;
 
 const action = defineAction({
   id: 'collect', version: 1, description: 'Collect samples', tags: [], expectedEffects: {},
@@ -477,5 +540,7 @@ revision.revisions.push(goalRevision);
   );
 } finally {
   assert.equal(dirname(realpathSync(temporaryRoot)), temporaryParent);
-  rmSync(temporaryRoot, { recursive: true, force: true, maxRetries: 3 });
+  if (process.argv.includes('--keep-temp'))
+    console.log(`Retained package validation workspace: ${temporaryRoot}`);
+  else rmSync(temporaryRoot, { recursive: true, force: true, maxRetries: 3 });
 }

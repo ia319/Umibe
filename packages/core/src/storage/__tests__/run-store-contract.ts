@@ -5,7 +5,6 @@ import type {
   RunStore,
   RunLease,
 } from '../contracts.js';
-import { StoreClosedError } from '../errors.js';
 
 const rootGoalRef = { id: 'root', version: 1 };
 
@@ -91,7 +90,7 @@ function commit(
   };
 }
 
-/** Shared behavioral contract for memory and later SQLite implementations. */
+/** Shared behavioral contract for every RunStore implementation. */
 export function runStoreContract(
   name: string,
   createStore: () => Promise<RunStore>,
@@ -344,9 +343,10 @@ export function runStoreContract(
       await store.commit(commit(firstLease, null, []));
       await store.close();
       await store.close();
-      await expect(store.readRun('run-1')).rejects.toBeInstanceOf(
-        StoreClosedError,
-      );
+      await expect(store.readRun('run-1')).rejects.toMatchObject({
+        code: 'STORE_CLOSED',
+        operation: 'readRun',
+      });
       await expect(store.readRecords('run-1', null, 1)).rejects.toMatchObject({
         code: 'STORE_CLOSED',
         operation: 'readRecords',

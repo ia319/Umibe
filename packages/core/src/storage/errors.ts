@@ -22,8 +22,9 @@ export class StoreError extends Error {
       | 'STORE_VERSION'
       | 'STORE_WORKER_FAILED',
     readonly reason: string,
+    options?: ErrorOptions,
   ) {
-    super(`${code}: ${reason}`);
+    super(`${code}: ${reason}`, options);
     this.name = 'StoreError';
   }
 }

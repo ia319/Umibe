@@ -12,12 +12,8 @@ import {
   requireString,
 } from '../validation/fields.js';
 import type { FieldContext } from '../validation/fields.js';
-import { isJsonArray, parseJsonValue } from '../validation/json.js';
-import {
-  parseRunCheckpoint,
-  parseRunRecord,
-  parseRunSummary,
-} from '../validation/record.js';
+import { parseJsonValue } from '../validation/json.js';
+import { captureRunCommit, prepareRunCommit } from './adapter.js';
 import type {
   CommitResult,
   RecordCursor,
@@ -36,23 +32,10 @@ interface StoredRun {
   readonly intentIds: Set<string>;
 }
 
-const commitContext: FieldContext = {
-  code: 'INVALID_STORE_COMMIT',
-  stage: 'store_commit',
-};
 const queryContext: FieldContext = {
   code: 'INVALID_STORE_QUERY',
   stage: 'store_query',
 };
-
-function invalid(path: string, reason: string): never {
-  throw new ContractError(
-    commitContext.code,
-    commitContext.stage,
-    path,
-    reason,
-  );
-}
 
 /** Operations run in call order; synchronous Promise executors also isolate inputs before returning. */
 export class MemoryRunStore implements RunStore {
@@ -189,157 +172,36 @@ export class MemoryRunStore implements RunStore {
   commit(input: RunCommit): Promise<CommitResult> {
     return new Promise((resolve) => {
       this.ensureOpen('commit');
-      const value = requireObject(
-        parseJsonValue(input, commitContext.stage),
-        commitContext,
-        '',
-      );
-      requireKeys(
-        value,
-        [
-          'ownerToken',
-          'runId',
-          'expectedRevision',
-          'status',
-          'rootGoalRef',
-          'currentGoalRef',
-          'stateSchemaVersion',
-          'state',
-          'records',
-        ],
-        commitContext,
-        '',
-      );
-      const runId = requireString(value.runId, commitContext, '/runId');
-      const token = requireString(
-        value.ownerToken,
-        commitContext,
-        '/ownerToken',
-      );
-      if (this.leases.get(runId)?.token !== token)
+      const captured = captureRunCommit(input);
+      const runId = captured.runId;
+      if (this.leases.get(runId)?.token !== captured.ownerToken)
         throw new StoreError('STORE_OWNERSHIP', 'invalid_owner');
-      const expectedRevision =
-        value.expectedRevision === null
-          ? null
-          : requireInteger(
-              value.expectedRevision,
-              1,
-              commitContext,
-              '/expectedRevision',
-            );
       const current = this.runs.get(runId);
-      const actualRevision = current?.checkpoint.revision ?? null;
-      const revision = (actualRevision ?? 0) + 1;
-      const committedAt = new Date().toISOString();
-      const entries = value.records;
-      if (!isJsonArray(entries)) invalid('/records', 'expected_array');
-      const newEventIds = new Set<string>();
-      const newIntentIds = new Set<string>();
-      const records: RunRecord[] = [];
-      for (const [index, entry] of entries.entries()) {
-        const path = `/records/${index}`;
-        const draft = requireObject(entry, commitContext, path);
-        requireKeys(
-          draft,
-          ['formatVersion', 'eventId', 'runId', 'kind', 'data'],
-          commitContext,
-          path,
-        );
-        if (draft.runId !== runId) invalid(`${path}/runId`, 'cross_run_record');
-        const eventId = requireString(
-          draft.eventId,
-          commitContext,
-          `${path}/eventId`,
-        );
-        if (current?.eventIds.has(eventId) || newEventIds.has(eventId)) {
-          invalid(`${path}/eventId`, 'duplicate_event_id');
+      const result = prepareRunCommit(captured, {
+        revision: current?.checkpoint.revision ?? null,
+        lastSequence: current?.summary.lastSequence ?? 0,
+        hasEvent: (id) => current?.eventIds.has(id) ?? false,
+        hasIntent: (id) => current?.intentIds.has(id) ?? false,
+      });
+      if (result.outcome === 'committed') {
+        const stored = current ?? {
+          summary: result.summary,
+          checkpoint: result.checkpoint,
+          records: [],
+          eventIds: new Set<string>(),
+          intentIds: new Set<string>(),
+        };
+        for (const record of result.records) {
+          stored.records.push(record);
+          stored.eventIds.add(record.eventId);
+          if (record.kind === 'actionIntent')
+            stored.intentIds.add(record.data.executionId);
         }
-        let record: RunRecord;
-        try {
-          record = parseRunRecord({
-            ...draft,
-            sequence: (current?.summary.lastSequence ?? 0) + index + 1,
-            committedAt,
-          });
-        } catch (error) {
-          if (error instanceof ContractError) {
-            invalid(`${path}${error.path}`, error.reason);
-          }
-          throw error;
-        }
-        if (record.kind === 'actionIntent') {
-          if (
-            current?.intentIds.has(record.data.executionId) ||
-            newIntentIds.has(record.data.executionId)
-          ) {
-            invalid(`${path}/data/executionId`, 'duplicate_execution_id');
-          }
-          newIntentIds.add(record.data.executionId);
-        }
-        if (
-          record.kind === 'actionResult' &&
-          !current?.intentIds.has(record.data.executionId) &&
-          !newIntentIds.has(record.data.executionId)
-        ) {
-          invalid(`${path}/data/executionId`, 'missing_action_intent');
-        }
-        newEventIds.add(eventId);
-        records.push(record);
+        stored.summary = result.summary;
+        stored.checkpoint = result.checkpoint;
+        this.runs.set(runId, stored);
       }
-      let summary: RunSummary;
-      let checkpoint: RunCheckpoint;
-      try {
-        summary = parseRunSummary({
-          formatVersion: 1,
-          runId,
-          status: value.status,
-          rootGoalRef: value.rootGoalRef,
-          currentGoalRef: value.currentGoalRef,
-          lastSequence: (current?.summary.lastSequence ?? 0) + records.length,
-          lastActivityAt: committedAt,
-          checkpointRevision: revision,
-        });
-        checkpoint = parseRunCheckpoint({
-          formatVersion: 1,
-          runId,
-          revision,
-          committedSequence: summary.lastSequence,
-          status: summary.status,
-          stateSchemaVersion: value.stateSchemaVersion,
-          state: value.state,
-        });
-      } catch (error) {
-        if (error instanceof ContractError) invalid(error.path, error.reason);
-        throw error;
-      }
-      if (expectedRevision !== actualRevision) {
-        resolve(Object.freeze({ outcome: 'conflict', actualRevision }));
-        return;
-      }
-      if (current === undefined) {
-        this.runs.set(runId, {
-          summary,
-          checkpoint,
-          records,
-          eventIds: newEventIds,
-          intentIds: newIntentIds,
-        });
-      } else {
-        // All validation and conflict checks finish before any shared state changes.
-        for (const record of records) current.records.push(record);
-        for (const eventId of newEventIds) current.eventIds.add(eventId);
-        for (const intentId of newIntentIds) current.intentIds.add(intentId);
-        current.summary = summary;
-        current.checkpoint = checkpoint;
-      }
-      resolve(
-        Object.freeze({
-          outcome: 'committed',
-          summary,
-          checkpoint,
-          records: Object.freeze([...records]),
-        }),
-      );
+      resolve(result);
     });
   }
 
