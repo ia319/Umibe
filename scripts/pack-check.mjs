@@ -156,20 +156,46 @@ try {
   );
   writeFileSync(
     join(consumerRoot, 'pnpm-workspace.yaml'),
-    JSON.stringify({
-      packages: [],
-      overrides: { '@umibe/core': `file:${tarball.replaceAll('\\', '/')}` },
-    }),
+    readFileSync(join(repositoryRoot, 'pnpm-workspace.yaml'), 'utf8'),
     { encoding: 'utf8' },
   );
   runPnpm([
     '--dir',
     consumerRoot,
+    'config',
+    'set',
+    '--location=project',
+    '--json',
+    'packages',
+    '[]',
+  ]);
+  runPnpm([
+    '--dir',
+    consumerRoot,
+    'config',
+    'set',
+    '--location=project',
+    '--json',
+    'overrides',
+    JSON.stringify({ '@umibe/core': `file:${tarball.replaceAll('\\', '/')}` }),
+  ]);
+  runPnpm([
+    '--dir',
+    consumerRoot,
+    'config',
+    'set',
+    '--location=project',
+    'cacheDir',
+    join(temporaryRoot, 'cache'),
+  ]);
+  // A new consumer must resolve and install declared dependencies without the
+  // developer's cached metadata, package files, or previous native builds.
+  runPnpm([
+    '--dir',
+    consumerRoot,
     '--store-dir',
-    runPnpm(['store', 'path']).trim(),
+    join(temporaryRoot, 'store'),
     'add',
-    '--offline',
-    '--ignore-scripts',
     tarball,
     sqliteTarball,
     `zod@${coreManifest.dependencies.zod}`,
