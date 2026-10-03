@@ -160,9 +160,12 @@ export class RunDriver<TCriteria extends JsonValue> {
       (event.executionId === null ||
         event.executionId === session.state.execution?.intent.executionId);
     const active = session.state.control.status === 'running';
+    // Resume must observe invalidations received on either side of the pause boundary.
     const invalidates =
       applicable &&
-      active &&
+      (active ||
+        session.state.control.status === 'pausing' ||
+        session.state.control.status === 'paused') &&
       (event.impact !== 'observation' || event.control === 'interruptAction');
     const decision = captureDecisionRequest({
       ...session.state.decision,

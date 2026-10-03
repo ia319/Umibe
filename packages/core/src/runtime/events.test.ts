@@ -5,6 +5,7 @@ import { candidateSet } from '#internal/candidate/__tests__/fixtures';
 import { createAgent } from './agent.js';
 import {
   applicationEvent,
+  proposalBasis,
   runnerFixture,
 } from './__tests__/runner-fixtures.js';
 
@@ -86,6 +87,53 @@ test('ignores stale execution controls and replans only after an active action s
   await expect(run.result).resolves.toMatchObject({ status: 'succeeded' });
   expect(h.plan).toHaveBeenCalledTimes(2);
 });
+
+test.each(['pausing', 'paused'] as const)(
+  'replans before dispatch after a plan invalidation arrives while %s',
+  async (status) => {
+    vi.useFakeTimers();
+    const h = runnerFixture(0, 1);
+    h.select.mockImplementationOnce(() => new Promise(() => undefined));
+    const agent = h.create();
+    const first = await agent.start(h.input);
+    await vi.advanceTimersByTimeAsync(0);
+    const previousPlan = h.select.mock.calls[0]![0].context.planRef!;
+    const event = applicationEvent({ impact: 'plan' });
+    const paused = agent.pause('run', 'operator_pause');
+    const emitted = status === 'pausing' ? agent.emit(event) : null;
+    await paused;
+    await first.result;
+    if (emitted === null) await agent.emit(event);
+    else await emitted;
+    expect(h.plan).toHaveBeenCalledTimes(1);
+    expect(h.execute).not.toHaveBeenCalled();
+    h.plan.mockImplementation((request) =>
+      Promise.resolve({
+        ...proposalBasis(request),
+        outcome: 'continue',
+        nextGoalRef: request.context.graph.currentGoalRef,
+        guidance: 'Use the updated route',
+      }),
+    );
+
+    const resumed = await agent.resume('run');
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(resumed.result).resolves.toMatchObject({
+      status: 'succeeded',
+    });
+    expect(h.plan).toHaveBeenCalledTimes(2);
+    expect(h.plan.mock.calls[1]![0].trigger).toEqual({
+      kind: 'planInvalidated',
+      eventId: event.eventId,
+    });
+    expect(h.execute).toHaveBeenCalledTimes(1);
+    expect(h.execute.mock.calls[0]![1].decision).toMatchObject({
+      planRef: { id: previousPlan.id, version: previousPlan.version + 1 },
+      planGuidance: 'Use the updated route',
+    });
+    agent.close();
+  },
+);
 
 test('bounds abstention recovery when refreshed candidate IDs and observation revisions change', async () => {
   const h = runnerFixture();
