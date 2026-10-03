@@ -170,7 +170,34 @@ test('commits intent before executing the selected fixed call and records effect
   });
 });
 
-test('uses fresh observation to deny a previously allowed selection without charging an attempt', async () => {
+test('rejects an earlier consumed selection after another selection executes', async () => {
+  const h = await harness({ retryMode: 'never' }, { actionRetries: 1 });
+  await h.coordinator.execute(h.selected);
+  const next = await select(h.registry);
+  await h.coordinator.execute(next);
+
+  await expect(h.coordinator.execute(h.selected)).rejects.toMatchObject({
+    reason: 'selection_already_used',
+  });
+  expect(h.execute).toHaveBeenCalledTimes(2);
+  expect(h.session.state.actionAttempts).toBe(2);
+});
+
+test('rejects a consumed selection across coordinator instances', async () => {
+  const h = await harness({ retryMode: 'never' }, { actionRetries: 1 });
+  await h.coordinator.execute(h.selected);
+  const other = new ActionCoordinator(h.session, h.registry, {
+    observe: h.observe,
+  });
+
+  await expect(other.execute(h.selected)).rejects.toMatchObject({
+    reason: 'selection_already_used',
+  });
+  expect(h.execute).toHaveBeenCalledTimes(1);
+  expect(h.session.state.actionAttempts).toBe(1);
+});
+
+test('denies a fresh recheck without consuming the selection or charging an attempt', async () => {
   const h = await harness();
   h.check.mockImplementation((context) => {
     expect(context.observation.revision).toBe(5);
@@ -182,6 +209,12 @@ test('uses fresh observation to deny a previously allowed selection without char
   });
   expect(h.execute).not.toHaveBeenCalled();
   expect(h.session.state.actionAttempts).toBe(0);
+  h.check.mockResolvedValue({ outcome: 'allowed' });
+  await expect(h.coordinator.execute(h.selected)).resolves.toMatchObject({
+    outcome: 'recorded',
+  });
+  expect(h.execute).toHaveBeenCalledTimes(1);
+  expect(h.session.state.actionAttempts).toBe(1);
 });
 
 test.each(['cancel', 'ancestor'] as const)(

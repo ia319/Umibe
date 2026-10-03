@@ -53,6 +53,7 @@ const validation = {
   code: 'INVALID_RUN_CONTROL',
   stage: 'action_execution',
 } as const;
+const consumedSelections = new WeakSet<SelectedCandidate>();
 
 /** Coordinates one fixed call at a time; it never chooses goals or marks them complete. */
 export class ActionCoordinator {
@@ -66,6 +67,8 @@ export class ActionCoordinator {
   ) {}
 
   /**
+   * Intent admission consumes the selected token across all coordinators.
+   * A denied recheck leaves the token reusable.
    * A retry must name the last execution and retain its exact selected token.
    * No automatic retries occur. Unknown effects retain the session's execution
    * lease until a late result or reconciliation confirms a complete boundary.
@@ -80,7 +83,7 @@ export class ActionCoordinator {
     if (!session.canDispatch(epoch))
       return { outcome: 'notExecuted', reasonCode: 'run_or_decision_inactive' };
     let retries = 0;
-    if (retryOf === null && this.#attempt?.selected === selected)
+    if (retryOf === null && consumedSelections.has(selected))
       throw new ContractError(
         validation.code,
         validation.stage,
@@ -199,6 +202,7 @@ export class ActionCoordinator {
         stop: null,
       };
       this.#attempt = attempt;
+      consumedSelections.add(selected);
       await session.commit(
         {
           ...session.state,
