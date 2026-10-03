@@ -116,6 +116,9 @@ export interface Agent {
     limit: number,
   ): Promise<RecordPage>;
   subscribe(runId: string, listener: (record: RunRecord) => void): () => void;
-  /** Reject while any run is active or any execution remains unresolved. */
+  /**
+   * Release all owned runs after their writes and executions settle.
+   * Throws before closing any run if initialization or work remains active.
+   */
   close(): void;
 }

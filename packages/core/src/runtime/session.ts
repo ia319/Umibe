@@ -161,6 +161,10 @@ export class RunSession {
     return this.#executionOwned;
   }
 
+  get hasPendingCommits(): boolean {
+    return this.#pending > 0;
+  }
+
   /** Holds the run across preparation, dispatch and uncertain external effects. */
   claimExecution(): () => void {
     this.ensureOpen();

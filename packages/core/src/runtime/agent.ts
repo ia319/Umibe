@@ -264,6 +264,7 @@ export function createAgent<TCriteria extends JsonValue>(
           ({ session, restoring }) =>
             restoring ||
             session.hasExecution ||
+            session.hasPendingCommits ||
             (session.failure === null &&
               ['running', 'pausing', 'cancelling'].includes(
                 session.state.control.status,

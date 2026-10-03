@@ -1,6 +1,10 @@
 import { afterEach, expect, test, vi } from 'vitest';
 import { createAgent } from '#internal/runtime/agent';
-import { runnerFixture } from './__tests__/runner-fixtures.js';
+import {
+  applicationEvent,
+  proposalBasis,
+  runnerFixture,
+} from './__tests__/runner-fixtures.js';
 
 afterEach(() => vi.useRealTimers());
 
@@ -18,6 +22,83 @@ test('completes an already satisfied root without planning or executing', async 
   agent.close();
   expect(await h.store.readRun('run')).not.toBeNull();
 });
+
+test.each(['paused', 'cancelled'] as const)(
+  'rejects close without closing any run while a %s run has pending writes',
+  async (status) => {
+    const h = runnerFixture();
+    h.plan.mockImplementation((request) =>
+      Promise.resolve({
+        ...proposalBasis(request),
+        outcome: 'blocked',
+        reason: 'needs_input',
+      }),
+    );
+    let initializingRunId = 'run';
+    const dispose = vi.fn();
+    const agent = createAgent({
+      ...h.options,
+      environment: {
+        async observe(context, control) {
+          return {
+            ...(await h.observe(context, control)),
+            runId: context?.graph.runId ?? initializingRunId,
+          };
+        },
+        subscribe: () => dispose,
+      },
+    });
+    const first = await agent.start(h.input);
+    await first.result;
+    initializingRunId = 'other';
+    const second = await agent.start({ ...h.input, runId: 'other' });
+    await second.result;
+    if (status === 'cancelled') await agent.cancel('other', 'user_cancelled');
+    expect((await agent.inspect('other'))?.summary.status).toBe(status);
+
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const commit = h.store.commit.bind(h.store);
+    vi.spyOn(h.store, 'commit').mockImplementation(async (input) => {
+      if (
+        input.runId === 'other' &&
+        input.records.some((record) => record.kind === 'applicationEvent')
+      ) {
+        entered();
+        await gate;
+      }
+      return commit(input);
+    });
+    const pending = agent.emit(
+      applicationEvent({ runId: 'other', impact: 'observation' }),
+    );
+    await started;
+    try {
+      expect(() => agent.close()).toThrowError(
+        expect.objectContaining({ reason: 'agent_active' }),
+      );
+      expect(dispose).not.toHaveBeenCalled();
+      const records = vi.fn();
+      agent.subscribe(first.runId, records);
+      await agent.emit(applicationEvent({ impact: 'observation' }));
+      expect(records).toHaveBeenCalled();
+    } finally {
+      release();
+      await pending;
+      agent.close();
+    }
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(() => agent.subscribe(first.runId, vi.fn())).toThrowError(
+      expect.objectContaining({ reason: 'agent_closed' }),
+    );
+  },
+);
 
 test('runs multiple fixed calls through the public API while retaining the accepted plan', async () => {
   const h = runnerFixture();
