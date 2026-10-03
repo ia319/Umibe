@@ -23,6 +23,14 @@ export interface ProposedGoal {
   readonly criteria: Exclude<JsonValue, null>;
 }
 
+export interface GoalRevision {
+  readonly goalRef: GoalRef;
+  /** Bind to an accepted parent, or the old reference of a parent in this revision batch. */
+  readonly parentGoalRef: GoalRef;
+  readonly description: string;
+  readonly criteria: Exclude<JsonValue, null>;
+}
+
 interface ProposalBasis {
   readonly requestId: string;
   readonly decisionEpoch: number;
@@ -38,17 +46,29 @@ export type PlanProposal = ProposalBasis &
         readonly outcome: 'continue';
         readonly nextGoalRef: GoalRef;
         readonly guidance: string;
+        readonly goalOrder?: readonly GoalRef[];
       }
     | {
         readonly outcome: 'decompose';
         readonly goals: readonly ProposedGoal[];
         readonly nextTempId: string;
         readonly guidance: string;
+        /** Temporary IDs in advancement order; omission uses proposal order. */
+        readonly goalOrder?: readonly string[];
       }
     | {
         readonly outcome: 'switch';
         readonly nextGoalRef: GoalRef;
         readonly guidance: string;
+        readonly goalOrder?: readonly GoalRef[];
+      }
+    | {
+        readonly outcome: 'revise' | 'reconfirm';
+        readonly revisions: readonly GoalRevision[];
+        /** Reference before revision; the core selects the newly accepted version. */
+        readonly nextGoalRef: GoalRef;
+        readonly guidance: string;
+        readonly goalOrder?: readonly GoalRef[];
       }
     | { readonly outcome: 'blocked'; readonly reason: string }
     | { readonly outcome: 'claimComplete'; readonly goalRef: GoalRef }

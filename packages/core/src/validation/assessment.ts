@@ -71,7 +71,14 @@ export function readGoalAssessment(
   const object = requireObject(value, context, path);
   requireKeys(
     object,
-    ['goalRef', 'observationRef', 'outcome', 'evidence', 'reason'],
+    [
+      'goalRef',
+      'observationRef',
+      'outcome',
+      'evidence',
+      'reason',
+      ...(object.progress === undefined ? [] : ['progress']),
+    ],
     context,
     path,
   );
@@ -94,6 +101,21 @@ export function readGoalAssessment(
       ? null
       : readEvidence(object.evidence, context, `${path}/evidence`);
   if (
+    object.progress !== undefined &&
+    (typeof object.progress !== 'number' ||
+      !Number.isFinite(object.progress) ||
+      object.progress < 0 ||
+      evidence === null)
+  )
+    throw new ContractError(
+      context.code,
+      context.stage,
+      `${path}/progress`,
+      'invalid_progress',
+    );
+  const progress =
+    typeof object.progress === 'number' ? { progress: object.progress } : {};
+  if (
     object.outcome === 'passed' &&
     evidence !== null &&
     object.reason === null
@@ -104,6 +126,7 @@ export function readGoalAssessment(
       outcome: 'passed',
       evidence,
       reason: null,
+      ...progress,
     });
   }
   if (object.outcome === 'notYet' || object.outcome === 'needsInput') {
@@ -113,6 +136,7 @@ export function readGoalAssessment(
       outcome: object.outcome,
       evidence,
       reason: requireString(object.reason, context, `${path}/reason`),
+      ...progress,
     });
   }
   throw new ContractError(

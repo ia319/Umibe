@@ -25,6 +25,7 @@ export { parseGoalGraph } from '#internal/validation/goal';
 export type {
   PlanProposal,
   PlanningTrigger,
+  GoalRevision,
   ProposedGoal,
   ProposedParent,
 } from '#internal/contracts/planning';
@@ -40,6 +41,7 @@ export type {
   CandidateRequest,
   CriteriaSupport,
   DecisionContext,
+  RuntimeContext,
   Environment,
   Planner,
   PlannerRequest,
@@ -133,3 +135,18 @@ export type {
 } from '#internal/storage/contracts';
 export { MemoryRunStore } from '#internal/storage/memory';
 export { StoreClosedError } from '#internal/storage/errors';
+export { createAgent } from '#internal/runtime/agent';
+export { ModelRequestError } from '#internal/runtime/model';
+export type { RuntimeLimits as RunLimits } from '#internal/runtime/limits';
+export type { RuntimeDiagnostic } from '#internal/runtime/session';
+export type {
+  Agent,
+  AgentOptions,
+  GoalDefinition,
+  ModelStage,
+  RunHandle,
+  RunInspection,
+  RunResult,
+  ResumeRun,
+  StartRun,
+} from '#internal/contracts/runtime';

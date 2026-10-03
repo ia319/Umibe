@@ -18,6 +18,7 @@ import { isJsonArray, parseJsonValue } from '#internal/validation/json';
 import { parseObservation } from '#internal/validation/observation';
 import { readActionResult } from '#internal/validation/record';
 import { readGoalRef, readPlanRef } from '#internal/validation/references';
+import { readRuntimeContext } from '#internal/validation/runtime-context';
 
 const context: FieldContext = {
   code: 'INVALID_CANDIDATE_REQUEST',
@@ -46,6 +47,10 @@ export function captureDecisionRequest(
       'effectiveConstraints',
       'lastActionResult',
       'recentEvents',
+      ...(Object.hasOwn(raw, 'applicationContext')
+        ? ['applicationContext']
+        : []),
+      ...(Object.hasOwn(raw, 'runtime') ? ['runtime'] : []),
     ],
     context,
     '/context',
@@ -169,6 +174,24 @@ export function captureDecisionRequest(
               '/context/lastActionResult',
             ),
       recentEvents: Object.freeze(recentEvents),
+      ...(raw.applicationContext === undefined
+        ? {}
+        : {
+            applicationContext: requireObject(
+              raw.applicationContext,
+              context,
+              '/context/applicationContext',
+            ),
+          }),
+      ...(raw.runtime === undefined
+        ? {}
+        : {
+            runtime: readRuntimeContext(
+              raw.runtime,
+              context,
+              '/context/runtime',
+            ),
+          }),
     }),
   });
 }

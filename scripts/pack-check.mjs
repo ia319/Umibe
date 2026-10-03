@@ -138,7 +138,7 @@ try {
   writeFileSync(
     join(consumerRoot, 'consumer.mjs'),
     `import assert from 'node:assert/strict';
-import { ActionRegistry, defineAction, MemoryRunStore, parseJsonValue, parseGoalGraph, parseObservation, prepareCandidates, checkCandidates, filterCandidates, selectCandidates, recheckCandidate } from '@umibe/core';
+import { createAgent, ActionRegistry, defineAction, MemoryRunStore, parseJsonValue, parseGoalGraph, parseObservation, prepareCandidates, checkCandidates, filterCandidates, selectCandidates, recheckCandidate } from '@umibe/core';
 import { z } from 'zod';
 
 let defaultCalls = 0;
@@ -232,6 +232,95 @@ assert.equal(defaultCalls, defaultsAfterPreparation);
 await assert.rejects(recheckCandidate({ ...selection }, { requestId: 'copied', decisionEpoch: 1, context }, registry, { signal: new AbortController().signal, deadlineAt: new Date(Date.now() + 30_000).toISOString() }), { reason: 'unselected_candidate' });
 await assert.rejects(checkCandidates({ ...generation.prepared }, { signal: new AbortController().signal, deadlineAt: new Date(Date.now() + 30_000).toISOString() }), { reason: 'unprepared_candidates' });
 
+const agentStore = new MemoryRunStore();
+const agent = createAgent({
+  actions: [action], store: agentStore,
+  environment: { observe: () => Promise.resolve({ ...context.observation, runId: 'agent-consumer', data: { ready: { status: 'known', value: true } } }) },
+  planner: { plan: () => { throw new Error('Already satisfied goal must not plan'); } },
+  selector: { select: () => { throw new Error('Already satisfied goal must not select'); } },
+  candidateProvider: { generate: () => { throw new Error('Already satisfied goal must not generate'); } },
+  verifier: {
+    support: (criteria) => Promise.resolve({ outcome: 'supported', criteria, requiredEvidence: [] }),
+    verify: ({ goal, context }) => Promise.resolve({
+      goalRef: { id: goal.id, version: goal.version },
+      observationRef: { id: context.observation.id, revision: context.observation.revision },
+      outcome: 'passed', reason: null,
+      evidence: { source: 'application', observationPaths: ['/ready'], executionIds: [], details: {} },
+    }),
+  },
+});
+const handle = await agent.start({
+  runId: 'agent-consumer',
+  goal: { id: 'root', version: 1, description: 'Already satisfied', criteria: { ready: true }, hardConstraints: [], limits: {}, preferences: [] },
+  effectiveConstraints: {},
+});
+assert.equal((await handle.result).status, 'succeeded');
+assert.equal((await agent.inspect(handle.runId)).summary.status, 'succeeded');
+agent.close();
+assert.ok(await agentStore.readRun(handle.runId));
+await agentStore.close();
+
+let collected = 0;
+let revision = 0;
+let plans = 0;
+const executionDepths = [];
+const taskStore = new MemoryRunStore();
+const taskAgent = createAgent({
+  store: taskStore, limits: { maxActionAttempts: 1 }, modelStages: ['planning', 'selection'],
+  actions: [defineAction({
+    id: 'sample', version: 1, description: 'Take one sample', tags: [], expectedEffects: { count: 1 }, parameters: z.strictObject({}),
+    check: () => Promise.resolve({ outcome: 'allowed' }),
+    execute: (_params, execution) => {
+      executionDepths.push(execution.decision.graph.goalPath.length);
+      collected += 1;
+      return Promise.resolve({ executionId: execution.executionId, outcome: 'succeeded', reasonCode: 'sampled', underlyingSettled: true, confirmedEffects: { count: collected }, unresolvedEffects: {}, progress: {}, stopCauseEventId: null });
+    },
+  })],
+  environment: { observe: () => Promise.resolve({ ...context.observation, runId: 'nested-consumer', revision: ++revision, observedAt: new Date().toISOString(), data: { count: { status: 'known', value: collected } } }) },
+  planner: { plan(request) {
+    plans += 1;
+    const current = request.context;
+    return Promise.resolve({ requestId: request.requestId, decisionEpoch: request.decisionEpoch, rootGoalRef: current.graph.rootGoalRef, currentGoalRef: current.graph.currentGoalRef, planRef: current.planRef, observationRef: { id: current.observation.id, revision: current.observation.revision }, outcome: 'decompose', guidance: 'Complete the nested branch, then the sibling', nextTempId: 'first', goalOrder: ['first', 'second', 'third'], goals: [
+      { tempId: 'group', parent: { kind: 'accepted', goalRef: current.graph.rootGoalRef }, description: 'Two samples', criteria: { count: 2 } },
+      { tempId: 'first', parent: { kind: 'proposed', tempId: 'group' }, description: 'First sample', criteria: { count: 1 } },
+      { tempId: 'second', parent: { kind: 'proposed', tempId: 'group' }, description: 'Second sample', criteria: { count: 2 } },
+      { tempId: 'third', parent: { kind: 'accepted', goalRef: current.graph.rootGoalRef }, description: 'Third sample', criteria: { count: 3 } },
+    ] });
+  } },
+  candidateProvider: { generate(request) {
+    const current = request.context;
+    const observationRef = { id: current.observation.id, revision: current.observation.revision };
+    return Promise.resolve({ id: request.requestId, runId: current.graph.runId, rootGoalRef: current.graph.rootGoalRef, currentGoalRef: current.graph.currentGoalRef, goalPathRef: 'samples', goalPath: current.graph.goalPath, planRef: current.planRef, observationRef, constraintsVersion: current.constraintsVersion,
+      coverage: { generation: 'complete', checking: 'complete', uncheckedScopes: [], truncated: false, exclusions: [], informationGaps: [], capabilityGaps: [] },
+      candidates: [{ id: 'next', candidateSetId: request.requestId, actionId: 'sample', actionVersion: 1, params: {}, paramSources: {}, description: 'Take a sample', expectedEffects: { count: 1 }, cost: null, risk: null, source: 'consumer', goalRef: current.graph.currentGoalRef, goalPathRef: 'samples', planRef: current.planRef, observationRef, constraintsVersion: current.constraintsVersion }],
+    });
+  } },
+  selector: { select: (request) => Promise.resolve({ outcome: 'selected', decisionId: request.requestId, candidateSetId: request.candidates.id, candidateId: request.candidates.candidates[0].id }) },
+  verifier: {
+    support: (criteria) => Promise.resolve({ outcome: 'supported', criteria: z.strictObject({ count: z.number() }).parse(criteria), requiredEvidence: ['/count'] }),
+    verify: ({ goal, criteria, context }) => Promise.resolve({ goalRef: { id: goal.id, version: goal.version }, observationRef: { id: context.observation.id, revision: context.observation.revision }, outcome: collected >= criteria.count ? 'passed' : 'notYet', reason: collected >= criteria.count ? null : 'more_samples', progress: collected, evidence: { source: 'application', observationPaths: ['/count'], executionIds: [], details: {} } }),
+  },
+});
+const firstInterval = await taskAgent.start({ runId: 'nested-consumer', goal: { id: 'root', version: 1, description: 'Three samples', criteria: { count: 3 }, hardConstraints: [], limits: {}, preferences: [] }, effectiveConstraints: {} });
+assert.equal((await firstInterval.result).status, 'paused');
+assert.equal(collected, 1);
+const pausedTask = await taskAgent.inspect('nested-consumer');
+const notification = { kind: 'application', eventId: 'operator-ready', runId: 'nested-consumer', type: 'operator_ready', source: { kind: 'application', id: 'consumer' }, observedAt: new Date().toISOString(), reasonCode: 'budget_approved', impact: 'observation', timing: 'immediate', control: 'none', currentGoalRef: null, planRef: null, goalPathRef: null, executionId: null, observationRef: null, affectedGoalRefs: [], details: {} };
+await taskAgent.emit(notification);
+await taskAgent.emit(notification);
+const resumedTask = await taskAgent.resume('nested-consumer', { limits: { maxActionAttempts: 3 } });
+assert.notEqual(firstInterval.result, resumedTask.result);
+assert.equal((await resumedTask.result).status, 'succeeded');
+const completedTask = await taskAgent.inspect('nested-consumer');
+assert.equal(completedTask.checkpoint.state.actionAttempts, 3);
+assert.equal(completedTask.checkpoint.state.goals.created, 4);
+assert.ok(completedTask.checkpoint.state.modelAttempts > pausedTask.checkpoint.state.modelAttempts);
+assert.deepEqual(executionDepths, [3, 3, 2]);
+assert.equal(plans, 1);
+assert.equal((await taskAgent.records('nested-consumer', null, 1000)).records.filter((record) => record.kind === 'applicationEvent').length, 1);
+taskAgent.close();
+await taskStore.close();
+
 const snapshot = parseJsonValue({ ready: true }, 'consumer');
 assert.equal(Object.getPrototypeOf(snapshot), null);
 assert.equal(snapshot.constructor, undefined);
@@ -266,7 +355,7 @@ try {
 
   writeFileSync(
     join(consumerRoot, 'consumer.mts'),
-    `import { ActionRegistry, defineAction, MemoryRunStore, prepareCandidates, checkCandidates, filterCandidates, selectCandidates, recheckCandidate, type CandidateProvider, type CandidateGenerationInput, type CandidatePreparationResult, type CandidateCheckingResult, type CandidateFilteringResult, type CandidateSelectionResult, type CandidateRecheckInput, type CandidateRecheckResult, type SelectedCandidate, type Selector, type PreparedAction, type RecordPage, type RunCommit } from '@umibe/core';
+    `import { createAgent, ActionRegistry, defineAction, MemoryRunStore, prepareCandidates, checkCandidates, filterCandidates, selectCandidates, recheckCandidate, type CandidateProvider, type CandidateGenerationInput, type CandidatePreparationResult, type CandidateCheckingResult, type CandidateFilteringResult, type CandidateSelectionResult, type CandidateRecheckInput, type CandidateRecheckResult, type SelectedCandidate, type Selector, type PreparedAction, type RecordPage, type RunCommit, type AgentOptions, type RunHandle, type ResumeRun, type Reconciliation, type PlanProposal, type GoalRevision, type RuntimeContext } from '@umibe/core';
 import { z } from 'zod';
 
 const action = defineAction({
@@ -332,6 +421,23 @@ const input: RunCommit = {
 const store = new MemoryRunStore();
 const page: Promise<RecordPage> = store.readRecords(input.runId, null, 1);
 void page;
+
+declare const options: AgentOptions<{ count: number }>;
+const agent = createAgent(options);
+const start: Promise<RunHandle> = agent.start({ runId: 'typed-run', goal: { id: 'root', version: 1, description: 'Samples', criteria: { count: 3 }, hardConstraints: [], limits: {}, preferences: [] }, effectiveConstraints: {} });
+const update: ResumeRun = { context: { approved: true }, limits: { maxActionAttempts: 200 } };
+const resume: Promise<RunHandle> = agent.resume('typed-run', update);
+const cleanup: Promise<Reconciliation> = agent.reconcile('typed-run');
+void start; void resume; void cleanup;
+// @ts-expect-error Resume cannot rewrite callback timeout configuration.
+agent.resume('typed-run', { limits: { callbackTimeoutMs: 1000 } });
+declare const runtime: RuntimeContext;
+// @ts-expect-error Execution history is a readonly snapshot.
+runtime.recentResults.push(runtime.recentResults[0]!);
+declare const revision: Extract<PlanProposal, { outcome: 'revise' | 'reconfirm' }>;
+declare const goalRevision: GoalRevision;
+// @ts-expect-error Revision entries cannot be appended.
+revision.revisions.push(goalRevision);
 `,
     { encoding: 'utf8' },
   );

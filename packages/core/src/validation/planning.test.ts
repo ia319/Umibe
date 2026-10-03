@@ -196,3 +196,83 @@ test('completion advice cannot substitute for verification', () => {
   expect(proposal.outcome).toBe('claimComplete');
   expect(input.context.graph.goals[0]?.lifecycle).toBe('inProgress');
 });
+
+test('validates revision relations, immutable roots and reconfirmation content', () => {
+  const input = request();
+  const limits = { maxNewGoals: 2, maxTotalGoals: 4, maxDepth: 4 };
+  const child = input.context.graph.goals[1]!;
+  const proposal = {
+    ...basis(input),
+    outcome: 'revise',
+    nextGoalRef: input.context.graph.currentGoalRef,
+    guidance: 'Search again',
+    revisions: [
+      {
+        goalRef: input.context.graph.currentGoalRef,
+        parentGoalRef: input.context.graph.rootGoalRef,
+        description: child.description,
+        criteria: child.criteria,
+      },
+    ],
+  };
+  expect(parsePlanProposal(proposal, input, limits).outcome).toBe('revise');
+  expect(() =>
+    parsePlanProposal(
+      {
+        ...proposal,
+        revisions: [
+          {
+            ...proposal.revisions[0],
+            parentGoalRef: input.context.graph.currentGoalRef,
+          },
+        ],
+      },
+      input,
+      limits,
+    ),
+  ).toThrowError(expect.objectContaining({ reason: 'self_parent' }));
+  expect(() =>
+    parsePlanProposal(
+      {
+        ...proposal,
+        revisions: [
+          {
+            ...proposal.revisions[0],
+            goalRef: input.context.graph.rootGoalRef,
+          },
+        ],
+      },
+      input,
+      limits,
+    ),
+  ).toThrowError(expect.objectContaining({ reason: 'missing_or_stale_child' }));
+  expect(() =>
+    parsePlanProposal(
+      {
+        ...proposal,
+        outcome: 'reconfirm',
+        revisions: [
+          { ...proposal.revisions[0], criteria: { newCondition: true } },
+        ],
+      },
+      input,
+      limits,
+    ),
+  ).toThrowError(
+    expect.objectContaining({ reason: 'reconfirmation_changed_definition' }),
+  );
+  expect(() =>
+    parsePlanProposal(
+      {
+        ...proposal,
+        goalOrder: [
+          input.context.graph.currentGoalRef,
+          input.context.graph.currentGoalRef,
+        ],
+      },
+      input,
+      limits,
+    ),
+  ).toThrowError(expect.objectContaining({ reason: 'duplicate_goal_ref' }));
+  expect(input.context.graph.goals[1]!.version).toBe(1);
+});

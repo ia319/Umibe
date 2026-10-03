@@ -1,6 +1,11 @@
 import type { ActionResult } from './record.js';
 import type { ApplicationEvent } from './event.js';
-import type { GoalAssessment, GoalGraphSnapshot, GoalRecord } from './goal.js';
+import type {
+  ChildGoalRecord,
+  GoalAssessment,
+  GoalGraphSnapshot,
+  GoalRecord,
+} from './goal.js';
 import type { JsonObject, JsonValue } from './json.js';
 import type { Observation } from './observation.js';
 import type { PlanRef } from './references.js';
@@ -8,6 +13,28 @@ import type { CandidateSet } from './candidate.js';
 import type { CandidateFilterResult } from './candidate-filter.js';
 import type { SelectionResult } from './selection.js';
 import type { PlanProposal, PlanningTrigger } from './planning.js';
+import type { GoalProgress } from '#internal/runtime/progress';
+import type { GoalRef } from './references.js';
+
+export interface RuntimeContext {
+  readonly execution: {
+    readonly executionId: string;
+    readonly phase: 'prepared' | 'running' | ActionResult['outcome'];
+  } | null;
+  readonly recentResults: readonly ActionResult[];
+  readonly progress: readonly Pick<
+    GoalProgress,
+    'goalRef' | 'noProgress' | 'recoveryAttempts' | 'highWater'
+  >[];
+  readonly blocker: {
+    readonly eventId: string;
+    readonly reasonCode: string;
+  } | null;
+  readonly completedSiblings: readonly {
+    readonly goalRef: GoalRef;
+    readonly assessment: GoalAssessment;
+  }[];
+}
 
 /** One invocation owns its cancellation signal; a cancelled call cannot authorize a later effect. */
 export interface CallControl {
@@ -26,6 +53,10 @@ export interface DecisionContext {
   readonly effectiveConstraints: JsonObject;
   readonly lastActionResult: ActionResult | null;
   readonly recentEvents: readonly ApplicationEvent[];
+  /** Application-supplied task context; separate from observed facts and hard constraints. */
+  readonly applicationContext?: JsonObject;
+  /** Bounded runtime history; historical evidence never replaces the current observation. */
+  readonly runtime?: RuntimeContext;
 }
 
 export interface ActionCapability {
@@ -43,6 +74,8 @@ export interface PlannerRequest {
   readonly context: DecisionContext;
   readonly capabilities: readonly ActionCapability[];
   readonly trigger: PlanningTrigger;
+  /** Invalidated descendants retained for explicit revision or reconfirmation. */
+  readonly pendingGoals?: readonly ChildGoalRecord[];
 }
 
 /** The core validates and accepts a proposal; the planner never mutates accepted goals. */
