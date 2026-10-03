@@ -27,7 +27,7 @@ const context: FieldContext = {
 
 /** Validate and detach a request; each stage checks lifecycle and plan availability. */
 export function captureDecisionRequest(
-  input: Omit<CandidateRequest, 'capabilities'>,
+  input: unknown,
 ): Omit<CandidateRequest, 'capabilities'> {
   const object = requireObject(
     parseJsonValue(input, context.stage),

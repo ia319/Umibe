@@ -136,6 +136,8 @@ export type {
 export { MemoryRunStore } from '#internal/storage/memory';
 export { StoreClosedError } from '#internal/storage/errors';
 export { createAgent } from '#internal/runtime/agent';
+export { parseRuntimeCheckpoint } from '#internal/runtime/checkpoint';
+export type { RuntimeCheckpoint } from '#internal/runtime/checkpoint';
 export { ModelRequestError } from '#internal/runtime/model';
 export type { RuntimeLimits as RunLimits } from '#internal/runtime/limits';
 export type { RuntimeDiagnostic } from '#internal/runtime/session';

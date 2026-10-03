@@ -140,7 +140,7 @@ function readCoreEvent(value: JsonValue | undefined): CoreEventData {
   });
 }
 
-function readActionIntent(value: JsonValue | undefined): ActionIntent {
+export function readActionIntent(value: JsonValue | undefined): ActionIntent {
   const path = '/data';
   const object = requireObject(value, recordContext, path);
   requireKeys(

@@ -207,6 +207,21 @@ export function createAgent<TCriteria extends JsonValue>(
           },
           options.onDiagnostic ?? (() => undefined),
           limits,
+          {
+            applicationId:
+              options.applicationId === undefined
+                ? null
+                : requireString(
+                    options.applicationId,
+                    validation,
+                    '/applicationId',
+                  ),
+            actionVersions: registry.capabilities.map(({ id, version }) => ({
+              id,
+              version,
+            })),
+            modelStages: [...options.modelStages],
+          },
         );
         const driver = new RunDriver(session, registry, options);
         runs.set(runId, driver);

@@ -17,8 +17,12 @@ import type { SchedulingState } from './scheduling.js';
 import type { GoalState } from './goals.js';
 import type { GoalProgress, ProgressAttempt } from './progress.js';
 import type { ActionResult } from '#internal/contracts/record';
+import { runtimeStateSchemaVersion } from './checkpoint.js';
+import type { RuntimeIdentity, PendingModelAttempt } from './checkpoint.js';
 
 export interface SessionState {
+  readonly identity: RuntimeIdentity;
+  readonly pendingModels: readonly PendingModelAttempt[];
   readonly control: RunControlState;
   readonly decision: CandidateGenerationInput;
   readonly limits: RuntimeLimits;
@@ -75,9 +79,12 @@ export class RunSession {
     decision: CandidateGenerationInput,
     private readonly diagnose: (diagnostic: RuntimeDiagnostic) => void,
     limits: RuntimeLimits,
+    identity: RuntimeIdentity,
   ) {
     this.runId = decision.context.graph.runId;
     this.#state = Object.freeze({
+      identity,
+      pendingModels: [],
       control: createRunControl(decision.context.graph.rootGoalRef),
       decision,
       limits,
@@ -108,6 +115,11 @@ export class RunSession {
     input: CandidateGenerationInput,
     diagnose: (diagnostic: RuntimeDiagnostic) => void,
     limits: Partial<RuntimeLimits> = {},
+    identity: RuntimeIdentity = {
+      applicationId: null,
+      actionVersions: [],
+      modelStages: [],
+    },
   ): Promise<RunSession> {
     const decision = captureDecisionRequest(input);
     const capturedLimits = captureLimits(limits);
@@ -125,7 +137,13 @@ export class RunSession {
         'run_owned',
       );
     owned.add(runId);
-    const session = new RunSession(store, decision, diagnose, capturedLimits);
+    const session = new RunSession(
+      store,
+      decision,
+      diagnose,
+      capturedLimits,
+      identity,
+    );
     try {
       await session.commit(session.state, [
         session.event('run_created', 'created', {}),
@@ -428,7 +446,7 @@ export class RunSession {
         status: state.control.status,
         rootGoalRef: state.control.rootGoalRef,
         currentGoalRef: state.decision.context.graph.currentGoalRef,
-        stateSchemaVersion: 1,
+        stateSchemaVersion: runtimeStateSchemaVersion,
         state: checkpointState,
         records,
       });

@@ -64,6 +64,8 @@ export interface ResumeRun {
 }
 
 export interface AgentOptions<TCriteria extends JsonValue = JsonValue> {
+  /** Stable application identity; required by durable stores. Never use credentials here. */
+  readonly applicationId?: string;
   readonly actions: readonly RegisteredAction[];
   readonly planner: Planner;
   readonly selector: Selector;
