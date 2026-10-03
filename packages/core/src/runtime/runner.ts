@@ -61,8 +61,6 @@ export class RunDriver<TCriteria extends JsonValue> {
   >();
   #decisionController = new AbortController();
   #refresh = false;
-  #progressAttempt: { before: GoalGraphSnapshot; failed: boolean } | null =
-    null;
   #resumeController: AbortController | null = null;
   #loopDelay: IntervalHistogram | null = null;
 
@@ -347,7 +345,6 @@ export class RunDriver<TCriteria extends JsonValue> {
         this.#criteria.clear();
         this.#criteria.set(`${root.id}:${root.version}`, criteria);
       }
-      this.#progressAttempt = null;
       await session.transition({ kind: 'resume' });
       const handle = this.handle();
       this.start();
@@ -665,8 +662,7 @@ export class RunDriver<TCriteria extends JsonValue> {
       await this.verifyGoal(goal);
       if (session.state.control.status !== 'running') return;
     }
-    const attempt = this.#progressAttempt;
-    this.#progressAttempt = null;
+    const attempt = session.state.progressAttempt;
     await this.recordProgress(
       attempt?.before ?? session.state.decision.context.graph,
       attempt === null ? 'baseline' : 'action',
@@ -755,10 +751,13 @@ export class RunDriver<TCriteria extends JsonValue> {
           : item,
       );
     const epoch = session.state.decision.decisionEpoch;
+    // Consume the attempt with its counters so a pause cannot count it twice.
     await session.commit(
       {
         ...session.state,
         progress,
+        progressAttempt:
+          attempt === 'action' ? null : session.state.progressAttempt,
         scheduling:
           recovery && !blocked
             ? {
@@ -1100,7 +1099,6 @@ export class RunDriver<TCriteria extends JsonValue> {
             await this.block(`selection_${selected.outcome}`);
           break;
         }
-        const before = session.state.decision.context.graph;
         const result = await this.execution.execute(selected);
         if (session.state.control.status !== 'running') break;
         if (result.outcome !== 'recorded') {
@@ -1118,10 +1116,6 @@ export class RunDriver<TCriteria extends JsonValue> {
           },
           [],
         );
-        this.#progressAttempt = {
-          before,
-          failed: result.result.outcome === 'failed',
-        };
         if (this.#refresh) continue;
         await this.verify();
       }

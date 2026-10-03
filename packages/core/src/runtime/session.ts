@@ -15,7 +15,7 @@ import type { RuntimeLimits } from './limits.js';
 import type { ExecutionSnapshot } from './execution.js';
 import type { SchedulingState } from './scheduling.js';
 import type { GoalState } from './goals.js';
-import type { GoalProgress } from './progress.js';
+import type { GoalProgress, ProgressAttempt } from './progress.js';
 import type { ActionResult } from '#internal/contracts/record';
 
 export interface SessionState {
@@ -28,6 +28,7 @@ export interface SessionState {
   readonly scheduling: SchedulingState;
   readonly goals: GoalState;
   readonly progress: readonly GoalProgress[];
+  readonly progressAttempt: ProgressAttempt | null;
   readonly recentResults: readonly ActionResult[];
 }
 
@@ -84,6 +85,7 @@ export class RunSession {
       actionAttempts: 0,
       execution: null,
       progress: [],
+      progressAttempt: null,
       recentResults: [],
       goals: {
         created: decision.context.graph.goals.length - 1,
@@ -226,7 +228,16 @@ export class RunSession {
       stopCause: control.stopCause === null ? null : { ...control.stopCause },
       blocker: control.blocker === null ? null : { ...control.blocker },
     });
-    let state = { ...this.#state, control };
+    let state = {
+      ...this.#state,
+      control,
+      progressAttempt:
+        control.status === 'succeeded' ||
+        control.status === 'cancelled' ||
+        control.status === 'failed'
+          ? null
+          : this.#state.progressAttempt,
+    };
     const closed =
       control.status === 'cancelled'
         ? state.decision.context.graph.goals.filter(

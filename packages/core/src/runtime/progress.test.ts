@@ -1,7 +1,9 @@
-import { expect, test } from 'vitest';
+import { afterEach, expect, test, vi } from 'vitest';
 import { createAgent } from './agent.js';
 import type { GoalAssessment } from '#internal/contracts/goal';
 import { proposalBasis, runnerFixture } from './__tests__/runner-fixtures.js';
+
+afterEach(() => vi.useRealTimers());
 
 test('does not clear no-progress or failed recovery counts on an arbitrary success or resume', async () => {
   const h = runnerFixture(0, 100);
@@ -25,6 +27,166 @@ test('does not clear no-progress or failed recovery counts on an arbitrary succe
     blocker: { reasonCode: 'no_progress' },
   });
   expect(h.execute).toHaveBeenCalledTimes(3);
+});
+
+test.each(['failed', 'deadlineExceeded', 'paused'] as const)(
+  'settles each completed attempt after verification is %s and the run resumes',
+  async (interruption) => {
+    vi.useFakeTimers();
+    const h = runnerFixture(0, 100);
+    h.execute.mockImplementation((_params, context) =>
+      Promise.resolve({
+        executionId: context.executionId,
+        outcome: 'failed',
+        reasonCode: 'no_effect',
+        underlyingSettled: true,
+        confirmedEffects: {},
+        unresolvedEffects: {},
+        progress: {},
+        stopCauseEventId: null,
+      }),
+    );
+    const verify = h.verify.getMockImplementation()!;
+    let interruptedAttempt = 0;
+    h.verify.mockImplementation(async (...args) => {
+      const attempts = h.execute.mock.calls.length;
+      if (attempts > interruptedAttempt) {
+        interruptedAttempt = attempts;
+        if (interruption === 'failed') throw new Error('verification failed');
+        return new Promise(() => undefined);
+      }
+      return {
+        ...(await verify(...args)),
+        progress: 0,
+        evidence: {
+          source: 'application' as const,
+          observationPaths: ['/count'],
+          executionIds: [],
+          details: {},
+        },
+      };
+    });
+    const agent = createAgent({
+      ...h.options,
+      limits: { verificationTimeoutMs: 10 },
+    });
+    let run = await agent.start(h.input);
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      await vi.advanceTimersByTimeAsync(
+        interruption === 'deadlineExceeded' ? 10 : 0,
+      );
+      if (interruption === 'paused')
+        await agent.pause('run', 'verification_paused');
+      await expect(run.result).resolves.toMatchObject({
+        status: 'paused',
+        blocker: { reasonCode: `verification_${interruption}` },
+      });
+      expect(h.execute).toHaveBeenCalledTimes(attempt);
+      run = await agent.resume('run');
+    }
+    await vi.advanceTimersByTimeAsync(10);
+    await expect(run.result).resolves.toMatchObject({
+      status: 'paused',
+      blocker: { reasonCode: 'no_progress' },
+    });
+    expect(h.execute).toHaveBeenCalledTimes(3);
+    expect(
+      (await agent.inspect('run'))!.checkpoint.state.progress,
+    ).toMatchObject([{ noProgress: 3, recoveryAttempts: 3, highWater: 0 }]);
+    const resumed = await agent.resume('run');
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(resumed.result).resolves.toMatchObject({
+      status: 'paused',
+      blocker: { reasonCode: 'no_progress' },
+    });
+    expect(h.execute).toHaveBeenCalledTimes(3);
+    expect(
+      (await agent.inspect('run'))!.checkpoint.state.progress,
+    ).toMatchObject([{ noProgress: 3, recoveryAttempts: 3 }]);
+    agent.close();
+  },
+);
+
+test('retains an executed attempt when its observation refresh fails before verification', async () => {
+  const h = runnerFixture(0, 10);
+  const observe = h.observe.getMockImplementation()!;
+  let interrupted = false;
+  h.observe.mockImplementation((...args) => {
+    if (!interrupted && h.execute.mock.calls.length > 0) {
+      interrupted = true;
+      return Promise.reject(new Error('observation failed'));
+    }
+    return observe(...args);
+  });
+  const agent = createAgent({ ...h.options, limits: { maxNoProgress: 1 } });
+  await expect((await agent.start(h.input)).result).resolves.toMatchObject({
+    status: 'paused',
+    blocker: { reasonCode: 'observation_failed' },
+  });
+  await expect((await agent.resume('run')).result).resolves.toMatchObject({
+    status: 'paused',
+    blocker: { reasonCode: 'no_progress' },
+  });
+  expect(h.execute).toHaveBeenCalledTimes(1);
+  agent.close();
+});
+
+test('does not recount an attempt when pause arrives during its progress commit', async () => {
+  const h = runnerFixture(0, 10);
+  const agent = createAgent({ ...h.options, limits: { maxNoProgress: 2 } });
+  const commit = h.store.commit.bind(h.store);
+  let paused: Promise<void> | undefined;
+  vi.spyOn(h.store, 'commit').mockImplementation((input) => {
+    if (
+      paused === undefined &&
+      input.records.some(
+        (record) =>
+          record.kind === 'coreEvent' &&
+          record.data.type === 'progress_assessed' &&
+          record.data.reasonCode === 'action',
+      )
+    )
+      paused = agent.pause('run', 'pause_after_assessment');
+    return commit(input);
+  });
+  await expect((await agent.start(h.input)).result).resolves.toMatchObject({
+    status: 'paused',
+    blocker: { reasonCode: 'pause_after_assessment' },
+  });
+  await paused;
+  expect(h.execute).toHaveBeenCalledTimes(1);
+  await expect((await agent.resume('run')).result).resolves.toMatchObject({
+    status: 'paused',
+    blocker: { reasonCode: 'no_progress' },
+  });
+  expect(h.execute).toHaveBeenCalledTimes(2);
+  agent.close();
+});
+
+test('starts a fresh progress scope when resume replaces a root awaiting verification', async () => {
+  const h = runnerFixture(0, 10);
+  const verify = h.verify.getMockImplementation()!;
+  h.verify
+    .mockImplementationOnce(verify)
+    .mockRejectedValueOnce(new Error('verification failed'));
+  const agent = createAgent({ ...h.options, limits: { maxNoProgress: 1 } });
+  await expect((await agent.start(h.input)).result).resolves.toMatchObject({
+    status: 'paused',
+    blocker: { reasonCode: 'verification_failed' },
+  });
+  const resumed = await agent.resume('run', {
+    goal: { ...h.input.goal, version: 2 },
+    effectiveConstraints: {},
+  });
+  await expect(resumed.result).resolves.toMatchObject({
+    status: 'paused',
+    blocker: { reasonCode: 'no_progress' },
+  });
+  expect(h.execute).toHaveBeenCalledTimes(2);
+  expect((await agent.inspect('run'))!.checkpoint.state.progress).toMatchObject(
+    [{ goalRef: { id: 'root', version: 2 }, noProgress: 1 }],
+  );
+  agent.close();
 });
 
 test('keeps the progress high-water mark when actions undo and repeat their effects', async () => {

@@ -155,6 +155,7 @@ export function prepareResume(
     limits,
     control: { ...state.control, rootGoalRef: graph.rootGoalRef },
     progress: changedRoot ? [] : state.progress,
+    progressAttempt: changedRoot ? null : state.progressAttempt,
     scheduling: {
       ...state.scheduling,
       planning: changedRoot

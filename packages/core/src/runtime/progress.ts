@@ -3,6 +3,11 @@ import type { GoalGraphSnapshot } from '#internal/contracts/goal';
 import type { GoalRef } from '#internal/contracts/references';
 import { canonicalJson } from '#internal/candidate/identity';
 
+export interface ProgressAttempt {
+  readonly before: GoalGraphSnapshot;
+  readonly failed: boolean;
+}
+
 export interface GoalProgress {
   readonly goalRef: GoalRef;
   readonly noProgress: number;

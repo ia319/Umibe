@@ -701,6 +701,21 @@ export class ActionCoordinator {
       {
         ...session.state,
         actionAttempts: session.state.actionAttempts - (unsent ? 1 : 0),
+        // Persist the attempt before observation or verification can pause the run.
+        progressAttempt:
+          matches &&
+          attempt.dispatched &&
+          result.outcome !== 'unknown' &&
+          ['running', 'pausing', 'paused'].includes(
+            session.state.control.status,
+          )
+            ? {
+                before:
+                  attempt.selected.filtered.checked.prepared.request.context
+                    .graph,
+                failed: result.outcome === 'failed',
+              }
+            : session.state.progressAttempt,
         recentResults: Object.freeze(
           [
             ...session.state.recentResults.filter(
