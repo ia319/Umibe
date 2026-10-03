@@ -46,6 +46,25 @@ test('admits cancellation while a commit is pending and publishes only committed
   expect(session.checkpoint?.status).toBe('cancelled');
 });
 
+test('preserves cancellation cleanup failures in the final result and checkpoint', async () => {
+  const session = await RunSession.create(
+    new MemoryRunStore(),
+    generationInput(),
+    vi.fn(),
+  );
+  await session.transition({ kind: 'start' });
+  const cause = { eventId: 'cancel', reasonCode: 'user_cancelled' };
+  const blocker = { eventId: 'cleanup', reasonCode: 'cleanup_failed' };
+  await session.transition({ kind: 'cancel', cause });
+  await session.transition({ kind: 'fail', cause: blocker });
+  await session.transition({ kind: 'stopSettled', blocker: null });
+
+  const expected = { status: 'cancelled', stopCause: cause, blocker };
+  await expect(session.result).resolves.toMatchObject(expected);
+  expect(session.checkpoint?.state.control).toMatchObject(expected);
+  session.close();
+});
+
 test.each(['reject', 'conflict'] as const)(
   'fails closed on store %s without reporting an uncommitted checkpoint',
   async (mode) => {

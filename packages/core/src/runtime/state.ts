@@ -22,7 +22,11 @@ export interface RunControlState {
 export type RunCommand =
   | { readonly kind: 'start' | 'resume' }
   | { readonly kind: 'pause' | 'cancel' | 'fail'; readonly cause: RunCause }
-  | { readonly kind: 'stopSettled'; readonly blocker: RunCause | null }
+  | {
+      readonly kind: 'stopSettled';
+      /** Null preserves stop diagnostics already recorded in this control interval. */
+      readonly blocker: RunCause | null;
+    }
   | {
       readonly kind: 'succeed';
       readonly assessment: GoalAssessment;
@@ -110,7 +114,9 @@ export function transitionRun(
         ...state,
         status: state.status === 'pausing' ? 'paused' : 'cancelled',
         blocker:
-          command.blocker === null ? null : captureCause(command.blocker),
+          command.blocker === null
+            ? state.blocker
+            : captureCause(command.blocker),
       });
     }
     case 'fail': {

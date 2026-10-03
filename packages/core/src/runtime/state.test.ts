@@ -34,11 +34,16 @@ test('pauses in two stages and resumes without carrying the old stop cause', () 
     stopCause: cause,
     blocker: cause,
   });
-  expect(transitionRun(paused, { kind: 'resume' })).toMatchObject({
+  const resumed = transitionRun(paused, { kind: 'resume' });
+  expect(resumed).toMatchObject({
     status: 'running',
     stopCause: null,
     blocker: null,
   });
+  const nextPause = transitionRun(resumed, { kind: 'pause', cause });
+  expect(
+    transitionRun(nextPause, { kind: 'stopSettled', blocker: null }).blocker,
+  ).toBeNull();
   expect(() => transitionRun(running, { kind: 'resume' })).toThrowError(
     expect.objectContaining({ reason: 'invalid_transition' }),
   );
@@ -64,7 +69,7 @@ test('cancellation takes priority while preserving the first stop cause and unce
   expect(failedCleanup.status).toBe('cancelling');
   const cancelled = transitionRun(failedCleanup, {
     kind: 'stopSettled',
-    blocker,
+    blocker: null,
   });
   expect(cancelled).toMatchObject({
     status: 'cancelled',
@@ -75,6 +80,34 @@ test('cancellation takes priority while preserving the first stop cause and unce
   expect(() => transitionRun(cancelled, { kind: 'resume' })).toThrowError(
     expect.objectContaining({ reason: 'terminal_run' }),
   );
+});
+
+test('retains a paused blocker during cancellation unless settlement supplies a replacement', () => {
+  const blocker = { eventId: 'timeout', reasonCode: 'execution_unsettled' };
+  const pausing = transitionRun(createRunControl(root), {
+    kind: 'pause',
+    cause,
+  });
+  const paused = transitionRun(pausing, { kind: 'stopSettled', blocker });
+  const cancelling = transitionRun(paused, {
+    kind: 'cancel',
+    cause: { eventId: 'cancel', reasonCode: 'user_cancelled' },
+  });
+  expect(
+    transitionRun(cancelling, { kind: 'stopSettled', blocker: null }),
+  ).toMatchObject({ status: 'cancelled', stopCause: cause, blocker });
+
+  const replacement = { eventId: 'cleanup', reasonCode: 'effects_unknown' };
+  expect(
+    transitionRun(cancelling, {
+      kind: 'stopSettled',
+      blocker: replacement,
+    }),
+  ).toMatchObject({
+    status: 'cancelled',
+    stopCause: cause,
+    blocker: replacement,
+  });
 });
 
 test('only a passed assessment of the current root and observation can finish a running task', () => {
