@@ -75,6 +75,80 @@ test('keeps an in-flight model reservation in its committed checkpoint', async (
   ).toEqual([]);
 });
 
+test('rejects unknown fields in the historical graph retained for progress', async () => {
+  const store = new MemoryRunStore();
+  const session = await RunSession.create(store, generationInput(), vi.fn());
+  const attempt = {
+    executionId: null,
+    failed: false,
+    before: session.state.decision.context.graph,
+  };
+  try {
+    const checkpoint = {
+      ...session.checkpoint,
+      state: { ...session.state, progressAttempt: attempt },
+    };
+    expect(
+      parseRuntimeCheckpoint(checkpoint).state.progressAttempt?.before,
+    ).toEqual(attempt.before);
+    expect(() =>
+      parseRuntimeCheckpoint({
+        ...checkpoint,
+        state: {
+          ...checkpoint.state,
+          progressAttempt: {
+            ...attempt,
+            before: { ...attempt.before, extra: true },
+          },
+        },
+      }),
+    ).toThrow();
+  } finally {
+    await session.close();
+    await store.close();
+  }
+});
+
+test.each(['id', 'revision'] as const)(
+  'rejects an execution whose observation %s differs from its decision basis',
+  async (field) => {
+    const h = runnerFixture();
+    const agent = h.create();
+    try {
+      const handle = await agent.start(h.input);
+      await handle.result;
+      const checkpoint = parseRuntimeCheckpoint(
+        (await agent.inspect(handle.runId))!.checkpoint,
+      );
+      const execution = checkpoint.state.execution!;
+      const observationRef = {
+        ...execution.intent.observationRef,
+        [field]:
+          field === 'id'
+            ? 'other-observation'
+            : execution.intent.observationRef.revision + 1,
+      };
+      expect(() =>
+        parseRuntimeCheckpoint({
+          ...checkpoint,
+          state: {
+            ...checkpoint.state,
+            execution: {
+              ...execution,
+              intent: { ...execution.intent, observationRef },
+            },
+          },
+        }),
+      ).toThrowError(
+        expect.objectContaining({ reason: 'execution_basis_mismatch' }),
+      );
+    } finally {
+      await agent.close();
+      await h.store.close();
+    }
+  },
+);
+
 test.each([
   'version',
   'status',

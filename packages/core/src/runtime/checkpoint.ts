@@ -44,26 +44,33 @@ const pendingModel = z
   .readonly();
 export type PendingModelAttempt = z.infer<typeof pendingModel>;
 const decision = z.unknown().transform(captureDecisionRequest);
-const graph = z.unknown().transform((input) => {
-  const value = z.record(z.string(), z.unknown()).parse(input);
-  const parsed = parseGoalGraph({
-    runId: value.runId,
-    rootGoalRef: value.rootGoalRef,
-    currentGoalRef: value.currentGoalRef,
-    goals: value.goals,
+const graph = z
+  .strictObject({
+    runId: text,
+    rootGoalRef: ref,
+    currentGoalRef: ref,
+    goals: z.array(z.unknown()),
+    goalPath: z.array(ref),
+  })
+  .transform((value) => {
+    const parsed = parseGoalGraph({
+      runId: value.runId,
+      rootGoalRef: value.rootGoalRef,
+      currentGoalRef: value.currentGoalRef,
+      goals: value.goals,
+    });
+    if (
+      canonicalJson(parseJsonValue(value.goalPath, context.stage)) !==
+      canonicalJson(parseJsonValue(parsed.goalPath, context.stage))
+    )
+      throw new ContractError(
+        context.code,
+        context.stage,
+        '/goalPath',
+        'goal_path_mismatch',
+      );
+    return parsed;
   });
-  if (
-    canonicalJson(parseJsonValue(value.goalPath, context.stage)) !==
-    canonicalJson(parseJsonValue(parsed.goalPath, context.stage))
-  )
-    throw new ContractError(
-      context.code,
-      context.stage,
-      '/goalPath',
-      'goal_path_mismatch',
-    );
-  return parsed;
-});
 const result = z
   .unknown()
   .transform((value) =>
@@ -269,6 +276,10 @@ export function parseRuntimeState(input: unknown): SessionState {
         !same(execution.intent.rootGoalRef, basis.graph.rootGoalRef) ||
         !same(execution.intent.currentGoalRef, basis.graph.currentGoalRef) ||
         !same(execution.intent.planRef, basis.planRef) ||
+        !same(execution.intent.observationRef, {
+          id: basis.observation.id,
+          revision: basis.observation.revision,
+        }) ||
         execution.intent.constraintsVersion !== basis.constraintsVersion
       )
         fail('/execution/basis', 'execution_basis_mismatch');
