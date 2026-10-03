@@ -64,6 +64,8 @@ export interface ResumeRun {
 }
 
 export interface AgentOptions<TCriteria extends JsonValue = JsonValue> {
+  /** Stable application identity; required by durable stores. Never use credentials here. */
+  readonly applicationId?: string;
   readonly actions: readonly RegisteredAction[];
   readonly planner: Planner;
   readonly selector: Selector;
@@ -118,7 +120,7 @@ export interface Agent {
   subscribe(runId: string, listener: (record: RunRecord) => void): () => void;
   /**
    * Release all owned runs after their writes and executions settle.
-   * Throws before closing any run if initialization or work remains active.
+   * Rejects before closing any run if initialization or work remains active.
    */
-  close(): void;
+  close(): Promise<void>;
 }

@@ -307,7 +307,7 @@ test('retains the barrier after cancel grace and accepts a late result only for 
     blocker: { reasonCode: 'execution_unsettled' },
   });
   expect(h.session.hasExecution).toBe(true);
-  expect(() => h.session.close()).toThrow();
+  await expect(h.session.close()).rejects.toThrow();
   returned.resolve(actionResult(executionId));
   await vi.advanceTimersByTimeAsync(0);
   expect(h.session.state.execution?.result).toMatchObject({
@@ -318,7 +318,7 @@ test('retains the barrier after cancel grace and accepts a late result only for 
   expect(h.session.state.control.status).toBe('cancelled');
   expect(h.session.hasExecution).toBe(false);
   expect(vi.getTimerCount()).toBe(0);
-  h.session.close();
+  await h.session.close();
 });
 
 test('times out with a recorded stop cause and forbids resume while the old execution remains uncertain', async () => {
@@ -631,13 +631,13 @@ test('aborts execution on storage failure without requiring another writable com
     expect.objectContaining({ code: 'store_failed' }),
   );
   expect(h.session.hasExecution).toBe(true);
-  expect(() => h.session.close()).toThrow();
+  await expect(h.session.close()).rejects.toThrow();
   expect(vi.getTimerCount()).toBe(0);
   late.resolve(actionResult(context.executionId));
   await vi.advanceTimersByTimeAsync(0);
   expect(h.session.hasExecution).toBe(false);
   expect(h.session.failure?.reason).toBe('store_failed');
-  h.session.close();
+  await h.session.close();
 });
 
 test.each([

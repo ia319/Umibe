@@ -164,7 +164,9 @@ async function dispatchFixture(
   };
   const store = new MemoryRunStore();
   try {
+    const lease = await store.acquireRun(current.graph.runId);
     const committed = await store.commit({
+      ownerToken: lease.token,
       runId: current.graph.runId,
       expectedRevision: null,
       status: 'running',

@@ -103,7 +103,7 @@ test.each(['failed', 'deadlineExceeded', 'paused'] as const)(
     expect(
       (await agent.inspect('run'))!.checkpoint.state.progress,
     ).toMatchObject([{ noProgress: 3, recoveryAttempts: 3 }]);
-    agent.close();
+    await agent.close();
   },
 );
 
@@ -128,7 +128,7 @@ test('retains an executed attempt when its observation refresh fails before veri
     blocker: { reasonCode: 'no_progress' },
   });
   expect(h.execute).toHaveBeenCalledTimes(1);
-  agent.close();
+  await agent.close();
 });
 
 test('does not recount an attempt when pause arrives during its progress commit', async () => {
@@ -160,7 +160,7 @@ test('does not recount an attempt when pause arrives during its progress commit'
     blocker: { reasonCode: 'no_progress' },
   });
   expect(h.execute).toHaveBeenCalledTimes(2);
-  agent.close();
+  await agent.close();
 });
 
 test('starts a fresh progress scope when resume replaces a root awaiting verification', async () => {
@@ -186,7 +186,7 @@ test('starts a fresh progress scope when resume replaces a root awaiting verific
   expect((await agent.inspect('run'))!.checkpoint.state.progress).toMatchObject(
     [{ goalRef: { id: 'root', version: 2 }, noProgress: 1 }],
   );
-  agent.close();
+  await agent.close();
 });
 
 test('keeps the progress high-water mark when actions undo and repeat their effects', async () => {

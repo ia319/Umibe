@@ -15,6 +15,7 @@ type RecordWithoutStoreFields<T> = T extends RunRecord
 export type RunRecordDraft = RecordWithoutStoreFields<RunRecord>;
 
 export interface RunCommit {
+  readonly ownerToken: string;
   readonly runId: string;
   /** Null creates a run; a number compares the last committed checkpoint revision. */
   readonly expectedRevision: number | null;
@@ -52,6 +53,17 @@ export interface RecordPage {
 
 /** Async, per-run persistence with atomic compare-and-commit semantics. */
 export interface RunStore {
+  readonly info: {
+    readonly kind: string;
+    readonly durable: boolean;
+    readonly path: string | null;
+  };
+  /** Aborted on closure or fatal failure, including while no request is pending. */
+  readonly signal: AbortSignal;
+  /** Claim an existing or new run; a second holder rejects until release. */
+  acquireRun(runId: string): Promise<RunLease>;
+  /** Read one committed record without acquiring execution rights. */
+  readRecord(runId: string, eventId: string): Promise<RunRecord | null>;
   /**
    * Read the latest committed state of a run.
    * @param runId - The run to read.
@@ -87,4 +99,13 @@ export interface RunStore {
    * @returns A promise that settles when the store has closed.
    */
   close(): Promise<void>;
+}
+
+export interface RunLease {
+  readonly runId: string;
+  readonly token: string;
+  /** Aborted on release, store closure or loss of execution rights. */
+  readonly signal: AbortSignal;
+  /** Drain earlier writes before releasing; repeated calls are safe. */
+  release(): Promise<void>;
 }

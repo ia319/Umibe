@@ -4,6 +4,7 @@ import type { GoalRef } from '#internal/contracts/references';
 import { canonicalJson } from '#internal/candidate/identity';
 
 export interface ProgressAttempt {
+  readonly executionId: string | null;
   readonly before: GoalGraphSnapshot;
   readonly failed: boolean;
 }

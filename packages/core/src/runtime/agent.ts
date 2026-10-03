@@ -77,6 +77,7 @@ export function createAgent<TCriteria extends JsonValue>(
   const runs = new Map<string, RunDriver<TCriteria>>();
   const starting = new Set<string>();
   let closed = false;
+  let closing: Promise<void> | null = null;
   let unsubscribe: (() => void) | undefined;
   const owned = (runId: string) => {
     if (closed)
@@ -207,10 +208,31 @@ export function createAgent<TCriteria extends JsonValue>(
           },
           options.onDiagnostic ?? (() => undefined),
           limits,
+          {
+            applicationId:
+              options.applicationId === undefined
+                ? null
+                : requireString(
+                    options.applicationId,
+                    validation,
+                    '/applicationId',
+                  ),
+            actionVersions: registry.capabilities.map(({ id, version }) => ({
+              id,
+              version,
+            })),
+            modelStages: [...options.modelStages],
+          },
         );
         const driver = new RunDriver(session, registry, options);
         runs.set(runId, driver);
-        await session.transition({ kind: 'start' });
+        try {
+          await session.transition({ kind: 'start' });
+        } catch (error) {
+          runs.delete(runId);
+          await session.close();
+          throw error;
+        }
         const handle = driver.handle();
         if (unsubscribe === undefined && options.environment.subscribe) {
           try {
@@ -256,8 +278,8 @@ export function createAgent<TCriteria extends JsonValue>(
     records: options.store.readRecords.bind(options.store),
     subscribe: (runId: string, listener: Parameters<Agent['subscribe']>[1]) =>
       owned(runId).session.subscribe(listener),
-    close(): void {
-      if (closed) return;
+    async close(): Promise<void> {
+      if (closing !== null) return closing;
       if (
         starting.size !== 0 ||
         [...runs.values()].some(
@@ -277,7 +299,10 @@ export function createAgent<TCriteria extends JsonValue>(
           '',
           'agent_active',
         );
-      for (const run of runs.values()) run.session.close();
+      closed = true;
+      closing = Promise.all(
+        [...runs.values()].map((run) => run.session.close()),
+      ).then(() => undefined);
       try {
         unsubscribe?.();
       } catch {
@@ -287,7 +312,7 @@ export function createAgent<TCriteria extends JsonValue>(
           .value?.session.report('environment_subscription_failed', null);
       }
       runs.clear();
-      closed = true;
+      await closing;
     },
   });
 }

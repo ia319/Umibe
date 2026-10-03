@@ -14,8 +14,8 @@
     "format": "node scripts/format.mjs --write",
     "format:check": "node scripts/format.mjs --check",
     "typecheck": "tsc --noEmit && pnpm -r typecheck",
-    "test": "vitest run",
-    "test:watch": "vitest"
+    "test": "pnpm build && vitest run",
+    "test:watch": "pnpm build && vitest"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

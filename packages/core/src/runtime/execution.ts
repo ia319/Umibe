@@ -8,6 +8,7 @@ import type { CallControl, Environment } from '#internal/contracts/adapters';
 import type { SelectedCandidate } from '#internal/contracts/candidate-processing';
 import type { ActionIntent, ActionResult } from '#internal/contracts/record';
 import type { JsonObject } from '#internal/contracts/json';
+import type { CandidateGenerationInput } from '#internal/contracts/candidate-processing';
 import { captureControl, invokeControlled } from '#internal/candidate/control';
 import { getSelectedCall } from '#internal/candidate/handles';
 import {
@@ -24,6 +25,8 @@ import type { RunSession } from './session.js';
 import type { RunCause } from './state.js';
 
 export interface ExecutionSnapshot {
+  readonly basis: CandidateGenerationInput;
+  readonly retryMode: PreparedAction['retryMode'];
   readonly intent: ActionIntent;
   readonly decisionEpoch: number;
   readonly phase: 'prepared' | 'running' | ActionResult['outcome'];
@@ -208,6 +211,8 @@ export class ActionCoordinator {
           ...session.state,
           actionAttempts: session.state.actionAttempts + 1,
           execution: Object.freeze({
+            basis: recheck.request,
+            retryMode: call.retryMode,
             intent,
             decisionEpoch: epoch,
             phase: 'prepared',
@@ -714,6 +719,7 @@ export class ActionCoordinator {
             session.state.control.status,
           )
             ? {
+                executionId: result.executionId,
                 before:
                   attempt.selected.filtered.checked.prepared.request.context
                     .graph,

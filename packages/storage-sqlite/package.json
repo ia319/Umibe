@@ -1,20 +1,10 @@
 {
-  "name": "@umibe/core",
+  "name": "@umibe/storage-sqlite",
   "version": "0.0.0",
   "private": true,
   "type": "module",
   "sideEffects": false,
-  "imports": {
-    "#internal/*": {
-      "umibe-source": "./src/*.ts",
-      "default": "./dist/*.js"
-    }
-  },
   "exports": {
-    "./storage-adapter": {
-      "types": "./dist/storage/adapter.d.ts",
-      "import": "./dist/storage/adapter.js"
-    },
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
@@ -31,6 +21,10 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "zod": "4.6.5"
+    "@umibe/core": "workspace:*",
+    "better-sqlite3": "13.0.3"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "9.6.0"
   }
 }

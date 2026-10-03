@@ -131,7 +131,7 @@ test.each(['pausing', 'paused'] as const)(
       planRef: { id: previousPlan.id, version: previousPlan.version + 1 },
       planGuidance: 'Use the updated route',
     });
-    agent.close();
+    await agent.close();
   },
 );
 
@@ -229,6 +229,6 @@ test('automatically receives environment events and releases the subscription on
   expect(diagnostics).toHaveBeenCalledWith(
     expect.objectContaining({ code: 'environment_event_failed' }),
   );
-  agent.close();
+  await agent.close();
   expect(dispose).toHaveBeenCalledTimes(1);
 });
