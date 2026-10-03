@@ -21,6 +21,7 @@ export interface ObservationCoverage {
 export interface Observation {
   readonly runId: string;
   readonly id: string;
+  /** Nondecreasing per run across restarts. Reusing a revision requires an identical observation. */
   readonly revision: number;
   /** Canonical UTC timestamp with millisecond precision. */
   readonly observedAt: string;

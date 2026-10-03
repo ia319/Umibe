@@ -218,6 +218,10 @@ importers:
       '@umibe/storage-sqlite':
         specifier: workspace:*
         version: link:../storage-sqlite
+    devDependencies:
+      zod:
+        specifier: 4.6.5
+        version: 4.6.5
 
 packages:
 

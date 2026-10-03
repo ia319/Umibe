@@ -23,5 +23,8 @@
   "dependencies": {
     "@umibe/core": "workspace:*",
     "@umibe/storage-sqlite": "workspace:*"
+  },
+  "devDependencies": {
+    "zod": "4.6.5"
   }
 }
