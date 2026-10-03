@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url';
 const repositoryRoot = fileURLToPath(new URL('../', import.meta.url));
 const packageRoot = join(repositoryRoot, 'packages/core');
 const sqlitePackageRoot = join(repositoryRoot, 'packages/storage-sqlite');
+const sdkPackageRoot = join(repositoryRoot, 'packages/umibe');
 const compilerPath = fileURLToPath(import.meta.resolve('typescript/bin/tsc'));
 const coreManifest = /** @type {unknown} */ (
   JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8'))
@@ -141,6 +142,21 @@ try {
     existsSync(sqliteTarball),
     'pnpm pack did not create the SQLite archive',
   );
+  const sdkPacked = /** @type {unknown} */ (
+    JSON.parse(
+      runPnpm([
+        '--dir',
+        sdkPackageRoot,
+        'pack',
+        '--json',
+        '--pack-destination',
+        temporaryRoot,
+      ]),
+    )
+  );
+  const sdkTarball = resolve(temporaryRoot, checkPackManifest(sdkPacked, []));
+  assert.equal(dirname(sdkTarball), temporaryRoot);
+  assert.ok(existsSync(sdkTarball), 'pnpm pack did not create the SDK archive');
 
   // The consumer lives outside the workspace, so package exports and dependencies
   // must resolve from the installed archive rather than source aliases.
@@ -177,7 +193,10 @@ try {
     '--location=project',
     '--json',
     'overrides',
-    JSON.stringify({ '@umibe/core': `file:${tarball.replaceAll('\\', '/')}` }),
+    JSON.stringify({
+      '@umibe/core': `file:${tarball.replaceAll('\\', '/')}`,
+      '@umibe/storage-sqlite': `file:${sqliteTarball.replaceAll('\\', '/')}`,
+    }),
   ]);
   runPnpm([
     '--dir',
@@ -198,6 +217,7 @@ try {
     'add',
     tarball,
     sqliteTarball,
+    sdkTarball,
     `zod@${coreManifest.dependencies.zod}`,
   ]);
 
@@ -206,6 +226,7 @@ try {
     `import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { SqliteRunStore } from '@umibe/storage-sqlite';
+import { createAgent as createSdkAgent } from 'umibe';
 import { createAgent, ActionRegistry, defineAction, MemoryRunStore, parseJsonValue, parseGoalGraph, parseObservation, prepareCandidates, checkCandidates, filterCandidates, selectCandidates, recheckCandidate } from '@umibe/core';
 import { z } from 'zod';
 
@@ -332,9 +353,8 @@ let collected = 0;
 let revision = 0;
 let plans = 0;
 const executionDepths = [];
-const taskStore = new MemoryRunStore();
-const taskAgent = createAgent({
-  store: taskStore, limits: { maxActionAttempts: 1 }, modelStages: ['planning', 'selection'],
+const taskOptions = {
+  applicationId: 'packed-sdk', limits: { maxActionAttempts: 1 }, modelStages: ['planning', 'selection'],
   actions: [defineAction({
     id: 'sample', version: 1, description: 'Take one sample', tags: [], expectedEffects: { count: 1 }, parameters: z.strictObject({}),
     check: () => Promise.resolve({ outcome: 'allowed' }),
@@ -368,7 +388,10 @@ const taskAgent = createAgent({
     support: (criteria) => Promise.resolve({ outcome: 'supported', criteria: z.strictObject({ count: z.number() }).parse(criteria), requiredEvidence: ['/count'] }),
     verify: ({ goal, criteria, context }) => Promise.resolve({ goalRef: { id: goal.id, version: goal.version }, observationRef: { id: context.observation.id, revision: context.observation.revision }, outcome: collected >= criteria.count ? 'passed' : 'notYet', reason: collected >= criteria.count ? null : 'more_samples', progress: collected, evidence: { source: 'application', observationPaths: ['/count'], executionIds: [], details: {} } }),
   },
-});
+};
+let taskAgent = createSdkAgent(taskOptions);
+assert.equal((await taskAgent.inspect()).exists, false);
+assert.equal(existsSync('umibe.sqlite'), false);
 const firstInterval = await taskAgent.start({ runId: 'nested-consumer', goal: { id: 'root', version: 1, description: 'Three samples', criteria: { count: 3 }, hardConstraints: [], limits: {}, preferences: [] }, effectiveConstraints: {} });
 assert.equal((await firstInterval.result).status, 'paused');
 assert.equal(collected, 1);
@@ -376,7 +399,11 @@ const pausedTask = await taskAgent.inspect('nested-consumer');
 const notification = { kind: 'application', eventId: 'operator-ready', runId: 'nested-consumer', type: 'operator_ready', source: { kind: 'application', id: 'consumer' }, observedAt: new Date().toISOString(), reasonCode: 'budget_approved', impact: 'observation', timing: 'immediate', control: 'none', currentGoalRef: null, planRef: null, goalPathRef: null, executionId: null, observationRef: null, affectedGoalRefs: [], details: {} };
 await taskAgent.emit(notification);
 await taskAgent.emit(notification);
+await taskAgent.close();
+taskAgent = createSdkAgent(taskOptions);
+assert.equal((await taskAgent.inspect()).owner, null);
 const resumedTask = await taskAgent.resume('nested-consumer', { limits: { maxActionAttempts: 3 } });
+await taskAgent.emit(notification);
 assert.notEqual(firstInterval.result, resumedTask.result);
 assert.equal((await resumedTask.result).status, 'succeeded');
 const completedTask = await taskAgent.inspect('nested-consumer');
@@ -387,7 +414,6 @@ assert.deepEqual(executionDepths, [3, 3, 2]);
 assert.equal(plans, 1);
 assert.equal((await taskAgent.records('nested-consumer', null, 1000)).records.filter((record) => record.kind === 'applicationEvent').length, 1);
 await taskAgent.close();
-await taskStore.close();
 
 const snapshot = parseJsonValue({ ready: true }, 'consumer');
 assert.equal(Object.getPrototypeOf(snapshot), null);
@@ -442,12 +468,18 @@ await reopened.close();
 import { z } from 'zod';
 
 import { SqliteRunStore, type SqliteInspection } from '@umibe/storage-sqlite';
+import { createAgent as createSdkAgent, type AgentOptions as SdkAgentOptions, type StorageInspection, type RunInspection as SdkRunInspection } from 'umibe';
 import type { RunStore } from '@umibe/core';
 const sqlite = new SqliteRunStore('typed.sqlite');
 const storageContract: RunStore = sqlite;
 const inspection: Promise<SqliteInspection> = sqlite.inspect();
 const closed: Promise<void> = storageContract.close();
 void inspection; void closed;
+declare const sdkOptions: SdkAgentOptions<{ count: number }>;
+const sdk = createSdkAgent(sdkOptions);
+const sdkStorage: Promise<StorageInspection> = sdk.inspect();
+const sdkRun: Promise<SdkRunInspection | null> = sdk.inspect('run');
+void sdkStorage; void sdkRun;
 
 const action = defineAction({
   id: 'collect', version: 1, description: 'Collect samples', tags: [], expectedEffects: {},

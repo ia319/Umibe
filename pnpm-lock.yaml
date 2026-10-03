@@ -210,6 +210,15 @@ importers:
         specifier: 9.6.0
         version: 9.6.0
 
+  packages/umibe:
+    dependencies:
+      '@umibe/core':
+        specifier: workspace:*
+        version: link:../core
+      '@umibe/storage-sqlite':
+        specifier: workspace:*
+        version: link:../storage-sqlite
+
 packages:
 
   '@cacheable/memory@2.2.0':
