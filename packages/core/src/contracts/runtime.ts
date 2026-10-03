@@ -120,7 +120,7 @@ export interface Agent {
   subscribe(runId: string, listener: (record: RunRecord) => void): () => void;
   /**
    * Release all owned runs after their writes and executions settle.
-   * Throws before closing any run if initialization or work remains active.
+   * Rejects before closing any run if initialization or work remains active.
    */
-  close(): void;
+  close(): Promise<void>;
 }

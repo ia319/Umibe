@@ -30,7 +30,7 @@ test('round-trips a completed runtime with fixed execution basis and application
   expect(
     Object.isFrozen(decoded.state.execution?.basis.context.graph.goals),
   ).toBe(true);
-  agent.close();
+  await agent.close();
 });
 
 test('keeps an in-flight model reservation in its committed checkpoint', async () => {

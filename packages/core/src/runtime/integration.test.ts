@@ -133,7 +133,7 @@ test('exposes complete request and timing records when the result settles', asyn
       expect(record.data.details.usage).toBeNull();
       expect(record.data.details.durationMs).toBeTypeOf('number');
     }
-  agent.close();
+  await agent.close();
 });
 
 test('finishes callback diagnostics before exposing a budget pause result', async () => {
@@ -157,7 +157,7 @@ test('finishes callback diagnostics before exposing a budget pause result', asyn
         record.data.details.currentAtReceipt === false,
     ),
   ).toBe(true);
-  agent.close();
+  await agent.close();
 });
 
 test('freezes nested runtime policy and pending goal data exposed to planners', async () => {
@@ -196,7 +196,7 @@ test('returns the same rejected control receipt for duplicate events after compl
       (record) => record.kind === 'applicationEvent',
     ),
   ).toHaveLength(1);
-  agent.close();
+  await agent.close();
 });
 
 test('closes root and child scopes when cancellation commits', async () => {
@@ -239,5 +239,5 @@ test('closes root and child scopes when cancellation commits', async () => {
     },
   });
   expect(h.execute).not.toHaveBeenCalled();
-  agent.close();
+  await agent.close();
 });

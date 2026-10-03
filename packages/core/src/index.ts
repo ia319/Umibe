@@ -132,9 +132,10 @@ export type {
   RunCommit,
   RunRecordDraft,
   RunStore,
+  RunLease,
 } from '#internal/storage/contracts';
 export { MemoryRunStore } from '#internal/storage/memory';
-export { StoreClosedError } from '#internal/storage/errors';
+export { StoreClosedError, StoreError } from '#internal/storage/errors';
 export { createAgent } from '#internal/runtime/agent';
 export { parseRuntimeCheckpoint } from '#internal/runtime/checkpoint';
 export type { RuntimeCheckpoint } from '#internal/runtime/checkpoint';

@@ -4,7 +4,11 @@ import type { CandidateGenerationInput } from '#internal/contracts/candidate-pro
 import type { RunCheckpoint, RunRecord } from '#internal/contracts/record';
 import { captureDecisionRequest } from '#internal/candidate/context';
 import { ContractError } from '#internal/errors';
-import type { RunRecordDraft, RunStore } from '#internal/storage/contracts';
+import type {
+  RunRecordDraft,
+  RunStore,
+  RunLease,
+} from '#internal/storage/contracts';
 import { requireObject } from '#internal/validation/fields';
 import { parseJsonValue } from '#internal/validation/json';
 import { parseGoalGraph } from '#internal/validation/goal';
@@ -47,7 +51,6 @@ export interface RuntimeDiagnostic {
   readonly eventId: string | null;
 }
 
-const owners = new WeakMap<RunStore, Set<string>>();
 const validation = {
   code: 'INVALID_RUN_CONTROL',
   stage: 'run_session',
@@ -73,9 +76,12 @@ export class RunSession {
   #resolveResult!: (state: RunControlState) => void;
   #rejectResult!: (error: unknown) => void;
   #result!: Promise<RunControlState>;
+  #closing: Promise<void> | null = null;
+  readonly #ownershipLost = () => this.fail('store_failed');
 
   private constructor(
     private readonly store: RunStore,
+    private readonly lease: RunLease,
     decision: CandidateGenerationInput,
     private readonly diagnose: (diagnostic: RuntimeDiagnostic) => void,
     limits: RuntimeLimits,
@@ -108,6 +114,8 @@ export class RunSession {
       } satisfies SchedulingState,
     });
     this.beginInterval();
+    lease.signal.addEventListener('abort', this.#ownershipLost, { once: true });
+    if (lease.signal.aborted) this.#ownershipLost();
   }
 
   static async create(
@@ -124,21 +132,17 @@ export class RunSession {
     const decision = captureDecisionRequest(input);
     const capturedLimits = captureLimits(limits);
     const runId = decision.context.graph.runId;
-    let owned = owners.get(store);
-    if (owned === undefined) {
-      owned = new Set();
-      owners.set(store, owned);
-    }
-    if (owned.has(runId))
+    if (store.info.durable && identity.applicationId === null)
       throw new ContractError(
         validation.code,
         validation.stage,
-        '/runId',
-        'run_owned',
+        '/applicationId',
+        'missing_application_id',
       );
-    owned.add(runId);
+    const lease = await store.acquireRun(runId);
     const session = new RunSession(
       store,
+      lease,
       decision,
       diagnose,
       capturedLimits,
@@ -150,7 +154,8 @@ export class RunSession {
       ]);
       return session;
     } catch (error) {
-      owned.delete(runId);
+      lease.signal.removeEventListener('abort', session.#ownershipLost);
+      await lease.release();
       throw error;
     }
   }
@@ -351,6 +356,7 @@ export class RunSession {
   canDispatch(epoch: number): boolean {
     return (
       !this.#closed &&
+      !this.lease.signal.aborted &&
       this.#failure === null &&
       !this.signal.aborted &&
       this.#state.control.status === 'running' &&
@@ -441,6 +447,7 @@ export class RunSession {
     const pending = this.#tail.then(async () => {
       if (this.#failure !== null) throw this.#failure;
       const result = await this.store.commit({
+        ownerToken: this.lease.token,
         runId: this.runId,
         expectedRevision: this.#checkpoint?.revision ?? null,
         status: state.control.status,
@@ -491,15 +498,7 @@ export class RunSession {
           error instanceof ContractError && error.reason === 'store_conflict'
             ? 'store_conflict'
             : 'store_failed';
-        this.#failure = new ContractError(
-          validation.code,
-          validation.stage,
-          '/store',
-          code,
-        );
-        this.#controller.abort();
-        this.#rejectResult(this.#failure);
-        this.report(code, null);
+        this.fail(code);
       },
     );
     return pending;
@@ -535,8 +534,8 @@ export class RunSession {
     };
   }
 
-  close(): void {
-    if (this.#closed) return;
+  async close(): Promise<void> {
+    if (this.#closing !== null) return this.#closing;
     if (
       this.#pending > 0 ||
       this.#executionOwned ||
@@ -553,9 +552,24 @@ export class RunSession {
       );
     }
     this.#closed = true;
+    this.lease.signal.removeEventListener('abort', this.#ownershipLost);
     this.#controller.abort();
     this.#listeners.clear();
-    owners.get(this.store)?.delete(this.runId);
+    this.#closing = this.lease.release();
+    await this.#closing;
+  }
+
+  private fail(code: 'store_failed' | 'store_conflict'): void {
+    if (this.#failure !== null || this.#closed) return;
+    this.#failure = new ContractError(
+      validation.code,
+      validation.stage,
+      '/store',
+      code,
+    );
+    this.#controller.abort();
+    this.#rejectResult(this.#failure);
+    this.report(code, null);
   }
 
   private beginInterval(): void {

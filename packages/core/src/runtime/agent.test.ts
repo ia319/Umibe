@@ -19,7 +19,7 @@ test('completes an already satisfied root without planning or executing', async 
   expect(h.plan).not.toHaveBeenCalled();
   expect(h.execute).not.toHaveBeenCalled();
   expect((await agent.inspect('run'))?.summary.status).toBe('succeeded');
-  agent.close();
+  await agent.close();
   expect(await h.store.readRun('run')).not.toBeNull();
 });
 
@@ -80,7 +80,7 @@ test.each(['paused', 'cancelled'] as const)(
     );
     await started;
     try {
-      expect(() => agent.close()).toThrowError(
+      await expect(agent.close()).rejects.toThrowError(
         expect.objectContaining({ reason: 'agent_active' }),
       );
       expect(dispose).not.toHaveBeenCalled();
@@ -91,7 +91,7 @@ test.each(['paused', 'cancelled'] as const)(
     } finally {
       release();
       await pending;
-      agent.close();
+      await agent.close();
     }
     expect(dispose).toHaveBeenCalledTimes(1);
     expect(() => agent.subscribe(first.runId, vi.fn())).toThrowError(
@@ -125,7 +125,7 @@ test('runs multiple fixed calls through the public API while retaining the accep
     history.records.filter((record) => record.kind === 'goalAssessment'),
   ).toHaveLength(3);
   expect(records).toHaveBeenCalled();
-  agent.close();
+  await agent.close();
 });
 
 test('rejects a planner completion claim when the verifier still reports notYet', async () => {
@@ -161,7 +161,7 @@ test('returns the handle while planning is pending and cancels without awaiting 
   const run = await agent.start(h.input);
   await vi.advanceTimersByTimeAsync(0);
   expect(h.plan).toHaveBeenCalledTimes(1);
-  expect(() => agent.close()).toThrow();
+  await expect(agent.close()).rejects.toThrow();
   await agent.cancel(run.runId, 'user_cancelled');
   await expect(run.result).resolves.toMatchObject({
     status: 'cancelled',
@@ -169,7 +169,7 @@ test('returns the handle while planning is pending and cancels without awaiting 
   });
   expect(h.execute).not.toHaveBeenCalled();
   expect(vi.getTimerCount()).toBe(0);
-  agent.close();
+  await agent.close();
 });
 
 test('pauses on verification callback failure and resumes with a new result promise', async () => {
@@ -184,7 +184,22 @@ test('pauses on verification callback failure and resumes with a new result prom
   const second = await agent.resume(first.runId);
   expect(second.result).not.toBe(first.result);
   await expect(second.result).resolves.toMatchObject({ status: 'succeeded' });
-  agent.close();
+  await agent.close();
+});
+
+test('releases the run claim when the initial running checkpoint fails', async () => {
+  const h = runnerFixture();
+  const commit = h.store.commit.bind(h.store);
+  vi.spyOn(h.store, 'commit').mockImplementation((input) =>
+    input.status === 'running'
+      ? Promise.reject(new Error('start write failed'))
+      : commit(input),
+  );
+  const agent = h.create();
+  await expect(agent.start(h.input)).rejects.toThrow('start write failed');
+  const lease = await h.store.acquireRun(h.input.runId);
+  await lease.release();
+  await agent.close();
 });
 
 test('charges only explicitly model-backed adapter stages', async () => {

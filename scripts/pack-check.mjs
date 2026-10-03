@@ -256,7 +256,7 @@ const handle = await agent.start({
 });
 assert.equal((await handle.result).status, 'succeeded');
 assert.equal((await agent.inspect(handle.runId)).summary.status, 'succeeded');
-agent.close();
+await agent.close();
 assert.ok(await agentStore.readRun(handle.runId));
 await agentStore.close();
 
@@ -318,7 +318,7 @@ assert.ok(completedTask.checkpoint.state.modelAttempts > pausedTask.checkpoint.s
 assert.deepEqual(executionDepths, [3, 3, 2]);
 assert.equal(plans, 1);
 assert.equal((await taskAgent.records('nested-consumer', null, 1000)).records.filter((record) => record.kind === 'applicationEvent').length, 1);
-taskAgent.close();
+await taskAgent.close();
 await taskStore.close();
 
 const snapshot = parseJsonValue({ ready: true }, 'consumer');
@@ -327,7 +327,9 @@ assert.equal(snapshot.constructor, undefined);
 assert.deepEqual(Object.entries(snapshot), [['ready', true]]);
 const store = new MemoryRunStore();
 try {
+  const lease = await store.acquireRun('consumer-run');
   const result = await store.commit({
+    ownerToken: lease.token,
     runId: 'consumer-run',
     expectedRevision: null,
     status: 'running',
@@ -409,6 +411,7 @@ const recheck: Promise<CandidateRecheckResult> = recheckCandidate(selected, rech
 void recheck;
 
 const input: RunCommit = {
+  ownerToken: 'type-fixture',
   runId: 'consumer-run',
   expectedRevision: null,
   status: 'running',

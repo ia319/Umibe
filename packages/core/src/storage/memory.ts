@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type {
   RunCheckpoint,
   RunRecord,
@@ -23,8 +24,9 @@ import type {
   RecordPage,
   RunCommit,
   RunStore,
+  RunLease,
 } from './contracts.js';
-import { StoreClosedError } from './errors.js';
+import { StoreClosedError, StoreError } from './errors.js';
 
 interface StoredRun {
   summary: RunSummary;
@@ -54,8 +56,52 @@ function invalid(path: string, reason: string): never {
 
 /** Operations run in call order; synchronous Promise executors also isolate inputs before returning. */
 export class MemoryRunStore implements RunStore {
+  readonly info = Object.freeze({ kind: 'memory', durable: false, path: null });
+  private readonly controller = new AbortController();
+  readonly signal = this.controller.signal;
+  private readonly leases = new Map<
+    string,
+    { token: string; controller: AbortController }
+  >();
   private readonly runs = new Map<string, StoredRun>();
   private closed = false;
+
+  acquireRun(runId: string): Promise<RunLease> {
+    return new Promise((resolve) => {
+      this.ensureOpen('acquireRun');
+      const id = requireString(runId, queryContext, '/runId');
+      if (this.leases.has(id))
+        throw new StoreError('STORE_OWNERSHIP', 'run_owned');
+      const lease = { token: randomUUID(), controller: new AbortController() };
+      this.leases.set(id, lease);
+      resolve(
+        Object.freeze({
+          runId: id,
+          token: lease.token,
+          signal: lease.controller.signal,
+          release: () => {
+            if (this.leases.get(id) === lease) this.leases.delete(id);
+            lease.controller.abort(
+              new StoreError('STORE_OWNERSHIP', 'released'),
+            );
+            return Promise.resolve();
+          },
+        }),
+      );
+    });
+  }
+
+  readRecord(runId: string, eventId: string): Promise<RunRecord | null> {
+    return new Promise((resolve) => {
+      this.ensureOpen('readRecord');
+      const id = requireString(runId, queryContext, '/runId');
+      const event = requireString(eventId, queryContext, '/eventId');
+      resolve(
+        this.runs.get(id)?.records.find((record) => record.eventId === event) ??
+          null,
+      );
+    });
+  }
 
   readRun(runId: string): Promise<{
     readonly summary: RunSummary;
@@ -151,6 +197,7 @@ export class MemoryRunStore implements RunStore {
       requireKeys(
         value,
         [
+          'ownerToken',
           'runId',
           'expectedRevision',
           'status',
@@ -164,6 +211,13 @@ export class MemoryRunStore implements RunStore {
         '',
       );
       const runId = requireString(value.runId, commitContext, '/runId');
+      const token = requireString(
+        value.ownerToken,
+        commitContext,
+        '/ownerToken',
+      );
+      if (this.leases.get(runId)?.token !== token)
+        throw new StoreError('STORE_OWNERSHIP', 'invalid_owner');
       const expectedRevision =
         value.expectedRevision === null
           ? null
@@ -293,6 +347,10 @@ export class MemoryRunStore implements RunStore {
     return new Promise((resolve) => {
       if (!this.closed) {
         this.closed = true;
+        this.controller.abort(new StoreClosedError('commit'));
+        for (const lease of this.leases.values())
+          lease.controller.abort(new StoreClosedError('commit'));
+        this.leases.clear();
         this.runs.clear();
       }
       resolve();
