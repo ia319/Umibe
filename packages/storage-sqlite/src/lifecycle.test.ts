@@ -5,6 +5,7 @@ import {
   realpathSync,
   symlinkSync,
 } from 'node:fs';
+import { once } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { Worker } from 'node:worker_threads';
@@ -66,11 +67,18 @@ test('shares paths, fences run holders and closes only the releasing reference',
 
 test('reopening during final close waits for the previous Worker to release ownership', async () => {
   const first = store();
+  const messages = vi.spyOn(Worker.prototype, 'postMessage');
   await first.acquireRun('run');
+  const worker = messages.mock.contexts[0];
+  messages.mockRestore();
+  if (!(worker instanceof Worker))
+    throw new Error('Storage Worker was not started');
+  const exited = once(worker, 'exit');
   const closing = first.close();
   const next = store(first.info.path);
   const lease = await next.acquireRun('run');
   await closing;
+  expect(await exited).toEqual([0]);
   expect(lease.signal.aborted).toBe(false);
   expect((await next.commit(commit(lease, null))).outcome).toBe('committed');
 });

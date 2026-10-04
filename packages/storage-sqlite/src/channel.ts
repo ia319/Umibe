@@ -16,6 +16,7 @@ function freezeReply(value: unknown): void {
 /** Correlates Worker requests and fails all callers when the connection becomes uncertain. */
 export class WorkerChannel {
   private readonly worker: Worker;
+  private readonly exited: Promise<void>;
   private readonly controller = new AbortController();
   readonly signal = this.controller.signal;
   private readonly pending = new Map<
@@ -60,9 +61,14 @@ export class WorkerChannel {
         new StoreError('STORE_WORKER_FAILED', 'worker_error', { cause: error }),
       ),
     );
-    this.worker.on('exit', (code) => {
-      if (!this.closing || this.pending.size > 0)
-        this.fail(new StoreError('STORE_WORKER_FAILED', `worker_exit_${code}`));
+    this.exited = new Promise((resolve) => {
+      this.worker.on('exit', (code) => {
+        if (!this.closing || this.pending.size > 0)
+          this.fail(
+            new StoreError('STORE_WORKER_FAILED', `worker_exit_${code}`),
+          );
+        resolve();
+      });
     });
   }
 
@@ -102,7 +108,8 @@ export class WorkerChannel {
       try {
         if (!this.signal.aborted) await this.request({ op: 'close' });
       } finally {
-        await this.worker.terminate();
+        // Closing the port lets the Worker drain native finalizers before it exits.
+        await this.exited;
       }
     })();
     return this.closingPromise;
