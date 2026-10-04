@@ -471,10 +471,21 @@ export class RunDriver<TCriteria extends JsonValue> {
     const model =
       modelStage !== null &&
       this.options.modelStages?.includes(modelStage) === true;
+    const modelIdentity =
+      stage === 'planning'
+        ? this.options.planner.model
+        : stage === 'selection'
+          ? this.options.selector.model
+          : undefined;
     const result = model
       ? await invokeModel(
           session,
-          { requestId, decisionEpoch: epoch, purpose: modelStage },
+          {
+            requestId,
+            decisionEpoch: epoch,
+            purpose: modelStage,
+            ...(modelIdentity === undefined ? {} : { model: modelIdentity }),
+          },
           control,
           async (control) => ({ value: await invoke(control), usage: null }),
         )

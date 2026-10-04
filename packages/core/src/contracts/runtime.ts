@@ -77,7 +77,10 @@ export interface AgentOptions<TCriteria extends JsonValue = JsonValue> {
   readonly candidateFilter?: CandidateFilter;
   readonly selectorCapacity?: number;
   readonly limits?: Partial<RuntimeLimits>;
-  /** Mark callbacks backed by model requests; omitted stages run locally without model charges. */
+  /**
+   * Mark custom callbacks backed by model requests. Planner and Selector model
+   * identities always enable their stages, including when this array is empty.
+   */
   readonly modelStages?: readonly ModelStage[];
   readonly onDiagnostic?: (diagnostic: RuntimeDiagnostic) => void;
 }

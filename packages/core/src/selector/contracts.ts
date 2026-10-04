@@ -1,6 +1,7 @@
 import type { CandidateSet } from '#internal/contracts/candidate';
 import type { CallControl } from '#internal/contracts/control';
 import type { DecisionContext } from '#internal/contracts/context';
+import type { ModelIdentity } from '#internal/model/metadata';
 
 export interface SelectorRequest {
   readonly requestId: string;
@@ -10,6 +11,8 @@ export interface SelectorRequest {
 }
 
 export interface Selector {
+  /** Declares one model request per attempt and enables automatic Agent metering. */
+  readonly model?: ModelIdentity;
   select(
     request: SelectorRequest,
     control: CallControl,

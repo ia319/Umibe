@@ -8,6 +8,7 @@ import type { ActionCapability } from '#internal/contracts/action';
 import type { CallControl } from '#internal/contracts/control';
 import type { DecisionContext } from '#internal/contracts/context';
 import type { ChildGoalRecord } from '#internal/contracts/goal';
+import type { ModelIdentity } from '#internal/model/metadata';
 
 export interface PlannerRequest {
   readonly requestId: string;
@@ -21,6 +22,8 @@ export interface PlannerRequest {
 
 /** The core validates and accepts a proposal; the planner never mutates accepted goals. */
 export interface Planner {
+  /** Declares one model request per attempt and enables automatic Agent metering. */
+  readonly model?: ModelIdentity;
   plan(request: PlannerRequest, control: CallControl): Promise<PlanProposal>;
 }
 
