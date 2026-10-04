@@ -13,6 +13,8 @@ export interface SelectorRequest {
 export interface Selector {
   /** Declares one model request per attempt and enables automatic Agent metering. */
   readonly model?: ModelIdentity;
+  /** Maximum action candidates per call, as a positive safe integer; omitted means undeclared. */
+  readonly capacity?: number;
   select(
     request: SelectorRequest,
     control: CallControl,

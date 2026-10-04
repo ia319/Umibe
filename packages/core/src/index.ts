@@ -60,6 +60,8 @@ export type {
   SelectorRequest,
   SelectionResult,
 } from '#internal/selector/contracts';
+export { createSelector } from '#internal/selector/model';
+export type { SelectorOptions } from '#internal/selector/model';
 export type {
   DecisionContext,
   RuntimeContext,

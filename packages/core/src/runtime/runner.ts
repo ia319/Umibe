@@ -1142,6 +1142,9 @@ export class RunDriver<TCriteria extends JsonValue> {
         const selected = await selectCandidates(
           filtered.filtered,
           {
+            ...(this.options.selector.capacity === undefined
+              ? {}
+              : { capacity: this.options.selector.capacity }),
             select: (request, control) =>
               this.call(
                 'selection',

@@ -95,6 +95,9 @@ export function createAgent<TCriteria extends JsonValue>(
         ? input.selector
         : Object.freeze({
             model: selectorModel,
+            ...(input.selector.capacity === undefined
+              ? {}
+              : { capacity: input.selector.capacity }),
             select: input.selector.select.bind(input.selector),
           }),
     modelStages: Object.freeze(

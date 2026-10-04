@@ -23,7 +23,8 @@ import {
 
 /**
  * Select from an accepted filtered batch, including when it has just one member.
- * Capacity is an optional positive safe integer; exceeding it returns
+ * Capacity is an optional positive safe integer, combined with selector.capacity
+ * using the smaller declared limit. Exceeding the limit returns
  * candidate_limit without truncation or a selector call. Empty batches return
  * no_candidates. Invalid arguments reject with ContractError; adapter failures
  * return stage diagnostics. A selected result grants no execution authority.
@@ -49,6 +50,15 @@ export async function selectCandidates(
   }
   const select = selector.select.bind(selector);
   const control = captureControl(controlInput);
+  const declaredCapacity = selector.capacity;
+  if (declaredCapacity !== undefined) {
+    requireInteger(
+      declaredCapacity,
+      1,
+      { code: 'INVALID_CANDIDATE_REQUEST', stage: 'candidate_selection' },
+      '/selector/capacity',
+    );
+  }
   if (capacity !== undefined) {
     requireInteger(
       capacity,
@@ -57,6 +67,12 @@ export async function selectCandidates(
       '/capacity',
     );
   }
+  const effectiveCapacity =
+    capacity === undefined
+      ? declaredCapacity
+      : declaredCapacity === undefined
+        ? capacity
+        : Math.min(capacity, declaredCapacity);
   const stopped = control.signal.aborted
     ? 'cancelled'
     : Date.now() >= control.deadlineMs
@@ -70,12 +86,12 @@ export async function selectCandidates(
 
   const count = filtered.set.candidates.length;
   if (count === 0) return Object.freeze({ outcome: 'no_candidates', filtered });
-  if (capacity !== undefined && count > capacity) {
+  if (effectiveCapacity !== undefined && count > effectiveCapacity) {
     return Object.freeze({
       outcome: 'candidate_limit',
       filtered,
       count,
-      capacity,
+      capacity: effectiveCapacity,
     });
   }
   const source = filtered.checked.prepared.request;

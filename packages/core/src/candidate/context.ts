@@ -230,7 +230,7 @@ export function captureCandidateRequest(
 /** Provider path labels are opaque; the full sequence must match the derived path. */
 export function validateCandidateBasis(
   set: CandidateSet,
-  request: CandidateRequest,
+  request: CandidateGenerationInput,
 ): void {
   const current = request.context;
   const expected = {
