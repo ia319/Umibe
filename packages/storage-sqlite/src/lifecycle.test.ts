@@ -14,7 +14,7 @@ import { afterEach, expect, test, vi } from 'vitest';
 import { createAgent } from '@umibe/core';
 import { SqliteRunStore } from '@umibe/storage-sqlite';
 import { runnerFixture } from '../../core/src/runtime/__tests__/runner-fixtures.js';
-import { commit } from './__tests__/fixtures.js';
+import { commit, intent } from './__tests__/fixtures.js';
 
 const directory = mkdtempSync(join(tmpdir(), 'umibe-sqlite-lifecycle-'));
 let counter = 0;
@@ -92,6 +92,83 @@ test('closes an acquisition already in flight without leaking its run lease', as
   await closing;
   expect((await second.acquireRun('run')).signal.aborted).toBe(false);
 });
+
+test.each(['acquireRun', 'commit'] as const)(
+  'preserves shared callers and leases after %s lock contention',
+  async (operation) => {
+    const first = store();
+    const second = store(first.info.path);
+    const firstLease = await first.acquireRun('first');
+    const secondLease = await second.acquireRun('second');
+    await first.commit(commit(firstLease, null));
+    await second.commit(commit(secondLease, null));
+    const raw = new Database(first.info.path);
+    try {
+      raw.exec('BEGIN IMMEDIATE');
+      const pending =
+        operation === 'acquireRun'
+          ? first.acquireRun('blocked')
+          : first.commit(commit(firstLease, 1, [intent('first')]));
+      const outcomes = await Promise.allSettled([
+        pending,
+        second.readRun('second'),
+      ]);
+      expect(outcomes[0]).toMatchObject({
+        status: 'rejected',
+        reason: { code: 'STORE_BUSY', reason: 'SQLITE_BUSY' },
+      });
+      expect(outcomes[1]).toMatchObject({
+        status: 'fulfilled',
+        value: { checkpoint: { revision: 1 } },
+      });
+      expect(first.signal.aborted).toBe(false);
+      expect(second.signal.aborted).toBe(false);
+      expect(firstLease.signal.aborted).toBe(false);
+      expect(secondLease.signal.aborted).toBe(false);
+    } finally {
+      if (raw.inTransaction) raw.exec('ROLLBACK');
+      raw.close();
+    }
+    expect((await first.readRun('first'))?.checkpoint.revision).toBe(1);
+    expect(await first.readRecord('first', 'intent')).toBeNull();
+    await (await first.acquireRun('blocked')).release();
+    expect(
+      (await first.commit(commit(firstLease, 1, [intent('first')]))).outcome,
+    ).toBe('committed');
+    expect((await second.commit(commit(secondLease, 1))).outcome).toBe(
+      'committed',
+    );
+    await first.close();
+    await second.close();
+    const reopened = store(first.info.path);
+    expect((await reopened.inspect()).owner).toBeNull();
+    expect((await reopened.acquireRun('first')).signal.aborted).toBe(false);
+  },
+  20_000,
+);
+
+test('preserves ownership when final close cannot obtain the write lock', async () => {
+  const database = store();
+  await database.acquireRun('run');
+  const raw = new Database(database.info.path);
+  try {
+    raw.exec('BEGIN IMMEDIATE');
+    await expect(database.close()).rejects.toMatchObject({
+      code: 'STORE_BUSY',
+      reason: 'SQLITE_BUSY',
+    });
+    stores.delete(database);
+  } finally {
+    if (raw.inTransaction) raw.exec('ROLLBACK');
+    raw.close();
+  }
+  const reopened = store(database.info.path);
+  expect((await reopened.inspect()).owner?.pid).toBe(process.pid);
+  await expect(reopened.acquireRun('run')).rejects.toMatchObject({
+    code: 'STORE_OWNERSHIP',
+    reason: 'process_owned',
+  });
+}, 20_000);
 
 test('canonicalizes directory links before creating the database', async () => {
   const target = join(directory, 'target');

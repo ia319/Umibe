@@ -37,6 +37,7 @@ function queryId(value: unknown, path: string): string {
 
 /**
  * Retain a shared Worker for the canonical file path. Queries never create a missing database.
+ * Read, acquisition and commit lock conflicts reject with STORE_BUSY without aborting shared handles or leases.
  * Call close to release this handle's leases and reference; the final reference releases process ownership.
  * A failed Worker never restarts or relinquishes a live process's ownership automatically.
  */
@@ -212,6 +213,11 @@ export class SqliteRunStore implements RunStore {
     return this.request({ op: 'inspect' });
   }
 
+  /**
+   * Release this handle; the final handle also waits for Worker exit.
+   * If the final owner release fails, reject and preserve the process claim;
+   * reopening cannot acquire runs while the owning process remains alive.
+   */
   close(): Promise<void> {
     if (this.closing !== undefined) return this.closing;
     this.closed = true;

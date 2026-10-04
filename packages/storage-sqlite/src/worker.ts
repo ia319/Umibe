@@ -84,8 +84,10 @@ port.on('message', ({ id, command }: StoreRequest) => {
       id,
       ok: false,
       error: detail,
+      // Lock contention does not invalidate the connection or process ownership.
       fatal:
         detail.type === 'storage' &&
+        detail.code !== 'STORE_BUSY' &&
         (detail.code !== 'STORE_OWNERSHIP' ||
           detail.reason === 'process_owner_lost'),
     };
