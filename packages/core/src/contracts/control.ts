@@ -1,4 +1,7 @@
-import type { ModelResponseMetadata } from '#internal/model/metadata';
+import type {
+  ModelResponseMetadata,
+  ModelChoiceMetadata,
+} from '#internal/model/metadata';
 
 /** One invocation owns its cancellation signal; a cancelled call cannot authorize a later effect. */
 export interface CallControl {
@@ -12,4 +15,11 @@ export interface CallControl {
    * Forward this channel unchanged through role and provider boundaries.
    */
   readonly reportModelResponse?: (metadata: ModelResponseMetadata) => void;
+  /**
+   * Report the locally decoded choice independently of response usage, which may
+   * arrive before decoding fails. The first valid report is copied and frozen;
+   * duplicate, settled, invalidated and cancelled reports are ignored. Invalid
+   * active reports throw. Forward unchanged through nested call boundaries.
+   */
+  readonly reportModelChoice?: (metadata: ModelChoiceMetadata) => void;
 }

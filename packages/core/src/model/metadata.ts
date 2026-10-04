@@ -19,6 +19,21 @@ export interface ModelResponseMetadata {
   readonly usage: ModelUsage | null;
 }
 
+/** Native choice evidence and its locally bound candidate mapping; never execution authority. */
+export interface ModelChoiceMetadata {
+  readonly candidateSetId: string;
+  readonly optionId: string;
+  readonly options: readonly {
+    readonly id: string;
+    /** Null identifies the abstention option. */
+    readonly candidateId: string | null;
+    /** Null means the model did not provide a probability. */
+    readonly probability: number | null;
+  }[];
+  /** Provider-specific certainty, or null when unavailable. */
+  readonly confidence: number | null;
+}
+
 /** Safe output diagnostics only: field paths and reason codes, never rejected values. */
 export interface ModelResponseIssue {
   readonly phase: 'protocol' | 'planning' | 'selection';

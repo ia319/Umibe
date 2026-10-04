@@ -1,5 +1,10 @@
 import type { Selector, SelectorRequest } from './contracts.js';
-import type { StructuredOutputModel } from '#internal/model/contracts';
+import type {
+  StructuredOutputModel,
+  ChoiceModel,
+  ChoiceResponse,
+} from '#internal/model/contracts';
+import type { JsonValue } from '#internal/contracts/json';
 import { captureModelIdentity } from '#internal/model/validation';
 import {
   captureDecisionRequest,
@@ -17,34 +22,60 @@ import {
   selectorInstructions,
   selectorOutputSchema,
 } from './format.js';
+import { decodeChoiceSelection, formatChoiceSelection } from './choice.js';
 
 export interface SelectorOptions {
-  readonly model: StructuredOutputModel;
+  readonly model: StructuredOutputModel | ChoiceModel;
   /** Positive safe integer limiting action candidates; omitted means no declared count limit. */
   readonly capacity?: number;
 }
 
 /**
- * Create a stateless selector. Nonempty calls generate once; Agent owns budgets.
+ * Create a stateless selector. Nonempty calls request once; Agent owns budgets.
  * Direct empty calls return abstain/no_candidates. Excess capacity rejects with
  * ContractError reason candidate_limit before model access. No candidate is truncated.
  */
 export function createSelector(options: SelectorOptions): Selector {
-  if (
-    options.model?.kind !== 'structuredOutput' ||
-    typeof options.model.generate !== 'function'
-  )
-    throw new TypeError('Selector requires a structured output model');
-  const identity = captureModelIdentity(options.model.identity);
-  const generate = options.model.generate.bind(options.model);
-  const capacity = options.capacity;
-  if (capacity !== undefined)
-    requireInteger(
-      capacity,
-      1,
-      { code: 'INVALID_CANDIDATE_REQUEST', stage: 'selector' },
-      '/capacity',
+  const configured = options.model;
+  if (!(
+    (configured?.kind === 'structuredOutput' &&
+      typeof configured.generate === 'function') ||
+    (configured?.kind === 'choice' && typeof configured.choose === 'function')
+  ))
+    throw new TypeError(
+      'Selector requires a structured output or choice model',
     );
+  const identity = captureModelIdentity(configured.identity);
+  const model =
+    configured.kind === 'choice'
+      ? { kind: 'choice' as const, choose: configured.choose.bind(configured) }
+      : {
+          kind: 'structuredOutput' as const,
+          generate: configured.generate.bind(configured),
+        };
+  let capacity = options.capacity;
+  const validation = {
+    code: 'INVALID_CANDIDATE_REQUEST',
+    stage: 'selector',
+  } as const;
+  if (capacity !== undefined)
+    requireInteger(capacity, 1, validation, '/capacity');
+  if (configured.kind === 'choice' && configured.maxOptions !== undefined) {
+    const maximum = requireInteger(
+      configured.maxOptions,
+      1,
+      validation,
+      '/model/maxOptions',
+    );
+    if (maximum < 2)
+      throw new ContractError(
+        validation.code,
+        validation.stage,
+        '/model/maxOptions',
+        'expected_at_least_two_options',
+      );
+    capacity = Math.min(capacity ?? Number.MAX_SAFE_INTEGER, maximum - 1);
+  }
   return Object.freeze<Selector>({
     model: identity,
     ...(capacity === undefined ? {} : { capacity }),
@@ -78,20 +109,44 @@ export function createSelector(options: SelectorOptions): Selector {
           '/candidates',
           'candidate_limit',
         );
-      const output = await generate(
-        {
-          instructions: selectorInstructions,
-          input: parseJsonValue({ request }, 'selector_request'),
-          output: { name: 'umibe_selection', schema: selectorOutputSchema },
-        },
-        control,
-      );
+      let output:
+        | { kind: 'structuredOutput'; value: JsonValue }
+        | { kind: 'choice'; value: ChoiceResponse; abstainId: string };
+      if (model.kind === 'choice') {
+        const formatted = formatChoiceSelection(request);
+        output = {
+          kind: 'choice',
+          value: await model.choose(formatted.request, control),
+          abstainId: formatted.abstainId,
+        };
+      } else {
+        output = {
+          kind: 'structuredOutput',
+          value: await model.generate(
+            {
+              instructions: selectorInstructions,
+              input: parseJsonValue({ request }, 'selector_request'),
+              output: { name: 'umibe_selection', schema: selectorOutputSchema },
+            },
+            control,
+          ),
+        };
+      }
       if (control.signal.aborted)
         throw new DOMException('Model request cancelled', 'AbortError');
       if (Date.now() >= control.deadlineMs)
         throw new ModelRequestError('deadline_exceeded');
       try {
-        return decodeSelectionOutput(output, request);
+        if (output.kind === 'choice') {
+          const decoded = decodeChoiceSelection(
+            output.value,
+            request,
+            output.abstainId,
+          );
+          control.reportModelChoice?.(decoded.metadata);
+          return decoded.selection;
+        }
+        return decodeSelectionOutput(output.value, request);
       } catch (error) {
         throw modelOutputError('selection', error);
       }

@@ -4,10 +4,12 @@ import type {
   ModelIdentity,
   ModelResponseMetadata,
   ModelResponseIssue,
+  ModelChoiceMetadata,
 } from '#internal/model/metadata';
 import {
   captureModelIdentity,
   captureModelResponse,
+  captureModelChoice,
 } from '#internal/model/validation';
 import { captureControl, invokeControlled } from '#internal/candidate/control';
 import { ContractError } from '#internal/errors';
@@ -222,8 +224,11 @@ export async function invokeModel<T>(
       ).toISOString(),
     });
     let dispatchCommit: Promise<void> | undefined;
-    const response: { metadata: ModelResponseMetadata | null; open: boolean } =
-      { metadata: null, open: true };
+    const response: {
+      metadata: ModelResponseMetadata | null;
+      choice: ModelChoiceMetadata | null;
+      open: boolean;
+    } = { metadata: null, choice: null, open: true };
     const startedAt = Date.now();
     const result = await invokeControlled(control, (attemptControl) => {
       dispatchCommit = session.commit(
@@ -250,6 +255,20 @@ export async function invokeModel<T>(
               return;
             try {
               response.metadata = captureModelResponse(metadata);
+            } catch {
+              throw new ModelRequestError('invalid_response');
+            }
+          },
+          reportModelChoice: (metadata: ModelChoiceMetadata) => {
+            if (
+              !response.open ||
+              response.choice !== null ||
+              attemptControl.signal.aborted ||
+              interruption() !== null
+            )
+              return;
+            try {
+              response.choice = captureModelChoice(metadata);
             } catch {
               throw new ModelRequestError('invalid_response');
             }
@@ -324,6 +343,9 @@ export async function invokeModel<T>(
             ...details,
             usage,
             ...(issue === null ? {} : { issue: { ...issue } }),
+            ...(response.choice === null
+              ? {}
+              : { choice: parseJsonValue(response.choice, validation.stage) }),
             response:
               response.metadata === null
                 ? null

@@ -1,6 +1,9 @@
 import { afterEach, expect, test, vi } from 'vitest';
 import type { CallControl } from '#internal/contracts/control';
-import type { ModelResponseMetadata } from '#internal/model/metadata';
+import type {
+  ModelResponseMetadata,
+  ModelChoiceMetadata,
+} from '#internal/model/metadata';
 import {
   callControl,
   generationInput,
@@ -20,6 +23,15 @@ const metadata = {
   model: 'actual',
   requestId: 'response',
   usage: { inputTokens: 8, outputTokens: 4, totalTokens: 12 },
+};
+const choice: ModelChoiceMetadata = {
+  candidateSetId: 'candidates',
+  optionId: 'a',
+  options: [
+    { id: 'a', candidateId: 'candidate-a', probability: 0.8 },
+    { id: 'none', candidateId: null, probability: 0.2 },
+  ],
+  confidence: 0.04,
 };
 afterEach(() => vi.useRealTimers());
 
@@ -47,6 +59,11 @@ test.each([
     await session.transition({ kind: 'start' });
     const report = { ...metadata, usage: { ...metadata.usage } };
     let late!: NonNullable<CallControl['reportModelResponse']>;
+    let lateChoice!: NonNullable<CallControl['reportModelChoice']>;
+    const choiceReport = {
+      ...choice,
+      options: choice.options.map((option) => ({ ...option })),
+    };
     const result = await invokeModel(
       session,
       basis,
@@ -56,7 +73,11 @@ test.each([
           captureControl(control),
           (nestedControl) => {
             late = nestedControl.reportModelResponse!;
+            lateChoice = nestedControl.reportModelChoice!;
             late(report);
+            lateChoice(choiceReport);
+            choiceReport.options[0]!.probability = 0;
+            lateChoice({ ...choice, optionId: 'none' });
             report.model = 'mutated';
             report.usage.inputTokens = 999;
             late({ model: 'duplicate', requestId: null, usage: null });
@@ -84,10 +105,12 @@ test.each([
           model: basis.model,
           response: metadata,
           usage: metadata.usage,
+          choice,
         },
       },
     });
     late({ model: 'late', requestId: null, usage: null });
+    lateChoice({ ...choice, candidateSetId: 'late' });
     expect((await store.readRecords('run', null, 100)).records).toEqual(before);
     await closeSession(session);
   },
@@ -99,6 +122,7 @@ test('gives every retry a separate channel and leaves an unreported response unk
   const session = await RunSession.create(store, generationInput(), vi.fn());
   await session.transition({ kind: 'start' });
   let first!: NonNullable<CallControl['reportModelResponse']>;
+  let firstChoice!: NonNullable<CallControl['reportModelChoice']>;
   const pending = invokeModel(
     session,
     basis,
@@ -106,7 +130,9 @@ test('gives every retry a separate channel and leaves an unreported response unk
     (control, attempt) => {
       if (attempt === 1) {
         first = control.reportModelResponse!;
+        firstChoice = control.reportModelChoice!;
         first(metadata);
+        firstChoice(choice);
         return Promise.reject(new ModelRequestError('unavailable'));
       }
       first({
@@ -114,6 +140,8 @@ test('gives every retry a separate channel and leaves an unreported response unk
         requestId: null,
         usage: { inputTokens: 99, outputTokens: 0, totalTokens: 99 },
       });
+      firstChoice({ ...choice, candidateSetId: 'old-retry' });
+      control.reportModelChoice!({ ...choice, candidateSetId: 'retry-two' });
       return Promise.resolve({ value: 'ok', usage: null });
     },
   );
@@ -130,10 +158,24 @@ test('gives every retry a separate channel and leaves an unreported response unk
   expect(finished).toMatchObject([
     {
       data: {
-        details: { attempt: 1, response: metadata, usage: metadata.usage },
+        details: {
+          attempt: 1,
+          response: metadata,
+          usage: metadata.usage,
+          choice,
+        },
       },
     },
-    { data: { details: { attempt: 2, response: null, usage: null } } },
+    {
+      data: {
+        details: {
+          attempt: 2,
+          response: null,
+          usage: null,
+          choice: { ...choice, candidateSetId: 'retry-two' },
+        },
+      },
+    },
   ]);
   await closeSession(session);
 });
@@ -149,8 +191,10 @@ test.each(['cancelled', 'invalidated', 'deadlineExceeded'] as const)(
     });
     await session.transition({ kind: 'start' });
     let report!: NonNullable<CallControl['reportModelResponse']>;
+    let reportChoice!: NonNullable<CallControl['reportModelChoice']>;
     const pending = invokeModel(session, basis, callControl(), (control) => {
       report = control.reportModelResponse!;
+      reportChoice = control.reportModelChoice!;
       return new Promise<never>(() => {});
     });
     await vi.advanceTimersByTimeAsync(0);
@@ -162,6 +206,7 @@ test.each(['cancelled', 'invalidated', 'deadlineExceeded'] as const)(
     if (outcome === 'invalidated')
       await session.replaceDecision({ ...generationInput(), decisionEpoch: 4 });
     report(metadata);
+    reportChoice(choice);
     await vi.advanceTimersByTimeAsync(10);
     await pending;
     // A report before the timeout is valid; cancellation and epoch change close it immediately.
@@ -170,7 +215,11 @@ test.each(['cancelled', 'invalidated', 'deadlineExceeded'] as const)(
     expect(before.at(-1)).toMatchObject({
       data: { details: { response: expected } },
     });
+    if (outcome === 'deadlineExceeded')
+      expect(before.at(-1)).toMatchObject({ data: { details: { choice } } });
+    else expect(JSON.stringify(before.at(-1))).not.toContain('candidate-a');
     report({ model: 'late', requestId: null, usage: null });
+    reportChoice({ ...choice, candidateSetId: 'late' });
     expect((await store.readRecords('run', null, 100)).records).toEqual(before);
     await closeSession(session);
   },
@@ -191,6 +240,10 @@ test('isolates metadata from concurrent runs using the same model identity', asy
           ...metadata,
           requestId: `response-${index}`,
         });
+        control.reportModelChoice!({
+          ...choice,
+          candidateSetId: `set-${index}`,
+        });
         return Promise.resolve({ value: index, usage: null });
       }),
     ),
@@ -203,11 +256,57 @@ test('isolates metadata from concurrent runs using the same model identity', asy
     expect(
       (await store.readRecords('run', null, 100)).records.at(-1),
     ).toMatchObject({
-      data: { details: { response: { requestId: `response-${index}` } } },
+      data: {
+        details: {
+          response: { requestId: `response-${index}` },
+          choice: { candidateSetId: `set-${index}` },
+        },
+      },
     });
   }
   await Promise.all(sessions.map(closeSession));
 });
+
+test.each([
+  { ...choice, authorization: 'must-not-persist' },
+  {
+    ...choice,
+    options: [
+      { ...choice.options[0]!, authorization: 'must-not-persist' },
+      choice.options[1]!,
+    ],
+  },
+  { ...choice, optionId: 'foreign' },
+  { ...choice, confidence: 2 },
+  { ...choice, options: [choice.options[0]!, choice.options[0]!] },
+])(
+  'rejects malformed choice evidence %# while retaining response usage',
+  async (report) => {
+    const store = new MemoryRunStore();
+    const session = await RunSession.create(store, generationInput(), vi.fn());
+    await session.transition({ kind: 'start' });
+    const result = await invokeModel(
+      session,
+      basis,
+      callControl(),
+      (control) => {
+        control.reportModelResponse!(metadata);
+        control.reportModelChoice!(report);
+        return Promise.resolve({ value: 'unreachable', usage: null });
+      },
+    );
+    expect(result).toEqual({
+      outcome: 'failed',
+      reasonCode: 'invalid_response',
+    });
+    const records = (await store.readRecords('run', null, 100)).records;
+    expect(records.at(-1)).toMatchObject({
+      data: { details: { response: metadata, usage: metadata.usage } },
+    });
+    expect(JSON.stringify(records)).not.toContain('must-not-persist');
+    await closeSession(session);
+  },
+);
 
 test.each([-1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])(
   'rejects invalid token count %s without persisting raw metadata',

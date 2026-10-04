@@ -42,6 +42,16 @@ export function captureControl(input: CallControl): CapturedControl {
       '/control/reportModelResponse',
       'expected_function',
     );
+  if (
+    input.reportModelChoice !== undefined &&
+    typeof input.reportModelChoice !== 'function'
+  )
+    throw new ContractError(
+      'INVALID_CANDIDATE_REQUEST',
+      'candidate_request',
+      '/control/reportModelChoice',
+      'expected_function',
+    );
   return Object.freeze({
     signal: input.signal,
     deadlineAt,
@@ -49,6 +59,9 @@ export function captureControl(input: CallControl): CapturedControl {
     ...(input.reportModelResponse === undefined
       ? {}
       : { reportModelResponse: input.reportModelResponse }),
+    ...(input.reportModelChoice === undefined
+      ? {}
+      : { reportModelChoice: input.reportModelChoice }),
   });
 }
 
@@ -69,6 +82,9 @@ export function invokeControlled<T>(
       ...(control.reportModelResponse === undefined
         ? {}
         : { reportModelResponse: control.reportModelResponse }),
+      ...(control.reportModelChoice === undefined
+        ? {}
+        : { reportModelChoice: control.reportModelChoice }),
     });
     let settled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;

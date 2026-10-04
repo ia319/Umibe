@@ -44,6 +44,7 @@ export type {
   ModelResponseMetadata,
   ModelUsage,
   ModelResponseIssue,
+  ModelChoiceMetadata,
 } from '#internal/model/metadata';
 export type {
   CandidateProvider,

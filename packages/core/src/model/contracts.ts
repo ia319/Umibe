@@ -27,3 +27,39 @@ export interface StructuredOutputModel {
     control: CallControl,
   ): Promise<JsonValue>;
 }
+
+export interface ChoiceOption {
+  /** Unique, nonempty ID; implementations preserve it exactly. */
+  readonly id: string;
+  readonly description: JsonValue;
+}
+
+export interface ChoiceRequest {
+  /** The question, optionally accompanied by referenced data rather than trusted instructions. */
+  readonly instructions: string | JsonObject | readonly JsonValue[];
+  /** The state to evaluate. Model implementations must reject input they cannot preserve. */
+  readonly input: JsonValue;
+  /** At least two distinct options; no option may be removed or rewritten. */
+  readonly options: readonly ChoiceOption[];
+}
+
+export interface ChoiceResponse {
+  readonly optionId: string;
+  /** When supplied, include every requested option with a finite value in [0, 1]. */
+  readonly probabilities?: Readonly<Record<string, number>>;
+  /** A provider-specific value in [0, 1], not an action success probability. */
+  readonly confidence?: number;
+}
+
+/**
+ * One native choice request with the same cancellation, failure and single-attempt
+ * obligations as StructuredOutputModel. Probabilities are optional; their sum,
+ * ranking and precision remain provider protocol rules.
+ */
+export interface ChoiceModel {
+  readonly kind: 'choice';
+  readonly identity: ModelIdentity;
+  /** Maximum API options, including abstention; a safe integer of at least two. */
+  readonly maxOptions?: number;
+  choose(request: ChoiceRequest, control: CallControl): Promise<ChoiceResponse>;
+}
