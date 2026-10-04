@@ -4,7 +4,7 @@ import type {
   ActionDefinition,
   PreparedAction,
 } from '#internal/contracts/action';
-import type { DecisionContext } from '#internal/contracts/adapters';
+import type { DecisionContext } from '#internal/contracts/context';
 import { ActionRegistry, defineAction } from './registry.js';
 import { result, execution } from './__tests__/fixtures.js';
 

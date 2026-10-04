@@ -1,8 +1,18 @@
 import type * as z from 'zod';
-import type { CallControl, DecisionContext } from './adapters.js';
+import type { CallControl } from '#internal/contracts/control';
+import type { DecisionContext } from '#internal/contracts/context';
 import type { ParameterSource } from './candidate.js';
 import type { JsonObject } from './json.js';
 import type { ActionIntent, ActionResult } from './record.js';
+
+export interface ActionCapability {
+  readonly id: string;
+  readonly version: number;
+  readonly description: string;
+  readonly parameters: JsonObject;
+  readonly expectedEffects: JsonObject;
+  readonly tags: readonly string[];
+}
 
 export type ActionCheck =
   | { readonly outcome: 'allowed' }

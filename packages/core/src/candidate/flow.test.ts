@@ -4,9 +4,9 @@ import { ActionRegistry, defineAction } from '#internal/action/registry';
 import type {
   CandidateProvider,
   CandidateRequest,
-  DecisionContext,
   Selector,
 } from '#internal/contracts/adapters';
+import type { DecisionContext } from '#internal/contracts/context';
 import type { CandidateSet } from '#internal/contracts/candidate';
 import type {
   CandidateGenerationInput,

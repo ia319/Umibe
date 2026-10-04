@@ -1,4 +1,4 @@
-import type { RuntimeContext } from '#internal/contracts/adapters';
+import type { RuntimeContext } from '#internal/contracts/context';
 import type { JsonValue } from '#internal/contracts/json';
 import { ContractError } from '#internal/errors';
 import {

@@ -8,7 +8,8 @@ import type {
   RunHandle,
   ResumeRun,
 } from '#internal/contracts/runtime';
-import type { CallControl, PlannerRequest } from '#internal/contracts/adapters';
+import type { CallControl } from '#internal/contracts/control';
+import type { PlannerRequest } from '#internal/contracts/adapters';
 import type { JsonValue } from '#internal/contracts/json';
 import type {
   GoalAssessment,

@@ -1,72 +1,15 @@
 import type { ActionResult } from './record.js';
 import type { ApplicationEvent } from './event.js';
-import type {
-  ChildGoalRecord,
-  GoalAssessment,
-  GoalGraphSnapshot,
-  GoalRecord,
-} from './goal.js';
-import type { JsonObject, JsonValue } from './json.js';
+import type { ChildGoalRecord, GoalAssessment, GoalRecord } from './goal.js';
+import type { JsonValue } from './json.js';
 import type { Observation } from './observation.js';
-import type { PlanRef } from './references.js';
 import type { CandidateSet } from './candidate.js';
 import type { CandidateFilterResult } from './candidate-filter.js';
 import type { SelectionResult } from './selection.js';
 import type { PlanProposal, PlanningTrigger } from './planning.js';
-import type { GoalProgress } from '#internal/runtime/progress';
-import type { GoalRef } from './references.js';
-
-export interface RuntimeContext {
-  readonly execution: {
-    readonly executionId: string;
-    readonly phase: 'prepared' | 'running' | ActionResult['outcome'];
-  } | null;
-  readonly recentResults: readonly ActionResult[];
-  readonly progress: readonly Pick<
-    GoalProgress,
-    'goalRef' | 'noProgress' | 'recoveryAttempts' | 'highWater'
-  >[];
-  readonly blocker: {
-    readonly eventId: string;
-    readonly reasonCode: string;
-  } | null;
-  readonly completedSiblings: readonly {
-    readonly goalRef: GoalRef;
-    readonly assessment: GoalAssessment;
-  }[];
-}
-
-/** One invocation owns its cancellation signal; a cancelled call cannot authorize a later effect. */
-export interface CallControl {
-  readonly signal: AbortSignal;
-  /** Absolute UTC deadline, including the time spent waiting for an adapter. */
-  readonly deadlineAt: string;
-}
-
-export interface DecisionContext {
-  readonly graph: GoalGraphSnapshot;
-  readonly planRef: PlanRef | null;
-  /** Current accepted guidance; goal relations remain in the graph. */
-  readonly planGuidance: string | null;
-  readonly observation: Observation;
-  readonly constraintsVersion: number;
-  readonly effectiveConstraints: JsonObject;
-  readonly lastActionResult: ActionResult | null;
-  readonly recentEvents: readonly ApplicationEvent[];
-  /** Application-supplied task context; separate from observed facts and hard constraints. */
-  readonly applicationContext?: JsonObject;
-  /** Bounded runtime history; historical evidence never replaces the current observation. */
-  readonly runtime?: RuntimeContext;
-}
-
-export interface ActionCapability {
-  readonly id: string;
-  readonly version: number;
-  readonly description: string;
-  readonly parameters: JsonObject;
-  readonly expectedEffects: JsonObject;
-  readonly tags: readonly string[];
-}
+import type { ActionCapability } from './action.js';
+import type { DecisionContext } from './context.js';
+import type { CallControl } from './control.js';
 
 export interface PlannerRequest {
   readonly requestId: string;

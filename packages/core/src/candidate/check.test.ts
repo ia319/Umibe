@@ -3,10 +3,8 @@ import { afterEach, expect, test, vi } from 'vitest';
 import { z } from 'zod';
 import { ActionRegistry, defineAction } from '#internal/action/registry';
 import type { ActionCheck } from '#internal/contracts/action';
-import type {
-  CallControl,
-  DecisionContext,
-} from '#internal/contracts/adapters';
+import type { CallControl } from '#internal/contracts/control';
+import type { DecisionContext } from '#internal/contracts/context';
 import type { CandidateCheckingResult } from '#internal/contracts/candidate-processing';
 import type { JsonObject } from '#internal/contracts/json';
 import { ContractError } from '#internal/errors';

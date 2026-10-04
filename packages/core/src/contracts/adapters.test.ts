@@ -2,12 +2,12 @@ import { expect, test } from 'vitest';
 import { z } from 'zod';
 import type {
   CandidateProvider,
-  DecisionContext,
   Environment,
   Planner,
   Selector,
   Verifier,
 } from './adapters.js';
+import type { DecisionContext } from '#internal/contracts/context';
 import type { ActionDefinition } from './action.js';
 import type { ApplicationEvent } from './event.js';
 import { parseCandidateSet } from '../validation/candidate.js';

@@ -1,7 +1,5 @@
-import type {
-  ActionCapability,
-  CandidateRequest,
-} from '#internal/contracts/adapters';
+import type { ActionCapability } from '#internal/contracts/action';
+import type { CandidateRequest } from '#internal/contracts/adapters';
 import type { CandidateGenerationInput } from '#internal/contracts/candidate-processing';
 import type { CandidateSet } from '#internal/contracts/candidate';
 import { ContractError } from '#internal/errors';

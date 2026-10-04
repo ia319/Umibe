@@ -1,4 +1,4 @@
-import type { CallControl } from '#internal/contracts/adapters';
+import type { CallControl } from '#internal/contracts/control';
 import { ContractError } from '#internal/errors';
 import { requireTimestamp } from '#internal/validation/fields';
 

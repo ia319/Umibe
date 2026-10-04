@@ -1,10 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { ActionRegistry } from '#internal/action/registry';
 import type { PreparedAction } from '#internal/contracts/action';
-import type {
-  CallControl,
-  CandidateProvider,
-} from '#internal/contracts/adapters';
+import type { CallControl } from '#internal/contracts/control';
+import type { CandidateProvider } from '#internal/contracts/adapters';
 import type {
   Candidate,
   CandidateExclusion,

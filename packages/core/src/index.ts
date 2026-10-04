@@ -34,14 +34,11 @@ export { parsePlanProposal } from '#internal/validation/planning';
 export { describeActionParameters } from '#internal/action/describe';
 export { ActionRegistry, defineAction } from '#internal/action/registry';
 export type { RegisteredAction } from '#internal/action/registry';
+export type { CallControl } from '#internal/contracts/control';
 export type {
-  ActionCapability,
-  CallControl,
   CandidateProvider,
   CandidateRequest,
   CriteriaSupport,
-  DecisionContext,
-  RuntimeContext,
   Environment,
   Planner,
   PlannerRequest,
@@ -51,6 +48,11 @@ export type {
   Verifier,
 } from '#internal/contracts/adapters';
 export type {
+  DecisionContext,
+  RuntimeContext,
+} from '#internal/contracts/context';
+export type {
+  ActionCapability,
   ActionCheck,
   ActionDefinition,
   ActionExecutionContext,

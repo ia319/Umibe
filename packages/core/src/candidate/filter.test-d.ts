@@ -1,8 +1,6 @@
 import { assertType } from 'vitest';
-import type {
-  CallControl,
-  CandidateFilter,
-} from '#internal/contracts/adapters';
+import type { CallControl } from '#internal/contracts/control';
+import type { CandidateFilter } from '#internal/contracts/adapters';
 import type {
   CandidateFilteringResult,
   CheckedCandidates,

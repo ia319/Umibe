@@ -1,8 +1,5 @@
-import type {
-  CallControl,
-  Selector,
-  SelectorRequest,
-} from '#internal/contracts/adapters';
+import type { CallControl } from '#internal/contracts/control';
+import type { Selector, SelectorRequest } from '#internal/contracts/adapters';
 import type {
   CandidateSelectionResult,
   FilteredCandidates,

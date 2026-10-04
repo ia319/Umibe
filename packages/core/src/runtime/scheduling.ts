@@ -1,4 +1,4 @@
-import type { DecisionContext } from '#internal/contracts/adapters';
+import type { DecisionContext } from '#internal/contracts/context';
 import type { CandidateSet } from '#internal/contracts/candidate';
 import type { PlanningTrigger } from '#internal/contracts/planning';
 import { canonicalJson } from '#internal/candidate/identity';

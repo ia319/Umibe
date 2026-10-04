@@ -4,7 +4,8 @@ import type {
   PreparedAction,
   Reconciliation,
 } from '#internal/contracts/action';
-import type { CallControl, Environment } from '#internal/contracts/adapters';
+import type { CallControl } from '#internal/contracts/control';
+import type { Environment } from '#internal/contracts/adapters';
 import type { SelectedCandidate } from '#internal/contracts/candidate-processing';
 import type { ActionIntent, ActionResult } from '#internal/contracts/record';
 import type { JsonObject } from '#internal/contracts/json';

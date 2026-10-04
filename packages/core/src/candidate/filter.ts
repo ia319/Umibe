@@ -1,8 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import type {
-  CallControl,
-  CandidateFilter,
-} from '#internal/contracts/adapters';
+import type { CallControl } from '#internal/contracts/control';
+import type { CandidateFilter } from '#internal/contracts/adapters';
 import type { CandidateSet } from '#internal/contracts/candidate';
 import type { CandidateFilterEntry } from '#internal/contracts/candidate-filter';
 import type {

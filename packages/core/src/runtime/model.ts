@@ -1,4 +1,4 @@
-import type { CallControl } from '#internal/contracts/adapters';
+import type { CallControl } from '#internal/contracts/control';
 import type { JsonObject } from '#internal/contracts/json';
 import { captureControl, invokeControlled } from '#internal/candidate/control';
 import { ContractError } from '#internal/errors';
