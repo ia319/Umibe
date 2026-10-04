@@ -18,3 +18,12 @@ export interface ModelResponseMetadata {
   readonly requestId: string | null;
   readonly usage: ModelUsage | null;
 }
+
+/** Safe output diagnostics only: field paths and reason codes, never rejected values. */
+export interface ModelResponseIssue {
+  readonly phase: 'protocol' | 'planning' | 'selection';
+  /** JSON Pointer with ASCII letters, digits, underscores or hyphens; at most 256 characters. */
+  readonly path: string;
+  /** Lowercase snake_case code beginning with a letter; at most 64 characters. */
+  readonly reason: string;
+}

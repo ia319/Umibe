@@ -507,6 +507,9 @@ export class RunDriver<TCriteria extends JsonValue> {
         decisionEpoch: epoch,
         outcome: result.outcome,
         ...(result.outcome !== 'returned' ? { reasonCode } : {}),
+        ...('issue' in result && result.issue !== undefined
+          ? { issue: { ...result.issue } }
+          : {}),
         currentAtReceipt: accepted,
         durationMs: Math.max(0, Date.now() - startedAt),
         eventLoopDelay: {

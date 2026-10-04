@@ -24,12 +24,19 @@ export function retryAfterMs(headers: Headers | undefined): number {
 
 /** Discard SDK messages and response bodies; only documented failure classes affect retries. */
 export function classifyError(error: unknown): ModelRequestError {
-  if (error instanceof ModelRequestError) return error;
+  if (error instanceof ModelRequestError)
+    return error.code === 'invalid_response' && error.issue === null
+      ? new ModelRequestError(error.code, error.retryAfterMs, {
+          phase: 'protocol',
+          path: '',
+          reason: 'invalid_response',
+        })
+      : error;
   if (
     error instanceof OpenAI.APIConnectionError &&
     error.cause instanceof ModelRequestError
   )
-    return error.cause;
+    return classifyError(error.cause);
   if (error instanceof OpenAI.APIConnectionTimeoutError)
     return new ModelRequestError('deadline_exceeded');
   if (error instanceof OpenAI.APIConnectionError)
@@ -54,7 +61,11 @@ export function classifyError(error: unknown): ModelRequestError {
           : 'invalid_request',
       );
   }
-  return new ModelRequestError(
-    error instanceof SyntaxError ? 'invalid_response' : 'request_failed',
-  );
+  return error instanceof SyntaxError
+    ? new ModelRequestError('invalid_response', 0, {
+        phase: 'protocol',
+        path: '',
+        reason: 'invalid_json',
+      })
+    : new ModelRequestError('request_failed');
 }

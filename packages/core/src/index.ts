@@ -33,6 +33,8 @@ export type {
 } from '#internal/planner/contracts';
 export type { ProposalLimits } from '#internal/planner/validation';
 export { parsePlanProposal } from '#internal/planner/validation';
+export { createPlanner } from '#internal/planner/model';
+export type { PlannerOptions } from '#internal/planner/model';
 export { describeActionParameters } from '#internal/action/describe';
 export { ActionRegistry, defineAction } from '#internal/action/registry';
 export type { RegisteredAction } from '#internal/action/registry';
@@ -41,6 +43,7 @@ export type {
   ModelIdentity,
   ModelResponseMetadata,
   ModelUsage,
+  ModelResponseIssue,
 } from '#internal/model/metadata';
 export type {
   CandidateProvider,

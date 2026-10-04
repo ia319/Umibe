@@ -3,6 +3,7 @@ import type { JsonObject } from '#internal/contracts/json';
 import type {
   ModelIdentity,
   ModelResponseMetadata,
+  ModelResponseIssue,
 } from '#internal/model/metadata';
 import {
   captureModelIdentity,
@@ -35,16 +36,39 @@ export type ModelFailureCode =
  * Only rate limits, unavailable services and timeouts may be retried. An SDK
  * timeout uses deadline_exceeded; it never extends the caller's total deadline.
  * retryAfterMs is a minimum delay in milliseconds, not a new timeout.
+ * Invalid delay or diagnostic fields throw RangeError; diagnostics contain no response values.
  */
 export class ModelRequestError extends Error {
+  readonly issue: ModelResponseIssue | null;
   constructor(
     readonly code: ModelFailureCode,
     readonly retryAfterMs = 0,
+    issue?: ModelResponseIssue,
   ) {
     super(code);
     if (!Number.isSafeInteger(retryAfterMs) || retryAfterMs < 0)
       throw new RangeError('retryAfterMs must be a nonnegative safe integer');
     this.name = 'ModelRequestError';
+    if (
+      issue !== undefined &&
+      (!['protocol', 'planning', 'selection'].includes(issue.phase) ||
+        typeof issue.path !== 'string' ||
+        issue.path.length > 256 ||
+        !/^(?:\/[A-Za-z0-9_-]+)*$/.test(issue.path) ||
+        typeof issue.reason !== 'string' ||
+        !/^[a-z][a-z0-9_]{0,63}$/.test(issue.reason))
+    )
+      throw new RangeError(
+        'issue must contain a safe phase, path and reason code',
+      );
+    this.issue =
+      issue === undefined
+        ? null
+        : Object.freeze({
+            phase: issue.phase,
+            path: issue.path,
+            reason: issue.reason,
+          });
   }
 }
 
@@ -64,6 +88,7 @@ export type ModelCallResult<T> =
   | {
       readonly outcome: 'failed';
       readonly reasonCode: ModelFailureCode;
+      readonly issue?: ModelResponseIssue;
     }
   | {
       readonly outcome:
@@ -251,6 +276,10 @@ export async function invokeModel<T>(
       return { outcome: signal.aborted ? 'cancelled' : 'deadlineExceeded' };
     }
     const invalidated = interruption();
+    const issue =
+      result.outcome === 'failed' && result.error instanceof ModelRequestError
+        ? result.error.issue
+        : null;
     let usage: JsonObject | null =
       response.metadata?.usage == null ? null : { ...response.metadata.usage };
     let failure: ModelFailureCode | null = null;
@@ -294,6 +323,7 @@ export async function invokeModel<T>(
           {
             ...details,
             usage,
+            ...(issue === null ? {} : { issue: { ...issue } }),
             response:
               response.metadata === null
                 ? null
@@ -315,7 +345,11 @@ export async function invokeModel<T>(
       reasonCode === 'unavailable' ||
       reasonCode === 'deadline_exceeded';
     if (!retryable || attempt > limits.modelRetries)
-      return { outcome: 'failed', reasonCode };
+      return {
+        outcome: 'failed',
+        reasonCode,
+        ...(issue === null ? {} : { issue }),
+      };
 
     const retryAfterMs =
       result.outcome === 'failed' && result.error instanceof ModelRequestError
