@@ -1,5 +1,13 @@
 import type { CallControl } from '#internal/contracts/control';
 import type { JsonObject } from '#internal/contracts/json';
+import type {
+  ModelIdentity,
+  ModelResponseMetadata,
+} from '#internal/model/metadata';
+import {
+  captureModelIdentity,
+  captureModelResponse,
+} from '#internal/model/validation';
 import { captureControl, invokeControlled } from '#internal/candidate/control';
 import { ContractError } from '#internal/errors';
 import {
@@ -44,6 +52,7 @@ export interface ModelRequestBasis {
   readonly requestId: string;
   readonly decisionEpoch: number;
   readonly purpose: 'planning' | 'selection' | 'candidates' | 'verification';
+  readonly model?: ModelIdentity;
 }
 
 export type ModelCallResult<T> =
@@ -102,6 +111,8 @@ export async function invokeModel<T>(
       'invalid_purpose',
     );
   const captured = captureControl(controlInput);
+  const model =
+    basis.model === undefined ? null : captureModelIdentity(basis.model);
   const signal = AbortSignal.any([captured.signal, session.signal]);
   const limits = session.state.limits;
   const interruption = ():
@@ -147,14 +158,18 @@ export async function invokeModel<T>(
       }
       return { outcome: 'budgetExceeded' };
     }
-    const details = { ...request, attempt };
+    const details = {
+      ...request,
+      attempt,
+      model: model === null ? null : { ...model },
+    };
     await session.commit(
       {
         ...session.state,
         modelAttempts: session.state.modelAttempts + 1,
         pendingModels: [
           ...session.state.pendingModels,
-          { ...details, phase: 'reserved' },
+          { ...request, attempt, phase: 'reserved' },
         ],
       },
       [session.event('model_reserved', 'request_reserved', details)],
@@ -182,6 +197,8 @@ export async function invokeModel<T>(
       ).toISOString(),
     });
     let dispatchCommit: Promise<void> | undefined;
+    const response: { metadata: ModelResponseMetadata | null; open: boolean } =
+      { metadata: null, open: true };
     const startedAt = Date.now();
     const result = await invokeControlled(control, (attemptControl) => {
       dispatchCommit = session.commit(
@@ -195,8 +212,28 @@ export async function invokeModel<T>(
         },
         [session.event('model_dispatched', 'request_dispatched', details)],
       );
-      return invoke(attemptControl, attempt);
+      return invoke(
+        Object.freeze({
+          ...attemptControl,
+          reportModelResponse: (metadata: ModelResponseMetadata) => {
+            if (
+              !response.open ||
+              response.metadata !== null ||
+              attemptControl.signal.aborted ||
+              interruption() !== null
+            )
+              return;
+            try {
+              response.metadata = captureModelResponse(metadata);
+            } catch {
+              throw new ModelRequestError('invalid_response');
+            }
+          },
+        }),
+        attempt,
+      );
     });
+    response.open = false;
     await dispatchCommit;
     if (dispatchCommit === undefined) {
       await session.commit(
@@ -214,9 +251,10 @@ export async function invokeModel<T>(
       return { outcome: signal.aborted ? 'cancelled' : 'deadlineExceeded' };
     }
     const invalidated = interruption();
-    let usage: JsonObject | null = null;
+    let usage: JsonObject | null =
+      response.metadata?.usage == null ? null : { ...response.metadata.usage };
     let failure: ModelFailureCode | null = null;
-    if (result.outcome === 'returned') {
+    if (result.outcome === 'returned' && response.metadata === null) {
       try {
         usage =
           result.value.usage === null
@@ -256,6 +294,10 @@ export async function invokeModel<T>(
           {
             ...details,
             usage,
+            response:
+              response.metadata === null
+                ? null
+                : parseJsonValue(response.metadata, validation.stage),
             durationMs: Math.max(0, Date.now() - startedAt),
           },
         ),

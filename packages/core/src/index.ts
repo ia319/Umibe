@@ -38,6 +38,11 @@ export { ActionRegistry, defineAction } from '#internal/action/registry';
 export type { RegisteredAction } from '#internal/action/registry';
 export type { CallControl } from '#internal/contracts/control';
 export type {
+  ModelIdentity,
+  ModelResponseMetadata,
+  ModelUsage,
+} from '#internal/model/metadata';
+export type {
   CandidateProvider,
   CandidateRequest,
   CriteriaSupport,
