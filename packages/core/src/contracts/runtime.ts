@@ -64,6 +64,8 @@ export interface ResumeRun {
 }
 
 export interface AgentOptions<TCriteria extends JsonValue = JsonValue> {
+  /** Stable application identity; required by durable stores. Never use credentials here. */
+  readonly applicationId?: string;
   readonly actions: readonly RegisteredAction[];
   readonly planner: Planner;
   readonly selector: Selector;
@@ -100,13 +102,29 @@ export interface RunInspection {
 export interface Agent {
   /** Wait for initialization, then return without waiting for goal completion. Invalid initialization rejects. */
   start(input: StartRun): Promise<RunHandle>;
-  /** Continue a paused run owned by this instance, preserving cumulative budgets and issuing a new result promise. */
+  /**
+   * Acquire a stored run when necessary and continue from its committed checkpoint.
+   * Requires matching application, action versions and model stages. Preserves
+   * stored limits and usage; uncertain executions must reconcile before dispatch.
+   * After notPerformed, the next call must match the saved action ID, version and
+   * normalized parameters, and remains subject to the saved retry policy and count.
+   * A changed call pauses with retry_call_changed; a forbidden or exhausted retry
+   * pauses with retry_not_allowed. The handle's result reports these blockers.
+   * Repeated resume calls preserve the saved call and retry count.
+   */
   resume(runId: string, update?: ResumeRun): Promise<RunHandle>;
-  /** Reconcile unresolved effects without resuming, including after cancellation. */
+  /**
+   * Reconcile unresolved effects without resuming, including after cancellation.
+   * A notPerformed result preserves the call and retry limits for {@link Agent.resume}.
+   */
   reconcile(runId: string): Promise<Reconciliation>;
   pause(runId: string, reasonCode: string): Promise<void>;
   cancel(runId: string, reasonCode: string): Promise<void>;
-  /** Commit a domain event; duplicate IDs are idempotent only for identical content. */
+  /**
+   * Check persisted IDs before admitting a domain event. Identical duplicates
+   * have no effect; conflicting content rejects. Commit accepted controls with
+   * the event and its scheduling changes in the same transaction.
+   */
   emit(event: ApplicationEvent): Promise<void>;
   /** Read the committed checkpoint without changing execution or acquiring a run. */
   inspect(runId: string): Promise<RunInspection | null>;
@@ -118,7 +136,7 @@ export interface Agent {
   subscribe(runId: string, listener: (record: RunRecord) => void): () => void;
   /**
    * Release all owned runs after their writes and executions settle.
-   * Throws before closing any run if initialization or work remains active.
+   * Rejects before closing any run if initialization or work remains active.
    */
-  close(): void;
+  close(): Promise<void>;
 }

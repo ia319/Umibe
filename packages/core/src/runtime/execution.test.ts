@@ -307,7 +307,7 @@ test('retains the barrier after cancel grace and accepts a late result only for 
     blocker: { reasonCode: 'execution_unsettled' },
   });
   expect(h.session.hasExecution).toBe(true);
-  expect(() => h.session.close()).toThrow();
+  await expect(h.session.close()).rejects.toThrow();
   returned.resolve(actionResult(executionId));
   await vi.advanceTimersByTimeAsync(0);
   expect(h.session.state.execution?.result).toMatchObject({
@@ -318,7 +318,7 @@ test('retains the barrier after cancel grace and accepts a late result only for 
   expect(h.session.state.control.status).toBe('cancelled');
   expect(h.session.hasExecution).toBe(false);
   expect(vi.getTimerCount()).toBe(0);
-  h.session.close();
+  await h.session.close();
 });
 
 test('times out with a recorded stop cause and forbids resume while the old execution remains uncertain', async () => {
@@ -499,6 +499,59 @@ test('reconciles before one explicitly allowed retry and ignores the old result 
   expect(h.session.state.actionAttempts).toBe(2);
 });
 
+test('preserves retry lineage when a reserved retry is cancelled before dispatch', async () => {
+  const h = await harness(
+    {
+      retryMode: 'reconcile',
+      execute: () => Promise.reject(new Error('unconfirmed')),
+      reconcile: () =>
+        Promise.resolve({
+          outcome: 'notPerformed',
+          underlyingSettled: true,
+          reason: 'confirmed_absent',
+        }),
+    },
+    { actionRetries: 1 },
+  );
+  await h.coordinator.execute(h.selected);
+  await h.coordinator.reconcile(callControl());
+  await h.session.transition({ kind: 'resume' });
+  const commit = h.store.commit.bind(h.store);
+  let paused: Promise<void> | undefined;
+  const writer = vi.spyOn(h.store, 'commit').mockImplementation((input) => {
+    if (
+      paused === undefined &&
+      input.records.some((record) => record.kind === 'actionIntent')
+    )
+      paused = h.session.transition({ kind: 'pause', cause: cancelCause });
+    return commit(input);
+  });
+  const oldId = h.session.state.execution!.intent.executionId;
+  await expect(h.coordinator.execute(h.selected, oldId)).resolves.toMatchObject(
+    { outcome: 'notExecuted' },
+  );
+  await paused;
+  writer.mockRestore();
+  expect(h.session.state.actionAttempts).toBe(1);
+  await h.session.close();
+  h.session = await RunSession.restore(h.store, 'run', h.diagnose, {
+    applicationId: null,
+    actionVersions: [],
+    modelStages: [],
+  });
+  h.coordinator = new ActionCoordinator(h.session, h.registry, {
+    observe: h.observe,
+  });
+  await h.session.transition({ kind: 'resume' });
+  await h.coordinator.execute(await select(h.registry));
+  await h.coordinator.reconcile(callControl());
+  await h.session.transition({ kind: 'resume' });
+  await expect(
+    h.coordinator.execute(await select(h.registry)),
+  ).rejects.toMatchObject({ reason: 'retry_not_allowed' });
+  expect(h.session.state.actionAttempts).toBe(2);
+});
+
 test('creates an independent cancellation signal per execution and rejects stale interrupts', async () => {
   vi.useFakeTimers();
   const contexts: ActionExecutionContext[] = [];
@@ -631,13 +684,13 @@ test('aborts execution on storage failure without requiring another writable com
     expect.objectContaining({ code: 'store_failed' }),
   );
   expect(h.session.hasExecution).toBe(true);
-  expect(() => h.session.close()).toThrow();
+  await expect(h.session.close()).rejects.toThrow();
   expect(vi.getTimerCount()).toBe(0);
   late.resolve(actionResult(context.executionId));
   await vi.advanceTimersByTimeAsync(0);
   expect(h.session.hasExecution).toBe(false);
   expect(h.session.failure?.reason).toBe('store_failed');
-  h.session.close();
+  await h.session.close();
 });
 
 test.each([

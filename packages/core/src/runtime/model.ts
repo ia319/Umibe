@@ -111,11 +111,16 @@ export async function invokeModel<T>(
         'model_budget_exhausted',
         { ...request },
       );
-      await session.transition({
-        kind: 'pause',
-        cause: { eventId: cause.eventId, reasonCode: 'model_budget_exhausted' },
-      });
-      await session.commit(session.state, [cause]);
+      await session.transition(
+        {
+          kind: 'pause',
+          cause: {
+            eventId: cause.eventId,
+            reasonCode: 'model_budget_exhausted',
+          },
+        },
+        [cause],
+      );
       if (
         !session.hasExecution &&
         (session.state.control.status === 'pausing' ||
@@ -133,13 +138,28 @@ export async function invokeModel<T>(
     }
     const details = { ...request, attempt };
     await session.commit(
-      { ...session.state, modelAttempts: session.state.modelAttempts + 1 },
+      {
+        ...session.state,
+        modelAttempts: session.state.modelAttempts + 1,
+        pendingModels: [
+          ...session.state.pendingModels,
+          { ...details, phase: 'reserved' },
+        ],
+      },
       [session.event('model_reserved', 'request_reserved', details)],
     );
     const unsent = interruption();
     if (unsent !== null) {
       await session.commit(
-        { ...session.state, modelAttempts: session.state.modelAttempts - 1 },
+        {
+          ...session.state,
+          modelAttempts: session.state.modelAttempts - 1,
+          pendingModels: session.state.pendingModels.filter(
+            (entry) =>
+              entry.requestId !== request.requestId ||
+              entry.attempt !== attempt,
+          ),
+        },
         [session.event('model_not_sent', unsent, details)],
       );
       return { outcome: unsent };
@@ -153,15 +173,31 @@ export async function invokeModel<T>(
     let dispatchCommit: Promise<void> | undefined;
     const startedAt = Date.now();
     const result = await invokeControlled(control, (attemptControl) => {
-      dispatchCommit = session.commit(session.state, [
-        session.event('model_dispatched', 'request_dispatched', details),
-      ]);
+      dispatchCommit = session.commit(
+        {
+          ...session.state,
+          pendingModels: session.state.pendingModels.map((entry) =>
+            entry.requestId === request.requestId && entry.attempt === attempt
+              ? { ...entry, phase: 'dispatched' }
+              : entry,
+          ),
+        },
+        [session.event('model_dispatched', 'request_dispatched', details)],
+      );
       return invoke(attemptControl, attempt);
     });
     await dispatchCommit;
     if (dispatchCommit === undefined) {
       await session.commit(
-        { ...session.state, modelAttempts: session.state.modelAttempts - 1 },
+        {
+          ...session.state,
+          modelAttempts: session.state.modelAttempts - 1,
+          pendingModels: session.state.pendingModels.filter(
+            (entry) =>
+              entry.requestId !== request.requestId ||
+              entry.attempt !== attempt,
+          ),
+        },
         [session.event('model_not_sent', result.outcome, details)],
       );
       return { outcome: signal.aborted ? 'cancelled' : 'deadlineExceeded' };
@@ -189,13 +225,26 @@ export async function invokeModel<T>(
           : 'request_failed';
     } else if (result.outcome === 'deadlineExceeded')
       failure = 'deadline_exceeded';
-    await session.commit(session.state, [
-      session.event(
-        'model_finished',
-        invalidated ?? failure ?? result.outcome,
-        { ...details, usage, durationMs: Math.max(0, Date.now() - startedAt) },
-      ),
-    ]);
+    await session.commit(
+      {
+        ...session.state,
+        pendingModels: session.state.pendingModels.filter(
+          (entry) =>
+            entry.requestId !== request.requestId || entry.attempt !== attempt,
+        ),
+      },
+      [
+        session.event(
+          'model_finished',
+          invalidated ?? failure ?? result.outcome,
+          {
+            ...details,
+            usage,
+            durationMs: Math.max(0, Date.now() - startedAt),
+          },
+        ),
+      ],
+    );
     const afterCommit = interruption();
     if (afterCommit !== null) return { outcome: afterCommit };
     if (invalidated !== null) return { outcome: invalidated };

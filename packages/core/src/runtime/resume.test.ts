@@ -142,6 +142,7 @@ test('requires confirmed reconciliation before resume and preserves spent attemp
       target: z.string(),
       count: z.number().default(1),
     }),
+    retryMode: 'reconcile',
     check: () => Promise.resolve({ outcome: 'allowed' }),
     execute: h.execute,
     reconcile,
@@ -149,7 +150,7 @@ test('requires confirmed reconciliation before resume and preserves spent attemp
   const agent = createAgent({
     ...h.options,
     actions: [action],
-    limits: { actionTimeoutMs: 10, stopGraceMs: 5 },
+    limits: { actionTimeoutMs: 10, stopGraceMs: 5, actionRetries: 1 },
   });
   const first = await agent.start(h.input);
   await vi.advanceTimersByTimeAsync(15);
@@ -191,7 +192,7 @@ test('cancels pending resume validation without applying the new root', async ()
     reason: 'support_cancelled',
   });
   await vi.advanceTimersByTimeAsync(0);
-  expect(() => agent.close()).toThrow();
+  await expect(agent.close()).rejects.toThrow();
   await expect(agent.resume('run')).rejects.toMatchObject({
     reason: 'resume_unavailable',
   });
@@ -237,13 +238,13 @@ test('finishes cancellation with unknown effects and allows explicit cleanup wit
   await run.result;
   await agent.cancel('run', 'cancel_unknown');
   expect((await agent.inspect('run'))?.summary.status).toBe('cancelled');
-  expect(() => agent.close()).toThrow();
+  await expect(agent.close()).rejects.toThrow();
   await expect(agent.reconcile('run')).resolves.toMatchObject({
     outcome: 'notPerformed',
   });
   await expect(agent.resume('run')).rejects.toMatchObject({
     reason: 'resume_unavailable',
   });
-  agent.close();
+  await agent.close();
   expect(h.execute).toHaveBeenCalledTimes(1);
 });

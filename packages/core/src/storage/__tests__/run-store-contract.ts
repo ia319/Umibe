@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'vitest';
-import type { RunCommit, RunRecordDraft, RunStore } from '../contracts.js';
-import { StoreClosedError } from '../errors.js';
+import type {
+  RunCommit,
+  RunRecordDraft,
+  RunStore,
+  RunLease,
+} from '../contracts.js';
 
 const rootGoalRef = { id: 'root', version: 1 };
 
@@ -67,12 +71,14 @@ function actionResult(runId: string, eventId: string): RunRecordDraft {
 }
 
 function commit(
-  runId: string,
+  lease: RunLease,
   expectedRevision: number | null,
   records: readonly RunRecordDraft[],
   state: { phase: string } = { phase: 'running' },
 ): RunCommit {
+  const runId = lease.runId;
   return {
+    ownerToken: lease.token,
     runId,
     expectedRevision,
     status: 'running',
@@ -84,17 +90,45 @@ function commit(
   };
 }
 
-/** Shared behavioral contract for memory and later SQLite implementations. */
+/** Shared behavioral contract for every RunStore implementation. */
 export function runStoreContract(
   name: string,
   createStore: () => Promise<RunStore>,
 ): void {
   describe(name, () => {
+    test('requires a live run lease, rejects duplicate holders and fences released tokens', async () => {
+      const store = await createStore();
+      const first = await store.acquireRun('run-1');
+      await expect(store.acquireRun('run-1')).rejects.toMatchObject({
+        code: 'STORE_OWNERSHIP',
+        reason: 'run_owned',
+      });
+      await store.commit(commit(first, null, [coreEvent('run-1', 'event')]));
+      expect(await store.readRecord('run-1', 'event')).toMatchObject({
+        eventId: 'event',
+        sequence: 1,
+      });
+      expect(await store.readRecord('run-1', 'absent')).toBeNull();
+      const releasing = first.release();
+      expect(first.signal.aborted).toBe(true);
+      await releasing;
+      await first.release();
+      const second = await store.acquireRun('run-1');
+      expect(second.token).not.toBe(first.token);
+      await expect(store.commit(commit(first, 1, []))).rejects.toMatchObject({
+        code: 'STORE_OWNERSHIP',
+      });
+      await store.commit(commit(second, 1, []));
+      await store.close();
+      expect(second.signal.aborted).toBe(true);
+      expect(store.signal.aborted).toBe(true);
+    });
     test('commits ordered records with a checkpoint and pages by run-bound cursor', async () => {
       const store = await createStore();
+      const firstLease = await store.acquireRun('run-1');
       try {
         const created = await store.commit(
-          commit('run-1', null, [coreEvent('run-1', 'e1')]),
+          commit(firstLease, null, [coreEvent('run-1', 'e1')]),
         );
         expect(created.outcome).toBe('committed');
         if (created.outcome !== 'committed') return;
@@ -104,7 +138,7 @@ export function runStoreContract(
         expect(created.records[0]?.committedAt).toMatch(/Z$/);
 
         const updated = await store.commit(
-          commit('run-1', 1, [
+          commit(firstLease, 1, [
             coreEvent('run-1', 'e2'),
             coreEvent('run-1', 'e3'),
           ]),
@@ -129,10 +163,13 @@ export function runStoreContract(
 
     test('rejects invalid batches without saving partial records or state', async () => {
       const store = await createStore();
+      const firstLease = await store.acquireRun('run-1');
       try {
-        await store.commit(commit('run-1', null, [coreEvent('run-1', 'e1')]));
+        await store.commit(
+          commit(firstLease, null, [coreEvent('run-1', 'e1')]),
+        );
         const invalid = {
-          ...commit('run-1', 1, [
+          ...commit(firstLease, 1, [
             coreEvent('run-1', 'e2'),
             coreEvent('run-1', 'e3'),
           ]),
@@ -153,22 +190,22 @@ export function runStoreContract(
         ).toEqual(['e1']);
 
         await expect(
-          store.commit(commit('run-1', 1, [coreEvent('run-1', 'e1')])),
+          store.commit(commit(firstLease, 1, [coreEvent('run-1', 'e1')])),
         ).rejects.toMatchObject({ reason: 'duplicate_event_id' });
         await expect(
           store.commit(
-            commit('run-1', 1, [
+            commit(firstLease, 1, [
               coreEvent('run-1', 'repeated'),
               coreEvent('run-1', 'repeated'),
             ]),
           ),
         ).rejects.toMatchObject({ reason: 'duplicate_event_id' });
         await expect(
-          store.commit(commit('run-1', 1, [coreEvent('other-run', 'e4')])),
+          store.commit(commit(firstLease, 1, [coreEvent('other-run', 'e4')])),
         ).rejects.toMatchObject({ reason: 'cross_run_record' });
         await expect(
           store.commit({
-            ...commit('run-1', 999, [coreEvent('run-1', 'e5')]),
+            ...commit(firstLease, 999, [coreEvent('run-1', 'e5')]),
             stateSchemaVersion: 0,
           }),
         ).rejects.toMatchObject({ code: 'INVALID_STORE_COMMIT' });
@@ -180,15 +217,18 @@ export function runStoreContract(
 
     test('uses revision comparison for creation and concurrent updates', async () => {
       const store = await createStore();
+      const firstLease = await store.acquireRun('run-1');
       try {
-        expect(await store.commit(commit('run-1', 1, []))).toEqual({
+        expect(await store.commit(commit(firstLease, 1, []))).toEqual({
           outcome: 'conflict',
           actualRevision: null,
         });
-        await store.commit(commit('run-1', null, [coreEvent('run-1', 'e1')]));
+        await store.commit(
+          commit(firstLease, null, [coreEvent('run-1', 'e1')]),
+        );
         const results = await Promise.all([
-          store.commit(commit('run-1', 1, [coreEvent('run-1', 'e2')])),
-          store.commit(commit('run-1', 1, [coreEvent('run-1', 'e3')])),
+          store.commit(commit(firstLease, 1, [coreEvent('run-1', 'e2')])),
+          store.commit(commit(firstLease, 1, [coreEvent('run-1', 'e3')])),
         ]);
         expect(results.map((result) => result.outcome).sort()).toEqual([
           'committed',
@@ -196,7 +236,7 @@ export function runStoreContract(
         ]);
         expect((await store.readRun('run-1'))?.summary.lastSequence).toBe(2);
         expect((await store.readRun('run-1'))?.checkpoint.revision).toBe(2);
-        expect(await store.commit(commit('run-1', null, []))).toEqual({
+        expect(await store.commit(commit(firstLease, null, []))).toEqual({
           outcome: 'conflict',
           actualRevision: 2,
         });
@@ -207,15 +247,17 @@ export function runStoreContract(
 
     test('isolates runs and rejects a cursor from another run', async () => {
       const store = await createStore();
+      const firstLease = await store.acquireRun('run-1');
+      const secondLease = await store.acquireRun('run-2');
       try {
         await store.commit(
-          commit('run-1', null, [
+          commit(firstLease, null, [
             coreEvent('run-1', 'same-id'),
             coreEvent('run-1', 'next-id'),
           ]),
         );
         await store.commit(
-          commit('run-2', null, [coreEvent('run-2', 'same-id')]),
+          commit(secondLease, null, [coreEvent('run-2', 'same-id')]),
         );
         const first = await store.readRecords('run-1', null, 1);
         await expect(
@@ -243,19 +285,20 @@ export function runStoreContract(
 
     test('requires action results to follow a recorded intent', async () => {
       const store = await createStore();
+      const firstLease = await store.acquireRun('run-1');
       try {
         await expect(
-          store.commit(commit('run-1', null, [actionResult('run-1', 'r1')])),
+          store.commit(commit(firstLease, null, [actionResult('run-1', 'r1')])),
         ).rejects.toMatchObject({ reason: 'missing_action_intent' });
         await store.commit(
-          commit('run-1', null, [actionIntent('run-1', 'i1')]),
+          commit(firstLease, null, [actionIntent('run-1', 'i1')]),
         );
         const completed = await store.commit(
-          commit('run-1', 1, [actionResult('run-1', 'r1')]),
+          commit(firstLease, 1, [actionResult('run-1', 'r1')]),
         );
         expect(completed.outcome).toBe('committed');
         await expect(
-          store.commit(commit('run-1', 2, [actionIntent('run-1', 'i2')])),
+          store.commit(commit(firstLease, 2, [actionIntent('run-1', 'i2')])),
         ).rejects.toMatchObject({ reason: 'duplicate_execution_id' });
       } finally {
         await store.close();
@@ -264,10 +307,11 @@ export function runStoreContract(
 
     test('separates caller mutations and supports a checkpoint-only commit', async () => {
       const store = await createStore();
+      const firstLease = await store.acquireRun('run-1');
       try {
         const state = { phase: 'before' };
         const draft = coreEvent('run-1', 'e1');
-        const pending = store.commit(commit('run-1', null, [draft], state));
+        const pending = store.commit(commit(firstLease, null, [draft], state));
         state.phase = 'after';
         const created = await pending;
         expect((await store.readRun('run-1'))?.checkpoint.state.phase).toBe(
@@ -280,7 +324,7 @@ export function runStoreContract(
         expect(Object.isFrozen(page.records)).toBe(true);
         expect(Object.isFrozen(page.records[0]?.data)).toBe(true);
         const updated = await store.commit(
-          commit('run-1', 1, [], { phase: 'checkpoint' }),
+          commit(firstLease, 1, [], { phase: 'checkpoint' }),
         );
         expect(updated.outcome).toBe('committed');
         if (updated.outcome !== 'committed') return;
@@ -296,17 +340,21 @@ export function runStoreContract(
 
     test('closes idempotently and rejects later reads and commits', async () => {
       const store = await createStore();
-      await store.commit(commit('run-1', null, []));
+      const firstLease = await store.acquireRun('run-1');
+      await store.commit(commit(firstLease, null, []));
       await store.close();
       await store.close();
-      await expect(store.readRun('run-1')).rejects.toBeInstanceOf(
-        StoreClosedError,
-      );
+      await expect(store.readRun('run-1')).rejects.toMatchObject({
+        code: 'STORE_CLOSED',
+        operation: 'readRun',
+      });
       await expect(store.readRecords('run-1', null, 1)).rejects.toMatchObject({
         code: 'STORE_CLOSED',
         operation: 'readRecords',
       });
-      await expect(store.commit(commit('run-1', 1, []))).rejects.toMatchObject({
+      await expect(
+        store.commit(commit(firstLease, 1, [])),
+      ).rejects.toMatchObject({
         code: 'STORE_CLOSED',
         operation: 'commit',
       });
@@ -314,7 +362,8 @@ export function runStoreContract(
 
     test('orders close after pending operations and rejects later calls', async () => {
       const store = await createStore();
-      const pending = store.commit(commit('run-1', null, []));
+      const firstLease = await store.acquireRun('run-1');
+      const pending = store.commit(commit(firstLease, null, []));
       const closing = store.close();
       const lateRead = store.readRun('run-1');
 

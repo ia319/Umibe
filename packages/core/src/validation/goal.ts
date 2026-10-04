@@ -25,7 +25,7 @@ const context: FieldContext = {
   stage: 'goal_graph',
 };
 
-function readGoalRecord(value: JsonValue, path: string): GoalRecord {
+export function readGoalRecord(value: JsonValue, path: string): GoalRecord {
   const object = requireObject(value, context, path);
   const common = [
     'kind',

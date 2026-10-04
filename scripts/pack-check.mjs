@@ -16,6 +16,8 @@ import { fileURLToPath } from 'node:url';
 
 const repositoryRoot = fileURLToPath(new URL('../', import.meta.url));
 const packageRoot = join(repositoryRoot, 'packages/core');
+const sqlitePackageRoot = join(repositoryRoot, 'packages/storage-sqlite');
+const sdkPackageRoot = join(repositoryRoot, 'packages/umibe');
 const compilerPath = fileURLToPath(import.meta.resolve('typescript/bin/tsc'));
 const coreManifest = /** @type {unknown} */ (
   JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8'))
@@ -51,8 +53,8 @@ function runPnpm(args) {
   });
 }
 
-/** @param {unknown} value */
-function checkPackManifest(value) {
+/** @param {unknown} value @param {string[]} requiredFiles */
+function checkPackManifest(value, requiredFiles) {
   if (
     typeof value !== 'object' ||
     value === null ||
@@ -82,7 +84,12 @@ function checkPackManifest(value) {
       /(^|\/)(?:tests?|__tests__|fixtures)(\/|$)|\.(?:test(?:-d)?|spec)\./,
     );
   }
-  for (const path of ['package.json', 'dist/index.js', 'dist/index.d.ts']) {
+  for (const path of [
+    'package.json',
+    'dist/index.js',
+    'dist/index.d.ts',
+    ...requiredFiles,
+  ]) {
     assert.ok(paths.includes(path), `missing archive entry: ${path}`);
   }
   return value.filename;
@@ -106,9 +113,50 @@ try {
       ]),
     )
   );
-  const tarball = resolve(temporaryRoot, checkPackManifest(packed));
+  const tarball = resolve(temporaryRoot, checkPackManifest(packed, []));
   assert.equal(dirname(tarball), temporaryRoot);
   assert.ok(existsSync(tarball), 'pnpm pack did not create the archive');
+
+  const sqlitePacked = /** @type {unknown} */ (
+    JSON.parse(
+      runPnpm([
+        '--dir',
+        sqlitePackageRoot,
+        'pack',
+        '--json',
+        '--pack-destination',
+        temporaryRoot,
+      ]),
+    )
+  );
+  const sqliteTarball = resolve(
+    temporaryRoot,
+    checkPackManifest(sqlitePacked, [
+      'dist/worker.js',
+      'dist/database.js',
+      'dist/channel.js',
+    ]),
+  );
+  assert.equal(dirname(sqliteTarball), temporaryRoot);
+  assert.ok(
+    existsSync(sqliteTarball),
+    'pnpm pack did not create the SQLite archive',
+  );
+  const sdkPacked = /** @type {unknown} */ (
+    JSON.parse(
+      runPnpm([
+        '--dir',
+        sdkPackageRoot,
+        'pack',
+        '--json',
+        '--pack-destination',
+        temporaryRoot,
+      ]),
+    )
+  );
+  const sdkTarball = resolve(temporaryRoot, checkPackManifest(sdkPacked, []));
+  assert.equal(dirname(sdkTarball), temporaryRoot);
+  assert.ok(existsSync(sdkTarball), 'pnpm pack did not create the SDK archive');
 
   // The consumer lives outside the workspace, so package exports and dependencies
   // must resolve from the installed archive rather than source aliases.
@@ -122,22 +170,63 @@ try {
     }),
     { encoding: 'utf8' },
   );
+  writeFileSync(
+    join(consumerRoot, 'pnpm-workspace.yaml'),
+    readFileSync(join(repositoryRoot, 'pnpm-workspace.yaml'), 'utf8'),
+    { encoding: 'utf8' },
+  );
+  runPnpm([
+    '--dir',
+    consumerRoot,
+    'config',
+    'set',
+    '--location=project',
+    '--json',
+    'packages',
+    '[]',
+  ]);
+  runPnpm([
+    '--dir',
+    consumerRoot,
+    'config',
+    'set',
+    '--location=project',
+    '--json',
+    'overrides',
+    JSON.stringify({
+      '@umibe/core': `file:${tarball.replaceAll('\\', '/')}`,
+      '@umibe/storage-sqlite': `file:${sqliteTarball.replaceAll('\\', '/')}`,
+    }),
+  ]);
+  runPnpm([
+    '--dir',
+    consumerRoot,
+    'config',
+    'set',
+    '--location=project',
+    'cacheDir',
+    join(temporaryRoot, 'cache'),
+  ]);
+  // A new consumer must resolve and install declared dependencies without the
+  // developer's cached metadata, package files, or previous native builds.
   runPnpm([
     '--dir',
     consumerRoot,
     '--store-dir',
-    runPnpm(['store', 'path']).trim(),
-    '--ignore-workspace',
+    join(temporaryRoot, 'store'),
     'add',
-    '--offline',
-    '--ignore-scripts',
     tarball,
+    sqliteTarball,
+    sdkTarball,
     `zod@${coreManifest.dependencies.zod}`,
   ]);
 
   writeFileSync(
     join(consumerRoot, 'consumer.mjs'),
     `import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
+import { SqliteRunStore } from '@umibe/storage-sqlite';
+import { createAgent as createSdkAgent } from 'umibe';
 import { createAgent, ActionRegistry, defineAction, MemoryRunStore, parseJsonValue, parseGoalGraph, parseObservation, prepareCandidates, checkCandidates, filterCandidates, selectCandidates, recheckCandidate } from '@umibe/core';
 import { z } from 'zod';
 
@@ -256,7 +345,7 @@ const handle = await agent.start({
 });
 assert.equal((await handle.result).status, 'succeeded');
 assert.equal((await agent.inspect(handle.runId)).summary.status, 'succeeded');
-agent.close();
+await agent.close();
 assert.ok(await agentStore.readRun(handle.runId));
 await agentStore.close();
 
@@ -264,9 +353,8 @@ let collected = 0;
 let revision = 0;
 let plans = 0;
 const executionDepths = [];
-const taskStore = new MemoryRunStore();
-const taskAgent = createAgent({
-  store: taskStore, limits: { maxActionAttempts: 1 }, modelStages: ['planning', 'selection'],
+const taskOptions = {
+  applicationId: 'packed-sdk', limits: { maxActionAttempts: 1 }, modelStages: ['planning', 'selection'],
   actions: [defineAction({
     id: 'sample', version: 1, description: 'Take one sample', tags: [], expectedEffects: { count: 1 }, parameters: z.strictObject({}),
     check: () => Promise.resolve({ outcome: 'allowed' }),
@@ -300,7 +388,10 @@ const taskAgent = createAgent({
     support: (criteria) => Promise.resolve({ outcome: 'supported', criteria: z.strictObject({ count: z.number() }).parse(criteria), requiredEvidence: ['/count'] }),
     verify: ({ goal, criteria, context }) => Promise.resolve({ goalRef: { id: goal.id, version: goal.version }, observationRef: { id: context.observation.id, revision: context.observation.revision }, outcome: collected >= criteria.count ? 'passed' : 'notYet', reason: collected >= criteria.count ? null : 'more_samples', progress: collected, evidence: { source: 'application', observationPaths: ['/count'], executionIds: [], details: {} } }),
   },
-});
+};
+let taskAgent = createSdkAgent(taskOptions);
+assert.equal((await taskAgent.inspect()).exists, false);
+assert.equal(existsSync('umibe.sqlite'), false);
 const firstInterval = await taskAgent.start({ runId: 'nested-consumer', goal: { id: 'root', version: 1, description: 'Three samples', criteria: { count: 3 }, hardConstraints: [], limits: {}, preferences: [] }, effectiveConstraints: {} });
 assert.equal((await firstInterval.result).status, 'paused');
 assert.equal(collected, 1);
@@ -308,7 +399,11 @@ const pausedTask = await taskAgent.inspect('nested-consumer');
 const notification = { kind: 'application', eventId: 'operator-ready', runId: 'nested-consumer', type: 'operator_ready', source: { kind: 'application', id: 'consumer' }, observedAt: new Date().toISOString(), reasonCode: 'budget_approved', impact: 'observation', timing: 'immediate', control: 'none', currentGoalRef: null, planRef: null, goalPathRef: null, executionId: null, observationRef: null, affectedGoalRefs: [], details: {} };
 await taskAgent.emit(notification);
 await taskAgent.emit(notification);
+await taskAgent.close();
+taskAgent = createSdkAgent(taskOptions);
+assert.equal((await taskAgent.inspect()).owner, null);
 const resumedTask = await taskAgent.resume('nested-consumer', { limits: { maxActionAttempts: 3 } });
+await taskAgent.emit(notification);
 assert.notEqual(firstInterval.result, resumedTask.result);
 assert.equal((await resumedTask.result).status, 'succeeded');
 const completedTask = await taskAgent.inspect('nested-consumer');
@@ -318,8 +413,7 @@ assert.ok(completedTask.checkpoint.state.modelAttempts > pausedTask.checkpoint.s
 assert.deepEqual(executionDepths, [3, 3, 2]);
 assert.equal(plans, 1);
 assert.equal((await taskAgent.records('nested-consumer', null, 1000)).records.filter((record) => record.kind === 'applicationEvent').length, 1);
-taskAgent.close();
-await taskStore.close();
+await taskAgent.close();
 
 const snapshot = parseJsonValue({ ready: true }, 'consumer');
 assert.equal(Object.getPrototypeOf(snapshot), null);
@@ -327,7 +421,9 @@ assert.equal(snapshot.constructor, undefined);
 assert.deepEqual(Object.entries(snapshot), [['ready', true]]);
 const store = new MemoryRunStore();
 try {
+  const lease = await store.acquireRun('consumer-run');
   const result = await store.commit({
+    ownerToken: lease.token,
     runId: 'consumer-run',
     expectedRevision: null,
     status: 'running',
@@ -349,6 +445,19 @@ try {
 } finally {
   await store.close();
 }
+
+assert.equal(existsSync('consumer.sqlite'), false);
+const durable = new SqliteRunStore('consumer.sqlite');
+assert.equal((await durable.inspect()).exists, false);
+assert.equal(existsSync('consumer.sqlite'), false);
+const durableLease = await durable.acquireRun('durable-run');
+await durable.commit({ ownerToken: durableLease.token, runId: durableLease.runId, expectedRevision: null, status: 'paused', rootGoalRef, currentGoalRef: rootGoalRef, stateSchemaVersion: 1, state: { retained: true }, records: [] });
+assert.equal((await durable.readRun('durable-run')).checkpoint.state.retained, true);
+await durable.close();
+const reopened = new SqliteRunStore('consumer.sqlite');
+assert.equal((await reopened.readRun('durable-run')).checkpoint.revision, 1);
+assert.ok(Object.isFrozen((await reopened.readRun('durable-run')).checkpoint.state));
+await reopened.close();
 `,
     { encoding: 'utf8' },
   );
@@ -357,6 +466,20 @@ try {
     join(consumerRoot, 'consumer.mts'),
     `import { createAgent, ActionRegistry, defineAction, MemoryRunStore, prepareCandidates, checkCandidates, filterCandidates, selectCandidates, recheckCandidate, type CandidateProvider, type CandidateGenerationInput, type CandidatePreparationResult, type CandidateCheckingResult, type CandidateFilteringResult, type CandidateSelectionResult, type CandidateRecheckInput, type CandidateRecheckResult, type SelectedCandidate, type Selector, type PreparedAction, type RecordPage, type RunCommit, type AgentOptions, type RunHandle, type ResumeRun, type Reconciliation, type PlanProposal, type GoalRevision, type RuntimeContext } from '@umibe/core';
 import { z } from 'zod';
+
+import { SqliteRunStore, type SqliteInspection } from '@umibe/storage-sqlite';
+import { createAgent as createSdkAgent, type AgentOptions as SdkAgentOptions, type StorageInspection, type RunInspection as SdkRunInspection } from 'umibe';
+import type { RunStore } from '@umibe/core';
+const sqlite = new SqliteRunStore('typed.sqlite');
+const storageContract: RunStore = sqlite;
+const inspection: Promise<SqliteInspection> = sqlite.inspect();
+const closed: Promise<void> = storageContract.close();
+void inspection; void closed;
+declare const sdkOptions: SdkAgentOptions<{ count: number }>;
+const sdk = createSdkAgent(sdkOptions);
+const sdkStorage: Promise<StorageInspection> = sdk.inspect();
+const sdkRun: Promise<SdkRunInspection | null> = sdk.inspect('run');
+void sdkStorage; void sdkRun;
 
 const action = defineAction({
   id: 'collect', version: 1, description: 'Collect samples', tags: [], expectedEffects: {},
@@ -409,6 +532,7 @@ const recheck: Promise<CandidateRecheckResult> = recheckCandidate(selected, rech
 void recheck;
 
 const input: RunCommit = {
+  ownerToken: 'type-fixture',
   runId: 'consumer-run',
   expectedRevision: null,
   status: 'running',
@@ -474,5 +598,7 @@ revision.revisions.push(goalRevision);
   );
 } finally {
   assert.equal(dirname(realpathSync(temporaryRoot)), temporaryParent);
-  rmSync(temporaryRoot, { recursive: true, force: true, maxRetries: 3 });
+  if (process.argv.includes('--keep-temp'))
+    console.log(`Retained package validation workspace: ${temporaryRoot}`);
+  else rmSync(temporaryRoot, { recursive: true, force: true, maxRetries: 3 });
 }

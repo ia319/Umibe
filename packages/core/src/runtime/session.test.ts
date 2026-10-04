@@ -8,6 +8,34 @@ import type {
 } from '#internal/storage/contracts';
 import { RunSession } from './session.js';
 
+test('fails an idle session when its store closes without another commit', async () => {
+  const store = new MemoryRunStore();
+  const diagnose = vi.fn();
+  const session = await RunSession.create(store, generationInput(), diagnose);
+  await session.transition({ kind: 'start' });
+  await store.close();
+  expect(session.canDispatch(3)).toBe(false);
+  expect(session.signal.aborted).toBe(true);
+  await expect(session.result).rejects.toMatchObject({
+    reason: 'store_failed',
+  });
+  expect(diagnose).toHaveBeenCalledWith(
+    expect.objectContaining({ code: 'store_failed' }),
+  );
+  await session.close();
+});
+
+test('releases ownership after a failed initialization', async () => {
+  const store = new MemoryRunStore();
+  vi.spyOn(store, 'commit').mockRejectedValueOnce(new Error('write failed'));
+  await expect(
+    RunSession.create(store, generationInput(), vi.fn()),
+  ).rejects.toThrow('write failed');
+  const next = await RunSession.create(store, generationInput(), vi.fn());
+  expect(next.checkpoint?.revision).toBe(1);
+  await next.close();
+});
+
 test('admits cancellation while a commit is pending and publishes only committed records', async () => {
   const memory = new MemoryRunStore();
   let release!: () => void;
@@ -15,6 +43,10 @@ test('admits cancellation while a commit is pending and publishes only committed
     release = resolve;
   });
   const store: RunStore = {
+    info: memory.info,
+    signal: memory.signal,
+    acquireRun: memory.acquireRun.bind(memory),
+    readRecord: memory.readRecord.bind(memory),
     readRun: memory.readRun.bind(memory),
     readRecords: memory.readRecords.bind(memory),
     close: memory.close.bind(memory),
@@ -62,7 +94,7 @@ test('preserves cancellation cleanup failures in the final result and checkpoint
   const expected = { status: 'cancelled', stopCause: cause, blocker };
   await expect(session.result).resolves.toMatchObject(expected);
   expect(session.checkpoint?.state.control).toMatchObject(expected);
-  session.close();
+  await session.close();
 });
 
 test.each(['reject', 'conflict'] as const)(
@@ -72,6 +104,10 @@ test.each(['reject', 'conflict'] as const)(
     const diagnose = vi.fn();
     let writes = 0;
     const store: RunStore = {
+      info: memory.info,
+      signal: memory.signal,
+      acquireRun: memory.acquireRun.bind(memory),
+      readRecord: memory.readRecord.bind(memory),
       readRun: memory.readRun.bind(memory),
       readRecords: memory.readRecords.bind(memory),
       close: memory.close.bind(memory),
@@ -124,7 +160,7 @@ test('isolates throwing subscribers and rejects duplicate ownership without clos
   expect(diagnose).toHaveBeenCalledWith(
     expect.objectContaining({ code: 'subscriber_failed' }),
   );
-  expect(() => first.close()).toThrowError(
+  await expect(first.close()).rejects.toThrowError(
     expect.objectContaining({ reason: 'run_active' }),
   );
   unsubscribe();
@@ -133,8 +169,8 @@ test('isolates throwing subscribers and rejects duplicate ownership without clos
     cause: { eventId: 'pause', reasonCode: 'user_pause' },
   });
   await first.transition({ kind: 'stopSettled', blocker: null });
-  first.close();
-  first.close();
+  await first.close();
+  await first.close();
   expect((await store.readRun('run'))?.summary.status).toBe('paused');
 });
 

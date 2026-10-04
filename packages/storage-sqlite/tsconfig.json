@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["node"],
+    "customConditions": ["umibe-source"],
+    "paths": {
+      "@umibe/core": ["../core/src/index.ts"],
+      "@umibe/core/storage-adapter": ["../core/src/storage/adapter.ts"],
+      "@umibe/storage-sqlite": ["./src/index.ts"]
+    }
+  },
+  "include": ["src/**/*.ts"]
+}

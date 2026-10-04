@@ -27,7 +27,8 @@ const validation = { code: 'INVALID_RUN_CONTROL', stage: 'agent' } as const;
 /**
  * Create an in-process runner with explicit adapters and store ownership.
  * All adapters perform bounded cooperative work; only registered execute callbacks
- * may change external business state. Existing stored runs require the owning instance.
+ * may change external business state. Resume and reconciliation explicitly acquire
+ * stored runs; opening an agent never starts historical work.
  */
 export function createAgent<TCriteria extends JsonValue>(
   input: AgentOptions<TCriteria>,
@@ -72,11 +73,23 @@ export function createAgent<TCriteria extends JsonValue>(
   const options = Object.freeze({
     ...input,
     limits,
-    modelStages: Object.freeze([...(input.modelStages ?? [])]),
+    modelStages: Object.freeze([...new Set(input.modelStages ?? [])].sort()),
+  });
+  const identity = Object.freeze({
+    applicationId:
+      options.applicationId === undefined
+        ? null
+        : requireString(options.applicationId, validation, '/applicationId'),
+    actionVersions: registry.capabilities.map(({ id, version }) => ({
+      id,
+      version,
+    })),
+    modelStages: options.modelStages,
   });
   const runs = new Map<string, RunDriver<TCriteria>>();
   const starting = new Set<string>();
   let closed = false;
+  let closing: Promise<void> | null = null;
   let unsubscribe: (() => void) | undefined;
   const owned = (runId: string) => {
     if (closed)
@@ -95,6 +108,69 @@ export function createAgent<TCriteria extends JsonValue>(
         'run_not_owned',
       );
     return run;
+  };
+  const subscribeEnvironment = (session: RunSession) => {
+    if (unsubscribe !== undefined || !options.environment.subscribe) return;
+    try {
+      unsubscribe = options.environment.subscribe((input) => {
+        try {
+          const event = parseApplicationEvent(input);
+          const target = runs.get(event.runId);
+          if (target)
+            void target
+              .emit(event)
+              .catch(() =>
+                target.session.report(
+                  'environment_event_failed',
+                  event.eventId,
+                ),
+              );
+        } catch {
+          session.report('environment_event_failed', null);
+        }
+      });
+    } catch {
+      session.report('environment_subscription_failed', null);
+    }
+  };
+  const load = async (input: string): Promise<RunDriver<TCriteria>> => {
+    if (closed)
+      throw new ContractError(
+        validation.code,
+        validation.stage,
+        '',
+        'agent_closed',
+      );
+    const runId = requireString(input, validation, '/runId');
+    const existing = runs.get(runId);
+    if (existing !== undefined) return existing;
+    if (starting.has(runId))
+      throw new ContractError(
+        validation.code,
+        validation.stage,
+        '/runId',
+        'run_owned',
+      );
+    starting.add(runId);
+    try {
+      const session = await RunSession.restore(
+        options.store,
+        runId,
+        options.onDiagnostic ?? (() => undefined),
+        identity,
+      );
+      try {
+        const driver = new RunDriver(session, registry, options);
+        runs.set(runId, driver);
+        subscribeEnvironment(session);
+        return driver;
+      } catch (error) {
+        await session.close();
+        throw error;
+      }
+    } finally {
+      starting.delete(runId);
+    }
   };
   return Object.freeze({
     async start(input: StartRun): Promise<RunHandle> {
@@ -207,43 +283,28 @@ export function createAgent<TCriteria extends JsonValue>(
           },
           options.onDiagnostic ?? (() => undefined),
           limits,
+          identity,
         );
         const driver = new RunDriver(session, registry, options);
         runs.set(runId, driver);
-        await session.transition({ kind: 'start' });
-        const handle = driver.handle();
-        if (unsubscribe === undefined && options.environment.subscribe) {
-          try {
-            unsubscribe = options.environment.subscribe((input) => {
-              try {
-                const event = parseApplicationEvent(input);
-                const target = runs.get(event.runId);
-                if (target)
-                  void target
-                    .emit(event)
-                    .catch(() =>
-                      target.session.report(
-                        'environment_event_failed',
-                        event.eventId,
-                      ),
-                    );
-              } catch {
-                session.report('environment_event_failed', null);
-              }
-            });
-          } catch {
-            session.report('environment_subscription_failed', null);
-          }
+        try {
+          await session.transition({ kind: 'start' });
+        } catch (error) {
+          runs.delete(runId);
+          await session.close();
+          throw error;
         }
+        const handle = driver.handle();
+        subscribeEnvironment(session);
         driver.start();
         return handle;
       } finally {
         starting.delete(runId);
       }
     },
-    resume: (runId: string, update: Parameters<Agent['resume']>[1]) =>
-      owned(runId).resume(update),
-    reconcile: (runId: string) => owned(runId).reconcile(),
+    resume: async (runId: string, update: Parameters<Agent['resume']>[1]) =>
+      (await load(runId)).resume(update),
+    reconcile: async (runId: string) => (await load(runId)).reconcile(),
     pause: (runId: string, reasonCode: string) =>
       owned(runId).stop('pause', reasonCode),
     cancel: (runId: string, reasonCode: string) =>
@@ -256,13 +317,14 @@ export function createAgent<TCriteria extends JsonValue>(
     records: options.store.readRecords.bind(options.store),
     subscribe: (runId: string, listener: Parameters<Agent['subscribe']>[1]) =>
       owned(runId).session.subscribe(listener),
-    close(): void {
-      if (closed) return;
+    async close(): Promise<void> {
+      if (closing !== null) return closing;
       if (
         starting.size !== 0 ||
         [...runs.values()].some(
-          ({ session, restoring }) =>
+          ({ session, restoring, hasPendingEvents }) =>
             restoring ||
+            hasPendingEvents ||
             session.hasExecution ||
             session.hasPendingCommits ||
             (session.failure === null &&
@@ -277,7 +339,10 @@ export function createAgent<TCriteria extends JsonValue>(
           '',
           'agent_active',
         );
-      for (const run of runs.values()) run.session.close();
+      closed = true;
+      closing = Promise.all(
+        [...runs.values()].map((run) => run.session.close()),
+      ).then(() => undefined);
       try {
         unsubscribe?.();
       } catch {
@@ -287,7 +352,7 @@ export function createAgent<TCriteria extends JsonValue>(
           .value?.session.report('environment_subscription_failed', null);
       }
       runs.clear();
-      closed = true;
+      await closing;
     },
   });
 }

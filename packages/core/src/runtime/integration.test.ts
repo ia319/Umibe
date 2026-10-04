@@ -133,7 +133,7 @@ test('exposes complete request and timing records when the result settles', asyn
       expect(record.data.details.usage).toBeNull();
       expect(record.data.details.durationMs).toBeTypeOf('number');
     }
-  agent.close();
+  await agent.close();
 });
 
 test('finishes callback diagnostics before exposing a budget pause result', async () => {
@@ -157,7 +157,7 @@ test('finishes callback diagnostics before exposing a budget pause result', asyn
         record.data.details.currentAtReceipt === false,
     ),
   ).toBe(true);
-  agent.close();
+  await agent.close();
 });
 
 test('freezes nested runtime policy and pending goal data exposed to planners', async () => {
@@ -179,7 +179,7 @@ test('freezes nested runtime policy and pending goal data exposed to planners', 
   );
 });
 
-test('returns the same rejected control receipt for duplicate events after completion', async () => {
+test('rejects terminal controls without committing an event that never took effect', async () => {
   const h = runnerFixture(2);
   const agent = h.create();
   await (
@@ -190,13 +190,15 @@ test('returns the same rejected control receipt for duplicate events after compl
     .emit(event)
     .catch((error: unknown) => error);
   expect(rejected).toMatchObject({ code: 'INVALID_RUN_CONTROL' });
-  await expect(agent.emit(event)).rejects.toBe(rejected);
+  await expect(agent.emit(event)).rejects.toMatchObject({
+    code: 'INVALID_RUN_CONTROL',
+  });
   expect(
     (await agent.records('run', null, 1000)).records.filter(
       (record) => record.kind === 'applicationEvent',
     ),
-  ).toHaveLength(1);
-  agent.close();
+  ).toHaveLength(0);
+  await agent.close();
 });
 
 test('closes root and child scopes when cancellation commits', async () => {
@@ -239,5 +241,5 @@ test('closes root and child scopes when cancellation commits', async () => {
     },
   });
   expect(h.execute).not.toHaveBeenCalled();
-  agent.close();
+  await agent.close();
 });
