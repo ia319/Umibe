@@ -62,35 +62,6 @@ export function createOpenAIModel(
     baseURL: baseURL.href,
     maxRetries: 0,
     logLevel: 'off',
-    // Consume bounded bodies inside SDK fetch so its timeout also covers error
-    // bodies and stalled reads. No extra request or transport retry occurs here.
-    fetch: async (input, init) => {
-      const response = await fetch(input, init);
-      const chunks: Uint8Array[] = [];
-      let length = 0;
-      const reader = response.body?.getReader();
-      if (reader !== undefined) {
-        try {
-          while (true) {
-            const chunk = await reader.read();
-            if (chunk.done) break;
-            length += chunk.value.byteLength;
-            if (length > maxResponseBytes) {
-              await reader.cancel();
-              throw new ModelRequestError('invalid_response');
-            }
-            chunks.push(chunk.value);
-          }
-        } finally {
-          reader.releaseLock();
-        }
-      }
-      return new Response(length === 0 ? null : Buffer.concat(chunks, length), {
-        status: response.status,
-        statusText: response.statusText,
-        headers: response.headers,
-      });
-    },
   });
   return Object.freeze<StructuredOutputModel>({
     kind: 'structuredOutput',
@@ -143,11 +114,59 @@ export function createOpenAIModel(
       };
       if (Buffer.byteLength(JSON.stringify(body), 'utf8') > maxRequestBytes)
         throw new ModelRequestError('input_limit');
+      if (control.signal.aborted)
+        throw new DOMException('Model request cancelled', 'AbortError');
+      const timeout = deadline - Date.now();
+      if (timeout <= 0) throw new ModelRequestError('deadline_exceeded');
+      let receivedRequestId: string | null = null;
+      let reported = false;
+      // Response identity belongs to this invocation. Keep it even if bounded
+      // body reading fails; shared model instances may serve concurrent roles.
+      const requestClient = client.withOptions({
+        fetch: async (input, init) => {
+          // SDK request preparation can consume the remaining caller deadline.
+          if (control.signal.aborted)
+            throw new DOMException('Model request cancelled', 'AbortError');
+          if (Date.now() >= deadline)
+            throw new ModelRequestError('deadline_exceeded');
+          const response = await fetch(input, init);
+          receivedRequestId =
+            response.headers.get('x-request-id')?.trim() || null;
+          const chunks: Uint8Array[] = [];
+          let length = 0;
+          const reader = response.body?.getReader();
+          if (reader !== undefined) {
+            try {
+              // Read inside SDK fetch so its timeout also bounds error bodies.
+              while (true) {
+                const chunk = await reader.read();
+                if (chunk.done) break;
+                length += chunk.value.byteLength;
+                if (length > maxResponseBytes) {
+                  await reader.cancel();
+                  throw new ModelRequestError('invalid_response');
+                }
+                chunks.push(chunk.value);
+              }
+            } finally {
+              reader.releaseLock();
+            }
+          }
+          return new Response(
+            length === 0 ? null : Buffer.concat(chunks, length),
+            {
+              status: response.status,
+              statusText: response.statusText,
+              headers: response.headers,
+            },
+          );
+        },
+      });
       try {
-        const response = await client.responses
+        const response = await requestClient.responses
           .create(body, {
             maxRetries: 0,
-            timeout: Math.max(1, deadline - Date.now()),
+            timeout,
             signal: control.signal,
           })
           .asResponse();
@@ -164,18 +183,20 @@ export function createOpenAIModel(
         )
           throw new ModelRequestError('invalid_response');
         const data: unknown = await response.json();
-        return decodeResponse(
-          data,
-          response.headers.get('x-request-id'),
-          control,
-        );
+        return decodeResponse(data, receivedRequestId, {
+          ...control,
+          reportModelResponse(metadata) {
+            reported = true;
+            control.reportModelResponse?.(metadata);
+          },
+        });
       } catch (error) {
         if (control.signal.aborted)
           throw new DOMException('Model request cancelled', 'AbortError');
-        if (error instanceof OpenAI.APIError && error.requestID)
+        if (!reported && receivedRequestId !== null)
           control.reportModelResponse?.({
             model: null,
-            requestId: error.requestID,
+            requestId: receivedRequestId,
             usage: null,
           });
         throw classifyError(error);

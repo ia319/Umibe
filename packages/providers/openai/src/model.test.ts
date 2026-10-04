@@ -250,6 +250,7 @@ test.each(['invalid-json', 'empty', 'content-type', 'oversized'] as const)(
   async (failure) => {
     const h = await httpFixture((_request, response) => {
       response.writeHead(200, {
+        'x-request-id': 'malformed-response',
         'content-type':
           failure === 'content-type' ? 'text/plain' : 'application/json',
       });
@@ -268,9 +269,18 @@ test.each(['invalid-json', 'empty', 'content-type', 'oversized'] as const)(
       baseURL: h.baseURL,
       maxResponseBytes: 900,
     });
+    const report = vi.fn();
     await expect(
-      model.generate(structuredRequest, callControl()),
+      model.generate(structuredRequest, {
+        ...callControl(),
+        reportModelResponse: report,
+      }),
     ).rejects.toMatchObject({ code: 'invalid_response' });
+    expect(report).toHaveBeenCalledExactlyOnceWith({
+      model: null,
+      requestId: 'malformed-response',
+      usage: null,
+    });
     expect(h.requests).toHaveLength(1);
   },
 );
@@ -380,4 +390,83 @@ test('records absent usage as unknown while accepting valid structured output', 
     requestId: null,
     usage: null,
   });
+});
+
+test('checks the deadline again after preparing the request without dispatching', async () => {
+  const h = await httpFixture((_request, response) => {
+    response.end('{}');
+  });
+  const model = createOpenAIModel({ ...options, baseURL: h.baseURL });
+  const control = callControl(1000);
+  const deadline = Date.parse(control.deadlineAt);
+  const fetchCall = vi.spyOn(globalThis, 'fetch');
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(deadline - 1);
+  clock.mockReturnValueOnce(deadline - 1).mockReturnValueOnce(deadline);
+  try {
+    await expect(
+      model.generate(structuredRequest, control),
+    ).rejects.toMatchObject({ code: 'deadline_exceeded' });
+    expect(h.requests).toHaveLength(0);
+    expect(fetchCall).not.toHaveBeenCalled();
+  } finally {
+    clock.mockRestore();
+    fetchCall.mockRestore();
+  }
+});
+
+test('isolates response identity across concurrent requests on a shared model', async () => {
+  let releaseFirst!: () => void;
+  const firstMayFinish = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  let started!: () => void;
+  const firstStarted = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  let calls = 0;
+  const h = await httpFixture(async (_request, response) => {
+    const current = ++calls;
+    response.writeHead(200, {
+      'content-type': 'application/json',
+      'x-request-id': `request-${current}`,
+    });
+    response.flushHeaders();
+    if (current === 1) {
+      started();
+      await firstMayFinish;
+      response.end('{invalid');
+    } else {
+      response.end(JSON.stringify(responseBody({ ok: true })));
+    }
+  });
+  const model = createOpenAIModel({ ...options, baseURL: h.baseURL });
+  const firstReport = vi.fn();
+  const secondReport = vi.fn();
+  const first = model.generate(structuredRequest, {
+    ...callControl(),
+    reportModelResponse: firstReport,
+  });
+  const rejected = expect(first).rejects.toMatchObject({
+    code: 'invalid_response',
+  });
+  await firstStarted;
+  await expect(
+    model.generate(structuredRequest, {
+      ...callControl(),
+      reportModelResponse: secondReport,
+    }),
+  ).resolves.toEqual({ ok: true });
+  releaseFirst();
+  await rejected;
+  expect(firstReport).toHaveBeenCalledExactlyOnceWith({
+    model: null,
+    requestId: 'request-1',
+    usage: null,
+  });
+  expect(secondReport).toHaveBeenCalledExactlyOnceWith({
+    model: 'actual-model',
+    requestId: 'request-2',
+    usage: { inputTokens: 7, outputTokens: 3, totalTokens: 10 },
+  });
+  expect(h.requests).toHaveLength(2);
 });
