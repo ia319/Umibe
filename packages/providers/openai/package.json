@@ -1,24 +1,10 @@
 {
-  "name": "@umibe/core",
+  "name": "@umibe/provider-openai",
   "version": "0.0.0",
   "private": true,
   "type": "module",
   "sideEffects": false,
-  "imports": {
-    "#internal/*": {
-      "umibe-source": "./src/*.ts",
-      "default": "./dist/*.js"
-    }
-  },
   "exports": {
-    "./model": {
-      "types": "./dist/model/index.d.ts",
-      "import": "./dist/model/index.js"
-    },
-    "./storage-adapter": {
-      "types": "./dist/storage/adapter.d.ts",
-      "import": "./dist/storage/adapter.js"
-    },
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
@@ -35,6 +21,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "zod": "4.6.5"
+    "@umibe/core": "workspace:*",
+    "openai": "7.23.0"
   }
 }
