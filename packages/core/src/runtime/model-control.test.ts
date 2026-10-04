@@ -143,3 +143,31 @@ test('cancellation during model backoff keeps the application cause and sends no
   expect(h.execute).not.toHaveBeenCalled();
   await agent.close();
 });
+
+test.each(['planning', 'selection'] as const)(
+  'keeps the %s deadline when Retry-After exceeds the remaining time',
+  async (stage) => {
+    vi.useFakeTimers();
+    const h = runnerFixture();
+    const invoke = stage === 'planning' ? h.plan : h.select;
+    invoke.mockRejectedValue(new ModelRequestError('rate_limited', 10_000));
+    const agent = createAgent({
+      ...h.options,
+      modelStages: [stage],
+      limits: { modelTimeoutMs: 10 },
+    });
+    const run = await agent.start(h.input);
+    await vi.advanceTimersByTimeAsync(10);
+    await expect(run.result).resolves.toMatchObject({
+      status: 'paused',
+      stopCause: { reasonCode: 'deadline_exceeded' },
+      blocker: { reasonCode: 'deadline_exceeded' },
+    });
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(h.execute).not.toHaveBeenCalled();
+    expect((await agent.inspect('run'))!.checkpoint.state.modelAttempts).toBe(
+      1,
+    );
+    await agent.close();
+  },
+);

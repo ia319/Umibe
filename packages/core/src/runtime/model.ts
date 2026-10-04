@@ -394,7 +394,10 @@ export async function invokeModel<T>(
       }),
       () => new Promise<never>(() => {}),
     );
-    if (waited.outcome === 'cancelled') return { outcome: 'cancelled' };
+    // An outer role boundary aborts its child signal at the same deadline.
+    // Resolve the original control cause before interpreting that abort as cancellation.
+    if (waited.outcome === 'cancelled')
+      return { outcome: interruption() ?? 'cancelled' };
   }
   throw new Error('Unreachable model attempt limit');
 }
