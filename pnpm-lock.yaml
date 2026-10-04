@@ -197,6 +197,12 @@ importers:
         specifier: 4.6.5
         version: 4.6.5
 
+  packages/providers/cloudflare:
+    dependencies:
+      '@umibe/core':
+        specifier: workspace:*
+        version: link:../../core
+
   packages/providers/openai:
     dependencies:
       '@umibe/core':
