@@ -13,11 +13,21 @@ import type { RunSession } from './session.js';
 export type ModelFailureCode =
   | 'rate_limited'
   | 'unavailable'
+  | 'deadline_exceeded'
   | 'unauthorized'
+  | 'invalid_request'
+  | 'input_limit'
+  | 'refused'
+  | 'output_truncated'
   | 'invalid_response'
   | 'request_failed';
 
-/** Adapters classify failures explicitly; raw exception text never controls retries. */
+/**
+ * Classify one model attempt without exposing provider error text.
+ * Only rate limits, unavailable services and timeouts may be retried. An SDK
+ * timeout uses deadline_exceeded; it never extends the caller's total deadline.
+ * retryAfterMs is a minimum delay in milliseconds, not a new timeout.
+ */
 export class ModelRequestError extends Error {
   constructor(
     readonly code: ModelFailureCode,
@@ -44,7 +54,7 @@ export type ModelCallResult<T> =
     }
   | {
       readonly outcome: 'failed';
-      readonly reasonCode: ModelFailureCode | 'deadline_exceeded';
+      readonly reasonCode: ModelFailureCode;
     }
   | {
       readonly outcome:
@@ -204,7 +214,7 @@ export async function invokeModel<T>(
     }
     const invalidated = interruption();
     let usage: JsonObject | null = null;
-    let failure: ModelFailureCode | 'deadline_exceeded' | null = null;
+    let failure: ModelFailureCode | null = null;
     if (result.outcome === 'returned') {
       try {
         usage =

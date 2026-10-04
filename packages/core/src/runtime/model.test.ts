@@ -62,6 +62,10 @@ test('reserves before dispatch and keeps one logical ID across charged transport
 
 test.each([
   new ModelRequestError('unauthorized'),
+  new ModelRequestError('invalid_request'),
+  new ModelRequestError('input_limit'),
+  new ModelRequestError('refused'),
+  new ModelRequestError('output_truncated'),
   new ModelRequestError('invalid_response'),
   new Error('retry please'),
 ])('does not retry non-transient or unclassified errors: %s', async (error) => {
@@ -74,9 +78,85 @@ test.each([
   const invoke = vi.fn(() => Promise.reject(error));
   await expect(
     invokeModel(session, basis, callControl(), invoke),
-  ).resolves.toMatchObject({ outcome: 'failed' });
+  ).resolves.toEqual({
+    outcome: 'failed',
+    reasonCode:
+      error instanceof ModelRequestError ? error.code : 'request_failed',
+  });
   expect(invoke).toHaveBeenCalledTimes(1);
   expect(session.state.modelAttempts).toBe(1);
+});
+
+test.each(['rate_limited', 'unavailable', 'deadline_exceeded'] as const)(
+  'retries %s within the same deadline and reports the exhausted failure',
+  async (code) => {
+    vi.useFakeTimers();
+    const session = await RunSession.create(
+      new MemoryRunStore(),
+      generationInput(),
+      vi.fn(),
+      { modelRetries: 1 },
+    );
+    await session.transition({ kind: 'start' });
+    const invoke = vi.fn(() => Promise.reject(new ModelRequestError(code)));
+    const pending = invokeModel(session, basis, callControl(), invoke);
+    await vi.advanceTimersByTimeAsync(250);
+    await expect(pending).resolves.toEqual({
+      outcome: 'failed',
+      reasonCode: code,
+    });
+    expect(invoke).toHaveBeenCalledTimes(2);
+    expect(session.state.modelAttempts).toBe(2);
+    expect(session.state.pendingModels).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+  },
+);
+
+test('a server retry delay cannot extend the logical deadline or send early', async () => {
+  vi.useFakeTimers();
+  const session = await RunSession.create(
+    new MemoryRunStore(),
+    generationInput(),
+    vi.fn(),
+  );
+  await session.transition({ kind: 'start' });
+  const invoke = vi.fn(() =>
+    Promise.reject(new ModelRequestError('rate_limited', 10_000)),
+  );
+  const pending = invokeModel(
+    session,
+    basis,
+    { ...callControl(), deadlineAt: new Date(Date.now() + 500).toISOString() },
+    invoke,
+  );
+  await vi.advanceTimersByTimeAsync(500);
+  await expect(pending).resolves.toEqual({ outcome: 'deadlineExceeded' });
+  expect(invoke).toHaveBeenCalledTimes(1);
+  expect(session.state.modelAttempts).toBe(1);
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+test('a retry must reserve another attempt and stops at the remaining budget', async () => {
+  vi.useFakeTimers();
+  const session = await RunSession.create(
+    new MemoryRunStore(),
+    generationInput(),
+    vi.fn(),
+    { maxModelAttempts: 1 },
+  );
+  await session.transition({ kind: 'start' });
+  const invoke = vi.fn(() =>
+    Promise.reject(new ModelRequestError('unavailable')),
+  );
+  const pending = invokeModel(session, basis, callControl(), invoke);
+  await vi.advanceTimersByTimeAsync(250);
+  await expect(pending).resolves.toEqual({ outcome: 'budgetExceeded' });
+  expect(invoke).toHaveBeenCalledTimes(1);
+  expect(session.state.modelAttempts).toBe(1);
+  await expect(session.result).resolves.toMatchObject({
+    status: 'paused',
+    blocker: { reasonCode: 'model_budget_exhausted' },
+  });
 });
 
 test('cancellation during reservation prevents sending and refunds only the unsent attempt', async () => {
