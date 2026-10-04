@@ -33,6 +33,7 @@ export default defineConfig({
   test: {
     environment: 'node',
     include: [
+      'scripts/**/*.test.mjs',
       'packages/*/src/**/*.test.ts',
       'packages/providers/*/src/**/*.test.ts',
     ],
