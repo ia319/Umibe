@@ -42,13 +42,16 @@ export type {
   CandidateRequest,
   CriteriaSupport,
   Environment,
-  Selector,
-  SelectorRequest,
   VerificationRequest,
   Verifier,
   CandidateFilter,
   CandidateFilterRequest,
 } from '#internal/contracts/adapters';
+export type {
+  Selector,
+  SelectorRequest,
+  SelectionResult,
+} from '#internal/selector/contracts';
 export type {
   DecisionContext,
   RuntimeContext,
@@ -76,12 +79,11 @@ export type {
   CandidateSet,
   ParameterSource,
 } from '#internal/contracts/candidate';
-export type { SelectionResult } from '#internal/contracts/selection';
 export { parseCandidateSet } from '#internal/validation/candidate';
 export { prepareCandidates } from '#internal/candidate/prepare';
 export { checkCandidates } from '#internal/candidate/check';
 export { filterCandidates } from '#internal/candidate/filter';
-export { selectCandidates } from '#internal/candidate/select';
+export { selectCandidates } from '#internal/selector/select';
 export { recheckCandidate } from '#internal/candidate/recheck';
 export type {
   CandidateFilterEntry,
@@ -108,7 +110,7 @@ export type {
   CheckedCandidates,
   PreparedCandidates,
 } from '#internal/contracts/candidate-processing';
-export { parseSelection } from '#internal/validation/selection';
+export { parseSelection } from '#internal/selector/validation';
 export type { ApplicationEvent } from '#internal/contracts/event';
 export { parseApplicationEvent } from '#internal/validation/event';
 export type {

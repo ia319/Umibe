@@ -6,7 +6,7 @@ import type {
   CandidateSet,
 } from './candidate.js';
 import type { CandidateFilterEntry } from './candidate-filter.js';
-import type { SelectionResult } from './selection.js';
+import type { SelectionResult } from '#internal/selector/contracts';
 import type { ContractErrorCode } from '../errors.js';
 
 export type CandidateGenerationInput = Omit<CandidateRequest, 'capabilities'>;

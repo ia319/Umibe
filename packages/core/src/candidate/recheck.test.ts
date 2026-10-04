@@ -9,7 +9,7 @@ import type { ObservationFact } from '#internal/contracts/observation';
 import { parseGoalGraph } from '#internal/validation/goal';
 import { filterCandidates } from './filter.js';
 import { recheckCandidate } from './recheck.js';
-import { selectCandidates } from './select.js';
+import { selectCandidates } from '#internal/selector/select';
 import {
   actionRegistry,
   callControl,

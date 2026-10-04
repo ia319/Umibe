@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest';
 import { parseCandidateSet } from './candidate.js';
-import { parseSelection } from './selection.js';
+import { parseSelection } from '#internal/selector/validation';
 
 function candidateSetInput() {
   const rootGoalRef = { id: 'root', version: 2 };

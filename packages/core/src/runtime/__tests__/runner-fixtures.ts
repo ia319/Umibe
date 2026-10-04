@@ -8,9 +8,9 @@ import type { ApplicationEvent } from '#internal/contracts/event';
 import type {
   CandidateProvider,
   Environment,
-  Selector,
   Verifier,
 } from '#internal/contracts/adapters';
+import type { Selector } from '#internal/selector/contracts';
 import type { Planner, PlannerRequest } from '#internal/planner/contracts';
 import {
   candidateSet,

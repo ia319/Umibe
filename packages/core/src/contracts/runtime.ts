@@ -12,9 +12,9 @@ import type {
   CandidateFilter,
   CandidateProvider,
   Environment,
-  Selector,
   Verifier,
 } from './adapters.js';
+import type { Selector } from '#internal/selector/contracts';
 import type { Planner } from '#internal/planner/contracts';
 import type { RootGoalRecord } from './goal.js';
 import type { JsonObject, JsonValue } from './json.js';

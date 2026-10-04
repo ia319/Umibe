@@ -4,8 +4,8 @@ import { ActionRegistry, defineAction } from '#internal/action/registry';
 import type {
   CandidateProvider,
   CandidateRequest,
-  Selector,
 } from '#internal/contracts/adapters';
+import type { Selector } from '#internal/selector/contracts';
 import type { DecisionContext } from '#internal/contracts/context';
 import type { CandidateSet } from '#internal/contracts/candidate';
 import type {
@@ -22,7 +22,7 @@ import { filterCandidates } from './filter.js';
 import { getSelectedCall } from './handles.js';
 import { prepareCandidates } from './prepare.js';
 import { recheckCandidate } from './recheck.js';
-import { selectCandidates } from './select.js';
+import { selectCandidates } from '#internal/selector/select';
 import { callControl, generationInput } from './__tests__/fixtures.js';
 
 interface Proposal {

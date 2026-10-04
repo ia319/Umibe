@@ -24,7 +24,7 @@ import { captureControl, invokeControlled } from '#internal/candidate/control';
 import { prepareCandidates } from '#internal/candidate/prepare';
 import { checkCandidates } from '#internal/candidate/check';
 import { filterCandidates } from '#internal/candidate/filter';
-import { selectCandidates } from '#internal/candidate/select';
+import { selectCandidates } from '#internal/selector/select';
 import { canonicalJson } from '#internal/candidate/identity';
 import { ContractError } from '#internal/errors';
 import { requireObject, requireString } from '#internal/validation/fields';

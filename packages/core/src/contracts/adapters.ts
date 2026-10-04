@@ -5,7 +5,6 @@ import type { JsonValue } from './json.js';
 import type { Observation } from './observation.js';
 import type { CandidateSet } from './candidate.js';
 import type { CandidateFilterResult } from './candidate-filter.js';
-import type { SelectionResult } from './selection.js';
 import type { ActionCapability } from './action.js';
 import type { DecisionContext } from './context.js';
 import type { CallControl } from './control.js';
@@ -25,13 +24,6 @@ export interface CandidateProvider {
   ): Promise<CandidateSet>;
 }
 
-export interface SelectorRequest {
-  readonly requestId: string;
-  readonly decisionEpoch: number;
-  readonly context: DecisionContext;
-  readonly candidates: CandidateSet;
-}
-
 export interface CandidateFilterRequest extends CandidateRequest {
   readonly candidates: CandidateSet;
 }
@@ -42,13 +34,6 @@ export interface CandidateFilter {
     request: CandidateFilterRequest,
     control: CallControl,
   ): Promise<CandidateFilterResult>;
-}
-
-export interface Selector {
-  select(
-    request: SelectorRequest,
-    control: CallControl,
-  ): Promise<SelectionResult>;
 }
 
 /** The application owns observation semantics and may additionally publish domain events. */

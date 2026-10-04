@@ -1,6 +1,6 @@
 import { assertType } from 'vitest';
 import type { CallControl } from '#internal/contracts/control';
-import type { Selector } from '#internal/contracts/adapters';
+import type { Selector } from '#internal/selector/contracts';
 import type {
   CandidateSelectionResult,
   FilteredCandidates,

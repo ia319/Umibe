@@ -1,15 +1,18 @@
 import { getEventListeners } from 'node:events';
 import { afterEach, expect, test, vi } from 'vitest';
 import type { ActionRegistry } from '#internal/action/registry';
-import type { Selector, SelectorRequest } from '#internal/contracts/adapters';
-import type { SelectionResult } from '#internal/contracts/selection';
-import { filterCandidates } from './filter.js';
+import type {
+  Selector,
+  SelectorRequest,
+  SelectionResult,
+} from '#internal/selector/contracts';
+import { filterCandidates } from '#internal/candidate/filter';
 import { selectCandidates } from './select.js';
 import {
   actionRegistry,
   callControl,
   checkedBatch,
-} from './__tests__/fixtures.js';
+} from '#internal/candidate/__tests__/fixtures';
 
 afterEach(() => vi.useRealTimers());
 

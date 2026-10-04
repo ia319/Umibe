@@ -1,19 +1,25 @@
 import type { CallControl } from '#internal/contracts/control';
-import type { Selector, SelectorRequest } from '#internal/contracts/adapters';
+import type {
+  Selector,
+  SelectorRequest,
+  SelectionResult,
+} from '#internal/selector/contracts';
 import type {
   CandidateSelectionResult,
   FilteredCandidates,
 } from '#internal/contracts/candidate-processing';
-import type { SelectionResult } from '#internal/contracts/selection';
 import { ContractError } from '#internal/errors';
 import { requireInteger } from '#internal/validation/fields';
-import { parseSelection } from '#internal/validation/selection';
-import { captureControl, invokeControlled } from './control.js';
-import { candidateContractIssue, invocationFailure } from './diagnostics.js';
+import { parseSelection } from '#internal/selector/validation';
+import { captureControl, invokeControlled } from '#internal/candidate/control';
+import {
+  candidateContractIssue,
+  invocationFailure,
+} from '#internal/candidate/diagnostics';
 import {
   assertFilteredCandidates,
   registerSelectedCandidate,
-} from './handles.js';
+} from '#internal/candidate/handles';
 
 /**
  * Select from an accepted filtered batch, including when it has just one member.
