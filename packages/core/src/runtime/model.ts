@@ -106,9 +106,10 @@ export async function invokeModel<T>(
   const limits = session.state.limits;
   const interruption = ():
     'cancelled' | 'invalidated' | 'deadlineExceeded' | null => {
-    if (signal.aborted) return 'cancelled';
+    if (session.signal.aborted) return 'cancelled';
     if (!session.canDispatch(request.decisionEpoch)) return 'invalidated';
     if (Date.now() >= captured.deadlineMs) return 'deadlineExceeded';
+    if (signal.aborted) return 'cancelled';
     return null;
   };
 
@@ -246,7 +247,12 @@ export async function invokeModel<T>(
       [
         session.event(
           'model_finished',
-          invalidated ?? failure ?? result.outcome,
+          (invalidated === null
+            ? null
+            : session.state.control.stopCause?.reasonCode) ??
+            invalidated ??
+            failure ??
+            result.outcome,
           {
             ...details,
             usage,

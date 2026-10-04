@@ -68,6 +68,7 @@ export class RunDriver<TCriteria extends JsonValue> {
   #resumeController: AbortController | null = null;
   #pendingEvents = 0;
   #loopDelay: IntervalHistogram | null = null;
+  readonly #callbacks = new Set<Promise<unknown>>();
 
   constructor(
     readonly session: RunSession,
@@ -419,15 +420,38 @@ export class RunDriver<TCriteria extends JsonValue> {
     };
   }
 
-  private async call<T>(
+  private call<T>(
     stage: CallbackStage,
     input: unknown,
     invoke: (control: CallControl) => Promise<T>,
     requestId: string = randomUUID(),
+    control: CallControl = this.control(stage),
+  ): Promise<T> {
+    const pending = this.invokeCallback(
+      stage,
+      input,
+      invoke,
+      requestId,
+      control,
+    );
+    this.#callbacks.add(pending);
+    // Pipeline timeouts may return before callback accounting has committed.
+    // Track the bounded gateway, never the uncooperative underlying adapter.
+    void pending
+      .finally(() => this.#callbacks.delete(pending))
+      .catch(() => undefined);
+    return pending;
+  }
+
+  private async invokeCallback<T>(
+    stage: CallbackStage,
+    input: unknown,
+    invoke: (control: CallControl) => Promise<T>,
+    requestId: string,
+    control: CallControl,
   ): Promise<T> {
     const session = this.session;
     const epoch = session.state.decision.decisionEpoch;
-    const control = this.control(stage);
     const startedAt = Date.now();
     await session.commit(session.state, [
       session.event('callback_started', stage, {
@@ -457,6 +481,13 @@ export class RunDriver<TCriteria extends JsonValue> {
       : await invokeControlled(captureControl(control), invoke);
     if (session.failure !== null) throw new CallStopped();
     const accepted = session.canDispatch(epoch);
+    const reasonCode =
+      session.state.control.stopCause?.reasonCode ??
+      (result.outcome === 'failed' && 'reasonCode' in result
+        ? result.reasonCode
+        : model && result.outcome === 'deadlineExceeded'
+          ? 'deadline_exceeded'
+          : `${stage}_${result.outcome}`);
     const delay = this.#loopDelay;
     const sampled = delay !== null && delay.count > 0;
     await session.commit(session.state, [
@@ -464,6 +495,7 @@ export class RunDriver<TCriteria extends JsonValue> {
         requestId,
         decisionEpoch: epoch,
         outcome: result.outcome,
+        ...(result.outcome !== 'returned' ? { reasonCode } : {}),
         currentAtReceipt: accepted,
         durationMs: Math.max(0, Date.now() - startedAt),
         eventLoopDelay: {
@@ -478,7 +510,7 @@ export class RunDriver<TCriteria extends JsonValue> {
     ]);
     if (!session.canDispatch(epoch)) throw new CallStopped();
     if (result.outcome !== 'returned') {
-      await this.block(`${stage}_${result.outcome}`);
+      await this.block(reasonCode);
       throw new CallStopped();
     }
     return result.value;
@@ -998,17 +1030,19 @@ export class RunDriver<TCriteria extends JsonValue> {
           input,
           this.registry,
           {
-            generate: (request) =>
+            generate: (request, control) =>
               this.call(
                 'candidates',
                 request,
                 (control) =>
                   this.options.candidateProvider.generate(request, control),
                 request.requestId,
+                control,
               ),
           },
           this.control('candidates'),
         );
+        await Promise.allSettled(this.#callbacks);
         if (!session.canDispatch(input.decisionEpoch)) {
           if (this.#refresh) continue;
           break;
@@ -1039,16 +1073,18 @@ export class RunDriver<TCriteria extends JsonValue> {
           this.options.candidateFilter === undefined
             ? undefined
             : {
-                filter: (request) =>
+                filter: (request, control) =>
                   this.call(
                     'filtering',
                     request,
                     (control) =>
                       this.options.candidateFilter!.filter(request, control),
                     request.requestId,
+                    control,
                   ),
               },
         );
+        await Promise.allSettled(this.#callbacks);
         if (!session.canDispatch(input.decisionEpoch)) {
           if (this.#refresh) continue;
           break;
@@ -1092,17 +1128,19 @@ export class RunDriver<TCriteria extends JsonValue> {
         const selected = await selectCandidates(
           filtered.filtered,
           {
-            select: (request) =>
+            select: (request, control) =>
               this.call(
                 'selection',
                 request,
                 (control) => this.options.selector.select(request, control),
                 request.requestId,
+                control,
               ),
           },
           this.control('selection'),
           this.options.selectorCapacity,
         );
+        await Promise.allSettled(this.#callbacks);
         if (!session.canDispatch(input.decisionEpoch)) {
           if (this.#refresh) continue;
           break;
@@ -1191,6 +1229,7 @@ export class RunDriver<TCriteria extends JsonValue> {
           error instanceof ContractError ? error.reason : 'callback_failed',
         );
     } finally {
+      await Promise.allSettled(this.#callbacks);
       if (session.failure === null) await this.settleStop();
     }
   }
