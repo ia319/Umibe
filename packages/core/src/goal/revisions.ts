@@ -2,7 +2,7 @@ import type {
   ChildGoalRecord,
   GoalGraphSnapshot,
 } from '#internal/contracts/goal';
-import type { GoalRevision } from '#internal/contracts/planning';
+import type { GoalRevision } from '#internal/planner/contracts';
 import type { GoalRef, PlanRef } from '#internal/contracts/references';
 import { ContractError } from '#internal/errors';
 import { parseGoalGraph } from '#internal/validation/goal';

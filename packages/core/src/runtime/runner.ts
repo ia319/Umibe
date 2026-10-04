@@ -9,14 +9,16 @@ import type {
   ResumeRun,
 } from '#internal/contracts/runtime';
 import type { CallControl } from '#internal/contracts/control';
-import type { PlannerRequest } from '#internal/contracts/adapters';
+import type {
+  PlannerRequest,
+  PlanningTrigger,
+} from '#internal/planner/contracts';
 import type { JsonValue } from '#internal/contracts/json';
 import type {
   GoalAssessment,
   GoalGraphSnapshot,
   GoalRecord,
 } from '#internal/contracts/goal';
-import type { PlanningTrigger } from '#internal/contracts/planning';
 import type { ApplicationEvent } from '#internal/contracts/event';
 import { captureControl, invokeControlled } from '#internal/candidate/control';
 import { prepareCandidates } from '#internal/candidate/prepare';
@@ -29,7 +31,7 @@ import { requireObject, requireString } from '#internal/validation/fields';
 import { parseJsonValue } from '#internal/validation/json';
 import { parseObservation } from '#internal/validation/observation';
 import { parseGoalGraph } from '#internal/validation/goal';
-import { parsePlanProposal } from '#internal/validation/planning';
+import { parsePlanProposal } from '#internal/planner/validation';
 import { readGoalAssessment } from '#internal/validation/assessment';
 import { parseApplicationEvent } from '#internal/validation/event';
 import { captureDecisionRequest } from '#internal/candidate/context';

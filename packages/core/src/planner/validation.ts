@@ -1,10 +1,11 @@
-import type { PlannerRequest } from '#internal/contracts/adapters';
 import type {
+  PlannerRequest,
   PlanProposal,
   GoalRevision,
   ProposedGoal,
   ProposedParent,
-} from '#internal/contracts/planning';
+} from '#internal/planner/contracts';
+
 import type { JsonValue } from '#internal/contracts/json';
 import type { GoalRef, PlanRef } from '#internal/contracts/references';
 import { ContractError } from '#internal/errors';
@@ -13,10 +14,14 @@ import {
   requireKeys,
   requireObject,
   requireString,
-} from './fields.js';
-import type { FieldContext } from './fields.js';
-import { isJsonArray, parseJsonValue } from './json.js';
-import { readGoalRef, readObservationRef, readPlanRef } from './references.js';
+} from '#internal/validation/fields';
+import type { FieldContext } from '#internal/validation/fields';
+import { isJsonArray, parseJsonValue } from '#internal/validation/json';
+import {
+  readGoalRef,
+  readObservationRef,
+  readPlanRef,
+} from '#internal/validation/references';
 import { reviseGoalGraph } from '#internal/goal/revisions';
 
 const context: FieldContext = {

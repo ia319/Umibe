@@ -8,11 +8,10 @@ import type { ApplicationEvent } from '#internal/contracts/event';
 import type {
   CandidateProvider,
   Environment,
-  Planner,
   Selector,
   Verifier,
 } from '#internal/contracts/adapters';
-import type { PlannerRequest } from '#internal/contracts/adapters';
+import type { Planner, PlannerRequest } from '#internal/planner/contracts';
 import {
   candidateSet,
   generationInput,

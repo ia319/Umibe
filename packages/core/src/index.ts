@@ -28,9 +28,11 @@ export type {
   GoalRevision,
   ProposedGoal,
   ProposedParent,
-} from '#internal/contracts/planning';
-export type { ProposalLimits } from '#internal/validation/planning';
-export { parsePlanProposal } from '#internal/validation/planning';
+  Planner,
+  PlannerRequest,
+} from '#internal/planner/contracts';
+export type { ProposalLimits } from '#internal/planner/validation';
+export { parsePlanProposal } from '#internal/planner/validation';
 export { describeActionParameters } from '#internal/action/describe';
 export { ActionRegistry, defineAction } from '#internal/action/registry';
 export type { RegisteredAction } from '#internal/action/registry';
@@ -40,12 +42,12 @@ export type {
   CandidateRequest,
   CriteriaSupport,
   Environment,
-  Planner,
-  PlannerRequest,
   Selector,
   SelectorRequest,
   VerificationRequest,
   Verifier,
+  CandidateFilter,
+  CandidateFilterRequest,
 } from '#internal/contracts/adapters';
 export type {
   DecisionContext,
@@ -85,10 +87,6 @@ export type {
   CandidateFilterEntry,
   CandidateFilterResult,
 } from '#internal/contracts/candidate-filter';
-export type {
-  CandidateFilter,
-  CandidateFilterRequest,
-} from '#internal/contracts/adapters';
 export type {
   CandidateFilteringReport,
   CandidateFilteringResult,

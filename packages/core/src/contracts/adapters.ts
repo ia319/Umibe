@@ -1,30 +1,14 @@
 import type { ActionResult } from './record.js';
 import type { ApplicationEvent } from './event.js';
-import type { ChildGoalRecord, GoalAssessment, GoalRecord } from './goal.js';
+import type { GoalAssessment, GoalRecord } from './goal.js';
 import type { JsonValue } from './json.js';
 import type { Observation } from './observation.js';
 import type { CandidateSet } from './candidate.js';
 import type { CandidateFilterResult } from './candidate-filter.js';
 import type { SelectionResult } from './selection.js';
-import type { PlanProposal, PlanningTrigger } from './planning.js';
 import type { ActionCapability } from './action.js';
 import type { DecisionContext } from './context.js';
 import type { CallControl } from './control.js';
-
-export interface PlannerRequest {
-  readonly requestId: string;
-  readonly decisionEpoch: number;
-  readonly context: DecisionContext;
-  readonly capabilities: readonly ActionCapability[];
-  readonly trigger: PlanningTrigger;
-  /** Invalidated descendants retained for explicit revision or reconfirmation. */
-  readonly pendingGoals?: readonly ChildGoalRecord[];
-}
-
-/** The core validates and accepts a proposal; the planner never mutates accepted goals. */
-export interface Planner {
-  plan(request: PlannerRequest, control: CallControl): Promise<PlanProposal>;
-}
 
 export interface CandidateRequest {
   readonly requestId: string;

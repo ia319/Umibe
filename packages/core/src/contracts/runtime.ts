@@ -12,10 +12,10 @@ import type {
   CandidateFilter,
   CandidateProvider,
   Environment,
-  Planner,
   Selector,
   Verifier,
 } from './adapters.js';
+import type { Planner } from '#internal/planner/contracts';
 import type { RootGoalRecord } from './goal.js';
 import type { JsonObject, JsonValue } from './json.js';
 import type { RunCheckpoint, RunRecord, RunSummary } from './record.js';

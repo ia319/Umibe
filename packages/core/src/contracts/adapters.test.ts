@@ -3,17 +3,17 @@ import { z } from 'zod';
 import type {
   CandidateProvider,
   Environment,
-  Planner,
   Selector,
   Verifier,
 } from './adapters.js';
+import type { Planner } from '#internal/planner/contracts';
 import type { DecisionContext } from '#internal/contracts/context';
 import type { ActionDefinition } from './action.js';
 import type { ApplicationEvent } from './event.js';
 import { parseCandidateSet } from '../validation/candidate.js';
 import { parseGoalGraph } from '../validation/goal.js';
 import { parseObservation } from '../validation/observation.js';
-import { parsePlanProposal } from '../validation/planning.js';
+import { parsePlanProposal } from '#internal/planner/validation';
 import { parseSelection } from '../validation/selection.js';
 import { describeActionParameters } from '../action/describe.js';
 

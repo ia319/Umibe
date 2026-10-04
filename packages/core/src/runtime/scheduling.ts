@@ -1,6 +1,6 @@
 import type { DecisionContext } from '#internal/contracts/context';
 import type { CandidateSet } from '#internal/contracts/candidate';
-import type { PlanningTrigger } from '#internal/contracts/planning';
+import type { PlanningTrigger } from '#internal/planner/contracts';
 import { canonicalJson } from '#internal/candidate/identity';
 import { parseJsonValue } from '#internal/validation/json';
 

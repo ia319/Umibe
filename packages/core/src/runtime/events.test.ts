@@ -1,6 +1,6 @@
 import { afterEach, expect, test, vi } from 'vitest';
 import type { Environment } from '#internal/contracts/adapters';
-import type { PlanProposal } from '#internal/contracts/planning';
+import type { PlanProposal } from '#internal/planner/contracts';
 import { candidateSet } from '#internal/candidate/__tests__/fixtures';
 import { createAgent } from './agent.js';
 import {
