@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { RunDatabase } from '../../dist/database.js';
+import { RunDatabase } from '#internal/database';
 import type { RunCommit } from '@umibe/core';
 
 const path = process.argv[2];

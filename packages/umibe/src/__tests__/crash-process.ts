@@ -9,38 +9,7 @@ import { z } from 'zod';
 import { SqliteRunStore } from '@umibe/storage-sqlite';
 import { createAgent, defineAction } from 'umibe';
 import type { ActionResult, ApplicationEvent, RunHandle } from 'umibe';
-
-export interface CrashConfig {
-  readonly directory: string;
-  readonly operation: 'start' | 'resume' | 'reconcile';
-  readonly boundary?:
-    | 'beforeIntent'
-    | 'afterIntent'
-    | 'afterEffect'
-    | 'afterResult'
-    | 'beforeProgress'
-    | 'afterProgress'
-    | 'modelReserved'
-    | 'modelResponse'
-    | 'controlCommitted';
-  readonly reconcile?: 'automatic' | 'unknown' | 'missing';
-  readonly nested?: boolean;
-  readonly target?: number;
-  readonly parameterDefault?: number;
-  readonly applicationId?: string;
-  readonly actionVersion?: number;
-  readonly control?: 'pauseRun' | 'cancelRun';
-  readonly cancelAfterEffect?: boolean;
-  readonly duplicate?: 'pauseRun' | 'cancelRun';
-}
-
-export interface CrashReply {
-  readonly kind: 'boundary' | 'done' | 'error';
-  readonly boundary?: CrashConfig['boundary'];
-  readonly status?: string;
-  readonly reason?: string;
-  readonly duplicate?: { before: number; after: number; conflict: string };
-}
+import type { CrashConfig, CrashReply } from './crash-host.js';
 
 // Both the command and effect records are generated exclusively by this fixture.
 const config = JSON.parse(process.argv[2]!) as CrashConfig;

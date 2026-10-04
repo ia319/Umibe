@@ -1,5 +1,36 @@
 import { fork } from 'node:child_process';
-import type { CrashConfig, CrashReply } from './crash-process.js';
+
+export interface CrashConfig {
+  readonly directory: string;
+  readonly operation: 'start' | 'resume' | 'reconcile';
+  readonly boundary?:
+    | 'beforeIntent'
+    | 'afterIntent'
+    | 'afterEffect'
+    | 'afterResult'
+    | 'beforeProgress'
+    | 'afterProgress'
+    | 'modelReserved'
+    | 'modelResponse'
+    | 'controlCommitted';
+  readonly reconcile?: 'automatic' | 'unknown' | 'missing';
+  readonly nested?: boolean;
+  readonly target?: number;
+  readonly parameterDefault?: number;
+  readonly applicationId?: string;
+  readonly actionVersion?: number;
+  readonly control?: 'pauseRun' | 'cancelRun';
+  readonly cancelAfterEffect?: boolean;
+  readonly duplicate?: 'pauseRun' | 'cancelRun';
+}
+
+export interface CrashReply {
+  readonly kind: 'boundary' | 'done' | 'error';
+  readonly boundary?: CrashConfig['boundary'];
+  readonly status?: string;
+  readonly reason?: string;
+  readonly duplicate?: { before: number; after: number; conflict: string };
+}
 
 /** End the entire host after its IPC boundary, including its real storage Worker. */
 export async function runCrashProcess(

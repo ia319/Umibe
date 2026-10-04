@@ -4,6 +4,12 @@
   "private": true,
   "type": "module",
   "sideEffects": false,
+  "imports": {
+    "#internal/database": {
+      "umibe-source": "./src/database.ts",
+      "default": "./dist/database.js"
+    }
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
