@@ -543,6 +543,58 @@ test('separates conservative state bytes, HTTP bytes and the model token window'
   });
 });
 
+test.each([
+  'http://api.cloudflare.com/client/v4',
+  'http://192.0.2.1/client/v4',
+  'http://10.0.0.1/client/v4',
+  'http://[2001:db8::1]/client/v4',
+  'http://0.0.0.0/client/v4',
+  'http://localhost.example.test/client/v4',
+  'http://127.0.0.1.example.test/client/v4',
+  'http://localhost@api.example.test/client/v4',
+  'http://user:password@localhost/client/v4',
+  'http://localhost/client/v4?key=secret',
+  'http://[::1]/client/v4#fragment',
+  'ftp://localhost/client/v4',
+  'https://api.example.test/client/v4?key=secret',
+])('rejects unsafe baseURL %s before network access', (baseURL) => {
+  const fetchCall = vi
+    .spyOn(globalThis, 'fetch')
+    .mockRejectedValue(new Error('unexpected request'));
+  try {
+    expect(() => createCloudflareModel({ ...options, baseURL })).toThrow(
+      TypeError,
+    );
+    expect(fetchCall).not.toHaveBeenCalled();
+  } finally {
+    fetchCall.mockRestore();
+  }
+});
+
+test.each([
+  'https://api.cloudflare.com/client/v4',
+  'https://gateway.example.test/custom/v4',
+  'http://127.0.0.1:12345/client/v4',
+  'http://localhost:12345/client/v4',
+  'http://[::1]:12345/client/v4',
+  'http://LOCALHOST:12345/client/v4',
+])(
+  'accepts HTTPS or loopback baseURL %s without sending a request',
+  (baseURL) => {
+    const fetchCall = vi
+      .spyOn(globalThis, 'fetch')
+      .mockRejectedValue(new Error('unexpected request'));
+    try {
+      expect(createCloudflareModel({ ...options, baseURL }).kind).toBe(
+        'choice',
+      );
+      expect(fetchCall).not.toHaveBeenCalled();
+    } finally {
+      fetchCall.mockRestore();
+    }
+  },
+);
+
 test('validates configuration and native request limits before network access', async () => {
   const h = await httpFixture((_request, response) => {
     response.end();

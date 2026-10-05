@@ -336,6 +336,56 @@ test('cancels during response reading and performs no request when already stopp
   expect(h.requests).toHaveLength(1);
 });
 
+test.each([
+  'http://api.openai.com/v1',
+  'http://192.0.2.1/v1',
+  'http://10.0.0.1/v1',
+  'http://[2001:db8::1]/v1',
+  'http://0.0.0.0/v1',
+  'http://localhost.example.test/v1',
+  'http://127.0.0.1.example.test/v1',
+  'http://localhost@api.example.test/v1',
+  'http://user:password@localhost/v1',
+  'http://localhost/v1?key=secret',
+  'http://[::1]/v1#fragment',
+  'ftp://localhost/v1',
+  'https://api.example.test/v1?key=secret',
+])('rejects unsafe baseURL %s before network access', (baseURL) => {
+  const fetchCall = vi
+    .spyOn(globalThis, 'fetch')
+    .mockRejectedValue(new Error('unexpected request'));
+  try {
+    expect(() => createOpenAIModel({ ...options, baseURL })).toThrow(TypeError);
+    expect(fetchCall).not.toHaveBeenCalled();
+  } finally {
+    fetchCall.mockRestore();
+  }
+});
+
+test.each([
+  'https://api.openai.com/v1',
+  'https://gateway.example.test/custom/v1',
+  'http://127.0.0.1:12345/v1',
+  'http://localhost:12345/v1',
+  'http://[::1]:12345/v1',
+  'http://LOCALHOST:12345/v1',
+])(
+  'accepts HTTPS or loopback baseURL %s without sending a request',
+  (baseURL) => {
+    const fetchCall = vi
+      .spyOn(globalThis, 'fetch')
+      .mockRejectedValue(new Error('unexpected request'));
+    try {
+      expect(createOpenAIModel({ ...options, baseURL }).kind).toBe(
+        'structuredOutput',
+      );
+      expect(fetchCall).not.toHaveBeenCalled();
+    } finally {
+      fetchCall.mockRestore();
+    }
+  },
+);
+
 test('validates construction and input byte limits before any HTTP request', async () => {
   const h = await httpFixture((_request, response) => {
     response.end();

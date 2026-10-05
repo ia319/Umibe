@@ -13,7 +13,10 @@ export interface OpenAIModelOptions {
   readonly model: string;
   /** Positive safe integer; the adapter never increases this limit after truncation. */
   readonly maxOutputTokens: number;
-  /** Defaults to the official API. Explicit HTTP URLs support local protocol testing. */
+  /**
+   * Defaults to the official API. Require HTTPS except for HTTP protocol tests
+   * at localhost, 127.0.0.1 or [::1]. Credentials, query and fragment are rejected.
+   */
   readonly baseURL?: string;
   /** UTF-8 request body limit, default 1 MiB. This does not estimate token usage. */
   readonly maxRequestBytes?: number;
@@ -47,14 +50,16 @@ export function createOpenAIModel(
   }
   const baseURL = new URL(options.baseURL ?? 'https://api.openai.com/v1');
   if (
-    !['https:', 'http:'].includes(baseURL.protocol) ||
+    (baseURL.protocol !== 'https:' &&
+      (baseURL.protocol !== 'http:' ||
+        !['127.0.0.1', '[::1]', 'localhost'].includes(baseURL.hostname))) ||
     baseURL.username ||
     baseURL.password ||
     baseURL.search ||
     baseURL.hash
   )
     throw new TypeError(
-      'baseURL must be an HTTP endpoint without credentials, query or fragment',
+      'baseURL requires HTTPS or loopback HTTP, without credentials, query or fragment',
     );
   const identity = Object.freeze({ provider: 'openai', model: options.model });
   const client = new OpenAI({

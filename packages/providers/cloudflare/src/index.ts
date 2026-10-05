@@ -9,7 +9,10 @@ export interface CloudflareModelOptions {
   readonly accountId: string;
   readonly apiToken: string;
   readonly model: '@cf/cloudflare/clef';
-  /** Defaults to the official REST root. Explicit HTTP URLs support local tests. */
+  /**
+   * Defaults to the official REST root. Require HTTPS except for HTTP protocol
+   * tests at localhost, 127.0.0.1 or [::1]. Credentials, query and fragment are rejected.
+   */
   readonly baseURL?: string;
   /** UTF-8 HTTP body limit, default 1 MiB; independent of the fixed 2048-byte state guard. */
   readonly maxRequestBytes?: number;
@@ -52,14 +55,16 @@ export function createCloudflareModel(
     options.baseURL ?? 'https://api.cloudflare.com/client/v4',
   );
   if (
-    !['https:', 'http:'].includes(baseURL.protocol) ||
+    (baseURL.protocol !== 'https:' &&
+      (baseURL.protocol !== 'http:' ||
+        !['127.0.0.1', '[::1]', 'localhost'].includes(baseURL.hostname))) ||
     baseURL.username ||
     baseURL.password ||
     baseURL.search ||
     baseURL.hash
   )
     throw new TypeError(
-      'baseURL must be an HTTP endpoint without credentials, query or fragment',
+      'baseURL requires HTTPS or loopback HTTP, without credentials, query or fragment',
     );
   const endpoint = `${baseURL.href.replace(/\/$/, '')}/accounts/${options.accountId}/ai/run/@cf/cloudflare/clef`;
   const apiToken = options.apiToken;
