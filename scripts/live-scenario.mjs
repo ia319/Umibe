@@ -10,6 +10,7 @@ import {
 import { ModelRequestError } from '@umibe/core/model';
 import { createOpenAIModel } from '@umibe/provider-openai';
 import { createCloudflareModel } from '@umibe/provider-cloudflare';
+import { createCodexModel } from '@umibe/provider-codex';
 import { z } from 'zod';
 import { setTimeout, clearTimeout } from 'node:timers';
 
@@ -17,7 +18,7 @@ import { setTimeout, clearTimeout } from 'node:timers';
  * Run one selected role through the public Agent and its persisted attempt gate.
  * The caller runs this in a dedicated process: fetch counting temporarily owns
  * the process-wide transport. Only an in-memory synthetic action can execute.
- * @param {{ provider: 'openai' | 'cloudflare', role: 'planning' | 'selection', model: string, apiKey: string, accountId: string, apiToken: string, timeoutMs: number, maxOutputTokens: number, baseURL?: string }} options
+ * @param {{ provider: 'openai' | 'cloudflare' | 'codex', role: 'planning' | 'selection', model: string, apiKey: string, accountId: string, apiToken: string, timeoutMs: number, maxOutputTokens: number, baseURL?: string, executablePath?: string }} options
  */
 export async function runScenario(options) {
   const store = new MemoryRunStore();
@@ -25,6 +26,7 @@ export async function runScenario(options) {
   let count = 0;
   let revision = 0;
   let httpRequests = 0;
+  let providerCalls = 0;
   /** @type {string | null} */
   let decision = null;
   const originalFetch = globalThis.fetch;
@@ -44,7 +46,7 @@ export async function runScenario(options) {
   try {
     const transport =
       options.baseURL === undefined ? {} : { baseURL: options.baseURL };
-    const model =
+    const adapter =
       options.provider === 'cloudflare'
         ? createCloudflareModel({
             ...transport,
@@ -52,12 +54,38 @@ export async function runScenario(options) {
             apiToken: options.apiToken,
             model: '@cf/cloudflare/clef',
           })
-        : createOpenAIModel({
-            ...transport,
-            apiKey: options.apiKey,
-            model: options.model,
-            maxOutputTokens: options.maxOutputTokens,
-          });
+        : options.provider === 'codex'
+          ? createCodexModel({
+              executablePath: options.executablePath ?? '',
+              ...(options.model === '' ? {} : { model: options.model }),
+            })
+          : createOpenAIModel({
+              ...transport,
+              apiKey: options.apiKey,
+              model: options.model,
+              maxOutputTokens: options.maxOutputTokens,
+            });
+    /** @type {import('@umibe/core/model').StructuredOutputModel | import('@umibe/core/model').ChoiceModel} */
+    const model =
+      adapter.kind === 'structuredOutput'
+        ? {
+            ...adapter,
+            generate(request, control) {
+              if (providerCalls >= 1)
+                throw new ModelRequestError('request_failed');
+              providerCalls++;
+              return adapter.generate(request, control);
+            },
+          }
+        : {
+            ...adapter,
+            choose(request, control) {
+              if (providerCalls >= 1)
+                throw new ModelRequestError('request_failed');
+              providerCalls++;
+              return adapter.choose(request, control);
+            },
+          };
     /** @type {import('@umibe/core').Planner} */
     let planner = {
       plan: (request) =>
@@ -318,7 +346,9 @@ export async function runScenario(options) {
       .filter((record) => record.kind === 'coreEvent')
       .filter((record) => record.data.type === 'model_finished');
     return {
-      httpRequests,
+      // Child-process network traffic is outside this process's fetch counter.
+      httpRequests: options.provider === 'codex' ? null : httpRequests,
+      providerCalls,
       attempts: inspection?.checkpoint.state.modelAttempts ?? null,
       decision,
       runStatus: result.status,

@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { dirname, resolve } from 'node:path';
+import { dirname, isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs, parseEnv } from 'node:util';
 import { isJsonObject, parseJsonValue } from '@umibe/core/model';
@@ -13,12 +13,15 @@ const combinations = /** @type {const} */ ([
   ['openai', 'planning'],
   ['openai', 'selection'],
   ['cloudflare', 'selection'],
+  ['codex', 'planning'],
 ]);
 /** @type {Record<string, string>} */
 let args = {};
 /** @type {string[]} */
 let secrets = [];
 let errorCode = null;
+/** @type {string | null} */
+let codexVersion = null;
 const enabled = process.env.UMIBE_LIVE_TESTS === '1';
 const requireOpenAI = createRequire(
   new URL('../packages/providers/openai/package.json', import.meta.url),
@@ -79,16 +82,17 @@ const results = combinations.map(([provider, role]) => ({
   actualModel: /** @type {string | null} */ (null),
   requestId: /** @type {string | null} */ (null),
   attempts: /** @type {number | null} */ (0),
+  providerCalls: /** @type {number | null} */ (0),
   httpRequests: /** @type {number | null} */ (0),
   elapsedMs: 0,
   limits:
-    /** @type {null | { attempts: number, requests: number, retries: number, timeoutMs: number, maxOutputTokens: number | null }} */ (
+    /** @type {null | { attempts: number, requests: number | null, retries: number, timeoutMs: number, maxOutputTokens: number | null }} */ (
       null
     ),
   usage: /** @type {import('@umibe/core/model').ModelUsage | null} */ (null),
   usageUnknown: true,
   interfaceAssertions:
-    /** @type {null | { protocolAndRole: boolean, singleRequest: boolean }} */ (
+    /** @type {null | { protocolAndRole: boolean, singleInvocation: boolean, singleRequest: boolean | null }} */ (
       null
     ),
   observation:
@@ -108,6 +112,7 @@ try {
         'base-url',
         'timeout-ms',
         'max-output-tokens',
+        'codex-path',
       ].map((key) => [key, { type: 'string' }]),
     ),
     strict: true,
@@ -121,15 +126,33 @@ try {
     const selected = results.find(
       (entry) => entry.provider === args.provider && entry.role === args.role,
     );
+    const configuredModel =
+      args.model ?? (selected?.provider === 'codex' ? 'default' : undefined);
     if (
       selected === undefined ||
-      args.model === undefined ||
-      publicIdentifier(args.model) === null
+      configuredModel === undefined ||
+      publicIdentifier(configuredModel) === null
     )
       throw new Error('invalid_config');
-    selected.configuredModel = args.model;
+    selected.configuredModel = configuredModel;
     selected.status = 'failed';
     selected.reason = 'invalid_config';
+    if (selected.provider === 'codex') {
+      const executablePath = args['codex-path'];
+      if (
+        executablePath === undefined ||
+        !isAbsolute(executablePath) ||
+        args['base-url'] !== undefined
+      )
+        throw new Error('invalid_config');
+      const version = execFileSync(executablePath, ['--version'], {
+        encoding: 'utf8',
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: 5000,
+      }).trim();
+      codexVersion = publicIdentifier(/^codex-cli (\S+)$/.exec(version)?.[1]);
+    }
     if (
       selected.provider === 'cloudflare' &&
       args.model !== '@cf/cloudflare/clef'
@@ -143,7 +166,7 @@ try {
     );
     selected.limits = {
       attempts: 1,
-      requests: 1,
+      requests: selected.provider === 'codex' ? null : 1,
       retries: 0,
       timeoutMs,
       maxOutputTokens: selected.provider === 'openai' ? maxOutputTokens : null,
@@ -165,50 +188,59 @@ try {
     }
     /** @type {Record<string, string | undefined>} */
     let fileEnv = {};
-    try {
-      fileEnv = parseEnv(
-        readFileSync(
-          resolve(repositoryRoot, args['env-path'] ?? '.env'),
-          'utf8',
-        ),
-      );
-    } catch (error) {
-      if (!(
-        error instanceof Error &&
-        'code' in error &&
-        error.code === 'ENOENT'
-      ))
-        throw new Error('env_read_failed', { cause: error });
+    if (selected.provider !== 'codex') {
+      try {
+        fileEnv = parseEnv(
+          readFileSync(
+            resolve(repositoryRoot, args['env-path'] ?? '.env'),
+            'utf8',
+          ),
+        );
+      } catch (error) {
+        if (!(
+          error instanceof Error &&
+          'code' in error &&
+          error.code === 'ENOENT'
+        ))
+          throw new Error('env_read_failed', { cause: error });
+      }
     }
-    const env = { ...fileEnv, ...process.env };
+    const env =
+      selected.provider === 'codex' ? {} : { ...fileEnv, ...process.env };
     const apiKey = env.OPENAI_API_KEY ?? '';
     const accountId = env.CLOUDFLARE_ACCOUNT_ID ?? '';
     const apiToken = env.CLOUDFLARE_AUTH_TOKEN ?? '';
     secrets = [apiKey, accountId, apiToken];
-    selected.configuredModel = publicIdentifier(args.model);
+    selected.configuredModel = publicIdentifier(configuredModel);
     if (selected.configuredModel === null) throw new Error('invalid_config');
     if (
-      selected.provider === 'openai'
+      selected.provider !== 'codex' &&
+      (selected.provider === 'openai'
         ? !apiKey.trim()
-        : !accountId.trim() || !apiToken.trim()
+        : !accountId.trim() || !apiToken.trim())
     )
       throw new Error('missing_credentials');
     const callStartedAt = Date.now();
     selected.attempts = null;
+    selected.providerCalls = null;
     selected.httpRequests = null;
     const run = await runScenario({
       provider: selected.provider,
       role: selected.role,
-      model: args.model,
+      model: args.model ?? '',
       apiKey,
       accountId,
       apiToken,
       timeoutMs,
       maxOutputTokens,
       ...(baseURL === undefined ? {} : { baseURL }),
+      ...(args['codex-path'] === undefined
+        ? {}
+        : { executablePath: args['codex-path'] }),
     });
     selected.elapsedMs = Math.max(0, Date.now() - callStartedAt);
     selected.httpRequests = run.httpRequests;
+    selected.providerCalls = run.providerCalls;
     selected.attempts = typeof run.attempts === 'number' ? run.attempts : null;
     const finish = run.finished.length === 1 ? run.finished[0] : undefined;
     const details = finish?.details;
@@ -236,7 +268,11 @@ try {
     const passed = finish?.reasonCode === 'returned' && run.decision !== null;
     selected.interfaceAssertions = {
       protocolAndRole: passed,
-      singleRequest: selected.attempts === 1 && run.httpRequests === 1,
+      singleInvocation: selected.attempts === 1 && run.providerCalls === 1,
+      singleRequest:
+        selected.provider === 'codex'
+          ? null
+          : selected.attempts === 1 && run.httpRequests === 1,
     };
     const choice =
       details !== undefined && isJsonObject(details.choice)
@@ -251,7 +287,10 @@ try {
           : null,
     };
     selected.status =
-      passed && selected.interfaceAssertions.singleRequest
+      passed &&
+      selected.interfaceAssertions.singleInvocation &&
+      (selected.provider === 'codex' ||
+        selected.interfaceAssertions.singleRequest)
         ? 'passed'
         : 'failed';
     const safeErrors = new Set([
@@ -305,6 +344,7 @@ const report = {
   workingTreeDirty,
   nodeVersion: process.version,
   sdkVersions: {
+    codex: codexVersion,
     openai:
       isJsonObject(sdk) && typeof sdk.version === 'string' ? sdk.version : null,
     cloudflare: {
