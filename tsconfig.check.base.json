@@ -11,6 +11,7 @@
         "./packages/providers/cloudflare/src/index.ts"
       ],
       "@umibe/provider-openai": ["./packages/providers/openai/src/index.ts"],
+      "@umibe/provider-codex": ["./packages/providers/codex/src/index.ts"],
       "@umibe/storage-sqlite": ["./packages/storage-sqlite/src/index.ts"],
       "umibe": ["./packages/umibe/src/index.ts"]
     }

@@ -14,8 +14,10 @@ export interface StructuredOutputRequest {
 }
 
 /**
- * A single non-streaming model request. Implementations perform no retries,
- * repairs, tools or fallback calls and forward response metadata before decoding.
+ * One non-streaming provider invocation, counted as one Agent model attempt.
+ * Adapters do not retry role requests, repair output, switch providers or execute
+ * tools. An adapter may delegate one task to an agent service with internal model calls;
+ * it must document that unit and report aggregate usage before decoding.
  * Reject provider failures with ModelRequestError and caller cancellation with
  * AbortError. Direct callers own their budgets; Agent owns role attempt budgets.
  */
@@ -52,7 +54,7 @@ export interface ChoiceResponse {
 }
 
 /**
- * One native choice request with the same cancellation, failure and single-attempt
+ * One native choice request with the same cancellation, failure and reporting
  * obligations as StructuredOutputModel. Probabilities are optional; their sum,
  * ranking and precision remain provider protocol rules.
  */

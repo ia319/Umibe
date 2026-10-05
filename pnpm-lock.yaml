@@ -178,6 +178,9 @@ importers:
       '@umibe/provider-cloudflare':
         specifier: workspace:*
         version: link:packages/providers/cloudflare
+      '@umibe/provider-codex':
+        specifier: workspace:*
+        version: link:packages/providers/codex
       '@umibe/provider-openai':
         specifier: workspace:*
         version: link:packages/providers/openai
@@ -210,6 +213,12 @@ importers:
         version: 4.6.5
 
   packages/providers/cloudflare:
+    dependencies:
+      '@umibe/core':
+        specifier: workspace:*
+        version: link:../../core
+
+  packages/providers/codex:
     dependencies:
       '@umibe/core':
         specifier: workspace:*

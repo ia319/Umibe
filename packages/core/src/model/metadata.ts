@@ -11,7 +11,7 @@ export interface ModelUsage {
   readonly totalTokens: number | null;
 }
 
-/** Metadata from one response, including refusals and incomplete output. */
+/** Metadata for one provider invocation, including aggregate task usage when available. */
 export interface ModelResponseMetadata {
   /** The actual model reported by the service; null if unavailable. */
   readonly model: string | null;

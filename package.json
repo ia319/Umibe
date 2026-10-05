@@ -23,6 +23,7 @@
     "@types/node": "24.13.6",
     "@umibe/core": "workspace:*",
     "@umibe/provider-cloudflare": "workspace:*",
+    "@umibe/provider-codex": "workspace:*",
     "@umibe/provider-openai": "workspace:*",
     "eslint": "10.11.0",
     "eslint-config-prettier": "10.1.8",

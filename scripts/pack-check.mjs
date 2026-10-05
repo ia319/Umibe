@@ -17,6 +17,10 @@ import {
   modelConsumerRuntime,
   modelConsumerTypes,
 } from './pack-model-fixtures.mjs';
+import {
+  codexConsumerRuntime,
+  codexConsumerTypes,
+} from './pack-codex-fixtures.mjs';
 
 const repositoryRoot = fileURLToPath(new URL('../', import.meta.url));
 const packageRoot = join(repositoryRoot, 'packages/core');
@@ -82,7 +86,11 @@ function checkPackManifest(value, requiredFiles) {
   });
   assert.equal(new Set(paths).size, paths.length, 'duplicate archive path');
   for (const path of paths) {
-    assert.match(path, /^(?:package\.json|dist\/.+\.(?:js|d\.ts))$/);
+    assert.ok(
+      /^(?:package\.json|dist\/.+\.(?:js|d\.ts))$/.test(path) ||
+        (path === 'README.md' && requiredFiles.includes(path)),
+      `unexpected archive entry: ${path}`,
+    );
     assert.doesNotMatch(
       path,
       /(^|\/)(?:tests?|__tests__|fixtures)(\/|$)|\.(?:test(?:-d)?|spec)\./,
@@ -254,7 +262,7 @@ import { z } from 'zod';
 assert.equal(createSdkPlanner, createPlanner);
 assert.equal(createSdkSelector, createSelector);
 assert.equal(new ModelRequestError('invalid_request').code, 'invalid_request');
-for (const provider of ['@umibe/provider-openai', '@umibe/provider-cloudflare', 'openai'])
+for (const provider of ['@umibe/provider-openai', '@umibe/provider-cloudflare', '@umibe/provider-codex', 'openai'])
   await assert.rejects(import(provider), { code: 'ERR_MODULE_NOT_FOUND' });
 assert.equal(createSelector({ model: { kind: 'choice', identity: { provider: 'custom', model: 'choice' }, maxOptions: 255, choose() { throw new Error('Construction must not call a model'); } } }).capacity, 254);
 
@@ -632,7 +640,11 @@ revision.revisions.push(goalRevision);
     stdio: 'inherit',
     timeout: 30_000,
   });
-  for (const provider of /** @type {const} */ (['openai', 'cloudflare'])) {
+  for (const provider of /** @type {const} */ ([
+    'openai',
+    'cloudflare',
+    'codex',
+  ])) {
     const providerPacked = /** @type {unknown} */ (
       JSON.parse(
         runPnpm([
@@ -647,7 +659,10 @@ revision.revisions.push(goalRevision);
     );
     const providerTarball = resolve(
       temporaryRoot,
-      checkPackManifest(providerPacked, []),
+      checkPackManifest(
+        providerPacked,
+        provider === 'codex' ? ['README.md'] : [],
+      ),
     );
     assert.equal(dirname(providerTarball), temporaryRoot);
     assert.ok(
@@ -658,12 +673,16 @@ revision.revisions.push(goalRevision);
     installConsumer(providerRoot, [tarball, providerTarball], {
       '@umibe/core': `file:${tarball.replaceAll('\\', '/')}`,
     });
-    writeFileSync(join(providerRoot, 'consumer.mjs'), modelConsumerRuntime, {
-      encoding: 'utf8',
-    });
+    writeFileSync(
+      join(providerRoot, 'consumer.mjs'),
+      provider === 'codex' ? codexConsumerRuntime : modelConsumerRuntime,
+      {
+        encoding: 'utf8',
+      },
+    );
     writeFileSync(
       join(providerRoot, 'consumer.mts'),
-      modelConsumerTypes[provider],
+      provider === 'codex' ? codexConsumerTypes : modelConsumerTypes[provider],
       { encoding: 'utf8' },
     );
     writeFileSync(
@@ -695,7 +714,7 @@ revision.revisions.push(goalRevision);
     });
   }
   console.log(
-    'Archive contents, independent provider HTTP, ESM imports, runtime behavior, and types passed.',
+    'Archive contents, independent provider behavior, ESM imports, and types passed.',
   );
 } finally {
   assert.equal(dirname(realpathSync(temporaryRoot)), temporaryParent);
