@@ -10,6 +10,7 @@ import {
   captureModelIdentity,
   captureModelResponse,
   captureModelChoice,
+  captureModelIssue,
 } from '#internal/model/validation';
 import { captureControl, invokeControlled } from '#internal/candidate/control';
 import { ContractError } from '#internal/errors';
@@ -227,8 +228,9 @@ export async function invokeModel<T>(
     const response: {
       metadata: ModelResponseMetadata | null;
       choice: ModelChoiceMetadata | null;
+      reportIssues: Partial<Record<'response' | 'choice', ModelResponseIssue>>;
       open: boolean;
-    } = { metadata: null, choice: null, open: true };
+    } = { metadata: null, choice: null, reportIssues: {}, open: true };
     const startedAt = Date.now();
     const result = await invokeControlled(control, (attemptControl) => {
       dispatchCommit = session.commit(
@@ -255,7 +257,11 @@ export async function invokeModel<T>(
               return;
             try {
               response.metadata = captureModelResponse(metadata);
-            } catch {
+            } catch (error) {
+              response.reportIssues.response ??= captureModelIssue(
+                'protocol',
+                error,
+              );
               throw new ModelRequestError('invalid_response');
             }
           },
@@ -269,7 +275,11 @@ export async function invokeModel<T>(
               return;
             try {
               response.choice = captureModelChoice(metadata);
-            } catch {
+            } catch (error) {
+              response.reportIssues.choice ??= captureModelIssue(
+                'protocol',
+                error,
+              );
               throw new ModelRequestError('invalid_response');
             }
           },
@@ -343,6 +353,14 @@ export async function invokeModel<T>(
             ...details,
             usage,
             ...(issue === null ? {} : { issue: { ...issue } }),
+            ...(Object.keys(response.reportIssues).length === 0
+              ? {}
+              : {
+                  reportIssues: parseJsonValue(
+                    response.reportIssues,
+                    validation.stage,
+                  ),
+                }),
             ...(response.choice === null
               ? {}
               : { choice: parseJsonValue(response.choice, validation.stage) }),

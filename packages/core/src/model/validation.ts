@@ -2,6 +2,7 @@ import type {
   ModelIdentity,
   ModelResponseMetadata,
   ModelChoiceMetadata,
+  ModelResponseIssue,
 } from './metadata.js';
 import type { JsonValue } from '#internal/contracts/json';
 import { ContractError } from '#internal/errors';
@@ -17,6 +18,27 @@ const context = {
   code: 'INVALID_RUN_CONTROL',
   stage: 'model_metadata',
 } as const;
+
+/** Capture bounded contract diagnostics without rejected values or exception messages. */
+export function captureModelIssue(
+  phase: ModelResponseIssue['phase'],
+  error: unknown,
+): ModelResponseIssue {
+  return Object.freeze({
+    phase,
+    path:
+      error instanceof ContractError &&
+      error.path.length <= 256 &&
+      /^(?:\/[A-Za-z0-9_-]+)*$/.test(error.path)
+        ? error.path
+        : '',
+    reason:
+      error instanceof ContractError &&
+      /^[a-z][a-z0-9_]{0,63}$/.test(error.reason)
+        ? error.reason
+        : 'invalid_output',
+  });
+}
 
 export function captureModelIdentity(input: ModelIdentity): ModelIdentity {
   const value = requireObject(

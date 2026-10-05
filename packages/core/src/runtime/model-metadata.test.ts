@@ -44,6 +44,148 @@ async function closeSession(session: RunSession): Promise<void> {
   await session.close();
 }
 
+test.each([false, true])(
+  'records the first caught error per report channel without failing the attempt (corrected: %s)',
+  async (corrected) => {
+    const store = new MemoryRunStore();
+    const session = await RunSession.create(store, generationInput(), vi.fn());
+    await session.transition({ kind: 'start' });
+    const result = await invokeModel(
+      session,
+      basis,
+      callControl(),
+      (control) => {
+        expect(() =>
+          control.reportModelResponse!({
+            model: 'rejected-response',
+            requestId: 'must-not-persist',
+            usage: { ...metadata.usage, inputTokens: -1 },
+          }),
+        ).toThrow(ModelRequestError);
+        expect(() =>
+          control.reportModelChoice!({
+            ...choice,
+            candidateSetId: 'rejected-choice',
+            confidence: 2,
+          }),
+        ).toThrow(ModelRequestError);
+        expect(() =>
+          control.reportModelResponse!({ ...metadata, model: '' }),
+        ).toThrow(ModelRequestError);
+        expect(() =>
+          control.reportModelChoice!({ ...choice, optionId: 'foreign' }),
+        ).toThrow(ModelRequestError);
+        if (corrected) {
+          control.reportModelResponse!(metadata);
+          control.reportModelChoice!(choice);
+        }
+        return Promise.resolve({ value: 'usable-result', usage: null });
+      },
+    );
+    expect(result).toEqual({
+      outcome: 'returned',
+      value: 'usable-result',
+      usage: corrected ? metadata.usage : null,
+    });
+    const records = (await store.readRecords('run', null, 100)).records;
+    expect(records.at(-1)).toMatchObject({
+      data: {
+        type: 'model_finished',
+        reasonCode: 'returned',
+        details: {
+          response: corrected ? metadata : null,
+          usage: corrected ? metadata.usage : null,
+          reportIssues: {
+            response: {
+              phase: 'protocol',
+              path: '/usage/inputTokens',
+              reason: 'expected_integer',
+            },
+            choice: {
+              phase: 'protocol',
+              path: '/confidence',
+              reason: 'invalid_probability',
+            },
+          },
+        },
+      },
+    });
+    if (corrected)
+      expect(records.at(-1)).toHaveProperty('data.details.choice', choice);
+    else expect(records.at(-1)).not.toHaveProperty('data.details.choice');
+    expect(records.at(-1)).not.toHaveProperty('data.details.issue');
+    for (const rejected of [
+      'rejected-response',
+      'rejected-choice',
+      'must-not-persist',
+    ])
+      expect(JSON.stringify(records)).not.toContain(rejected);
+    expect(session.state.modelAttempts).toBe(1);
+    await closeSession(session);
+  },
+);
+
+test.each(['unsafe/key', 'x'.repeat(257)])(
+  'bounds report diagnostics and excludes rejected values for field %s',
+  async (field) => {
+    const store = new MemoryRunStore();
+    const session = await RunSession.create(store, generationInput(), vi.fn());
+    await session.transition({ kind: 'start' });
+    await invokeModel(session, basis, callControl(), (control) => {
+      const report = { ...metadata, [field]: 'must-not-persist' };
+      expect(() => control.reportModelResponse!(report)).toThrow(
+        ModelRequestError,
+      );
+      return Promise.resolve({ value: 'ok', usage: null });
+    });
+    const records = (await store.readRecords('run', null, 100)).records;
+    expect(records.at(-1)).toHaveProperty('data.details.reportIssues', {
+      response: { phase: 'protocol', path: '', reason: 'unknown_field' },
+    });
+    expect(JSON.stringify(records)).not.toContain('must-not-persist');
+    expect(JSON.stringify(records)).not.toContain(field);
+    await closeSession(session);
+  },
+);
+
+test.each(['cancelled', 'invalidated', 'deadlineExceeded'] as const)(
+  'ignores the first invalid report received after %s',
+  async (outcome) => {
+    vi.useFakeTimers();
+    const store = new MemoryRunStore();
+    const session = await RunSession.create(store, generationInput(), vi.fn(), {
+      modelTimeoutMs: 10,
+      modelRetries: 0,
+    });
+    await session.transition({ kind: 'start' });
+    let report!: NonNullable<CallControl['reportModelResponse']>;
+    let reportChoice!: NonNullable<CallControl['reportModelChoice']>;
+    const pending = invokeModel(session, basis, callControl(), (control) => {
+      report = control.reportModelResponse!;
+      reportChoice = control.reportModelChoice!;
+      return new Promise<never>(() => {});
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    if (outcome === 'cancelled')
+      await session.transition({
+        kind: 'cancel',
+        cause: { eventId: 'stop', reasonCode: 'user_stop' },
+      });
+    else if (outcome === 'invalidated')
+      await session.replaceDecision({ ...generationInput(), decisionEpoch: 4 });
+    else await vi.advanceTimersByTimeAsync(10);
+    expect(() => report({ ...metadata, model: '' })).not.toThrow();
+    expect(() => reportChoice({ ...choice, confidence: 2 })).not.toThrow();
+    await vi.advanceTimersByTimeAsync(10);
+    await pending;
+    const record = (await store.readRecords('run', null, 100)).records.at(-1);
+    expect(record).toHaveProperty('data.details.response', null);
+    expect(record).not.toHaveProperty('data.details.choice');
+    expect(record).not.toHaveProperty('data.details.reportIssues');
+    await closeSession(session);
+  },
+);
+
 test.each([
   'returned',
   'refused',
@@ -78,9 +220,11 @@ test.each([
             lateChoice(choiceReport);
             choiceReport.options[0]!.probability = 0;
             lateChoice({ ...choice, optionId: 'none' });
+            lateChoice({ ...choice, confidence: 2 });
             report.model = 'mutated';
             report.usage.inputTokens = 999;
             late({ model: 'duplicate', requestId: null, usage: null });
+            late({ ...metadata, model: '' });
             if (outcome !== 'returned') throw new ModelRequestError(outcome);
             return Promise.resolve({ value: 'decoded', usage: null });
           },
@@ -109,8 +253,11 @@ test.each([
         },
       },
     });
+    expect(before.at(-1)).not.toHaveProperty('data.details.reportIssues');
     late({ model: 'late', requestId: null, usage: null });
     lateChoice({ ...choice, candidateSetId: 'late' });
+    late({ ...metadata, model: '' });
+    lateChoice({ ...choice, confidence: 2 });
     expect((await store.readRecords('run', null, 100)).records).toEqual(before);
     await closeSession(session);
   },
@@ -131,6 +278,12 @@ test('gives every retry a separate channel and leaves an unreported response unk
       if (attempt === 1) {
         first = control.reportModelResponse!;
         firstChoice = control.reportModelChoice!;
+        expect(() => first({ ...metadata, model: '' })).toThrow(
+          ModelRequestError,
+        );
+        expect(() => firstChoice({ ...choice, confidence: 2 })).toThrow(
+          ModelRequestError,
+        );
         first(metadata);
         firstChoice(choice);
         return Promise.reject(new ModelRequestError('unavailable'));
@@ -141,6 +294,8 @@ test('gives every retry a separate channel and leaves an unreported response unk
         usage: { inputTokens: 99, outputTokens: 0, totalTokens: 99 },
       });
       firstChoice({ ...choice, candidateSetId: 'old-retry' });
+      first({ ...metadata, model: '' });
+      firstChoice({ ...choice, confidence: 2 });
       control.reportModelChoice!({ ...choice, candidateSetId: 'retry-two' });
       return Promise.resolve({ value: 'ok', usage: null });
     },
@@ -163,6 +318,18 @@ test('gives every retry a separate channel and leaves an unreported response unk
           response: metadata,
           usage: metadata.usage,
           choice,
+          reportIssues: {
+            response: {
+              phase: 'protocol',
+              path: '/model',
+              reason: 'expected_nonempty_string',
+            },
+            choice: {
+              phase: 'protocol',
+              path: '/confidence',
+              reason: 'invalid_probability',
+            },
+          },
         },
       },
     },
@@ -177,6 +344,7 @@ test('gives every retry a separate channel and leaves an unreported response unk
       },
     },
   ]);
+  expect(finished[1]).not.toHaveProperty('data.details.reportIssues');
   await closeSession(session);
 });
 
@@ -236,6 +404,11 @@ test('isolates metadata from concurrent runs using the same model identity', asy
   const results = await Promise.all(
     sessions.map((session, index) =>
       invokeModel(session, basis, callControl(), (control) => {
+        expect(() => {
+          if (index === 0)
+            control.reportModelResponse!({ ...metadata, model: '' });
+          else control.reportModelChoice!({ ...choice, confidence: 2 });
+        }).toThrow(ModelRequestError);
         control.reportModelResponse!({
           ...metadata,
           requestId: `response-${index}`,
@@ -260,9 +433,30 @@ test('isolates metadata from concurrent runs using the same model identity', asy
         details: {
           response: { requestId: `response-${index}` },
           choice: { candidateSetId: `set-${index}` },
+          reportIssues:
+            index === 0
+              ? {
+                  response: {
+                    phase: 'protocol',
+                    path: '/model',
+                    reason: 'expected_nonempty_string',
+                  },
+                }
+              : {
+                  choice: {
+                    phase: 'protocol',
+                    path: '/confidence',
+                    reason: 'invalid_probability',
+                  },
+                },
         },
       },
     });
+    expect(
+      (await store.readRecords('run', null, 100)).records.at(-1),
+    ).not.toHaveProperty(
+      `data.details.reportIssues.${index === 0 ? 'choice' : 'response'}`,
+    );
   }
   await Promise.all(sessions.map(closeSession));
 });
@@ -301,7 +495,13 @@ test.each([
     });
     const records = (await store.readRecords('run', null, 100)).records;
     expect(records.at(-1)).toMatchObject({
-      data: { details: { response: metadata, usage: metadata.usage } },
+      data: {
+        details: {
+          response: metadata,
+          usage: metadata.usage,
+          reportIssues: { choice: { phase: 'protocol' } },
+        },
+      },
     });
     expect(JSON.stringify(records)).not.toContain('must-not-persist');
     await closeSession(session);
@@ -332,7 +532,23 @@ test.each([-1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])(
     });
     expect(
       (await store.readRecords('run', null, 100)).records.at(-1),
-    ).toMatchObject({ data: { details: { response: null, usage: null } } });
+    ).toMatchObject({
+      data: {
+        details: {
+          response: null,
+          usage: null,
+          reportIssues: {
+            response: {
+              phase: 'protocol',
+              path: '/usage/inputTokens',
+              reason: Number.isFinite(tokens)
+                ? 'expected_integer'
+                : 'number_not_finite',
+            },
+          },
+        },
+      },
+    });
     await closeSession(session);
   },
 );

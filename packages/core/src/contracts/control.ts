@@ -11,7 +11,10 @@ export interface CallControl {
   /**
    * Report one response before decoding role output. The core copies and freezes
    * the first valid report; later reports and reports after settlement or abort
-   * are ignored. Invalid active reports throw. Absent outside model accounting.
+   * are ignored. Invalid active reports throw; the first rejection is retained in
+   * model_finished.details.reportIssues.response even if caught. A caught error
+   * permits a later valid report and does not determine the attempt outcome.
+   * Absent outside model accounting.
    * Forward this channel unchanged through role and provider boundaries.
    */
   readonly reportModelResponse?: (metadata: ModelResponseMetadata) => void;
@@ -19,7 +22,10 @@ export interface CallControl {
    * Report the locally decoded choice independently of response usage, which may
    * arrive before decoding fails. The first valid report is copied and frozen;
    * duplicate, settled, invalidated and cancelled reports are ignored. Invalid
-   * active reports throw. Forward unchanged through nested call boundaries.
+   * active reports throw; the first rejection is retained in
+   * model_finished.details.reportIssues.choice even if caught. A caught error
+   * permits a later valid report and does not determine the attempt outcome.
+   * Forward unchanged through nested call boundaries.
    */
   readonly reportModelChoice?: (metadata: ModelChoiceMetadata) => void;
 }

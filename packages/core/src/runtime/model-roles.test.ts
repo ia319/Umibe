@@ -3,7 +3,58 @@ import type { CallControl } from '#internal/contracts/control';
 import type { PlannerRequest } from '#internal/planner/contracts';
 import type { SelectorRequest } from '#internal/selector/contracts';
 import { createAgent } from './agent.js';
+import { ModelRequestError } from './model.js';
 import { proposalBasis, runnerFixture } from './__tests__/runner-fixtures.js';
+
+test('executes a valid selection when its adapter catches a rejected metadata report', async () => {
+  const h = runnerFixture(0, 1);
+  const agent = createAgent({
+    ...h.options,
+    selector: {
+      model: { provider: 'fixture', model: 'selection-model' },
+      select(request: SelectorRequest, control: CallControl) {
+        expect(() =>
+          control.reportModelResponse!({
+            model: 'actual-selection',
+            requestId: null,
+            usage: { inputTokens: -1, outputTokens: null, totalTokens: null },
+          }),
+        ).toThrow(ModelRequestError);
+        return h.select(request, control);
+      },
+    },
+  });
+  const run = await agent.start(h.input);
+  await expect(run.result).resolves.toMatchObject({ status: 'succeeded' });
+  expect(h.execute).toHaveBeenCalledTimes(1);
+  expect((await agent.inspect(run.runId))?.checkpoint.state.modelAttempts).toBe(
+    1,
+  );
+  const finished = (await agent.records(run.runId, null, 1000)).records.filter(
+    (record) =>
+      record.kind === 'coreEvent' && record.data.type === 'model_finished',
+  );
+  expect(finished).toMatchObject([
+    {
+      data: {
+        reasonCode: 'returned',
+        details: {
+          purpose: 'selection',
+          response: null,
+          usage: null,
+          reportIssues: {
+            response: {
+              phase: 'protocol',
+              path: '/usage/inputTokens',
+              reason: 'expected_integer',
+            },
+          },
+        },
+      },
+    },
+  ]);
+  await agent.close();
+});
 
 test('meters declared roles even with empty modelStages and captures identities without losing method receivers', async () => {
   const h = runnerFixture(0, 1);
