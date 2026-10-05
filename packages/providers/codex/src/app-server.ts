@@ -95,7 +95,6 @@ export async function runTurn(
       'app-server',
       '--listen',
       'stdio://',
-      '--strict-config',
       ...overrides.flatMap((value) => ['-c', value]),
     ],
     { cwd: homedir(), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] },
