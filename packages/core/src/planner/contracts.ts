@@ -1,5 +1,31 @@
-import type { JsonValue } from './json.js';
-import type { GoalRef, ObservationRef, PlanRef } from './references.js';
+import type { JsonValue } from '#internal/contracts/json';
+import type {
+  GoalRef,
+  ObservationRef,
+  PlanRef,
+} from '#internal/contracts/references';
+import type { ActionCapability } from '#internal/contracts/action';
+import type { CallControl } from '#internal/contracts/control';
+import type { DecisionContext } from '#internal/contracts/context';
+import type { ChildGoalRecord } from '#internal/contracts/goal';
+import type { ModelIdentity } from '#internal/model/metadata';
+
+export interface PlannerRequest {
+  readonly requestId: string;
+  readonly decisionEpoch: number;
+  readonly context: DecisionContext;
+  readonly capabilities: readonly ActionCapability[];
+  readonly trigger: PlanningTrigger;
+  /** Invalidated descendants retained for explicit revision or reconfirmation. */
+  readonly pendingGoals?: readonly ChildGoalRecord[];
+}
+
+/** The core validates and accepts a proposal; the planner never mutates accepted goals. */
+export interface Planner {
+  /** Declares one model request per attempt and enables automatic Agent metering. */
+  readonly model?: ModelIdentity;
+  plan(request: PlannerRequest, control: CallControl): Promise<PlanProposal>;
+}
 
 export type PlanningTrigger =
   | { readonly kind: 'initial'; readonly assessment: 'notYet' }

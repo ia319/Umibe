@@ -1,10 +1,8 @@
 import { z } from 'zod';
 import { ActionRegistry, defineAction } from '#internal/action/registry';
 import type { ActionDefinition } from '#internal/contracts/action';
-import type {
-  CallControl,
-  CandidateRequest,
-} from '#internal/contracts/adapters';
+import type { CallControl } from '#internal/contracts/control';
+import type { CandidateRequest } from '#internal/contracts/adapters';
 import type { CandidateSet } from '#internal/contracts/candidate';
 import type { CandidateGenerationInput } from '#internal/contracts/candidate-processing';
 import type { JsonValue } from '#internal/contracts/json';

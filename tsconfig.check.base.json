@@ -1,0 +1,18 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "customConditions": ["umibe-source"],
+    "paths": {
+      "@umibe/core": ["./packages/core/src/index.ts"],
+      "@umibe/core/model": ["./packages/core/src/model/index.ts"],
+      "@umibe/core/storage-adapter": ["./packages/core/src/storage/adapter.ts"],
+      "@umibe/provider-cloudflare": [
+        "./packages/providers/cloudflare/src/index.ts"
+      ],
+      "@umibe/provider-openai": ["./packages/providers/openai/src/index.ts"],
+      "@umibe/storage-sqlite": ["./packages/storage-sqlite/src/index.ts"],
+      "umibe": ["./packages/umibe/src/index.ts"]
+    }
+  }
+}

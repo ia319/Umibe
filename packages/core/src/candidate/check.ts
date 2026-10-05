@@ -1,5 +1,5 @@
 import type { ActionCheck } from '#internal/contracts/action';
-import type { CallControl } from '#internal/contracts/adapters';
+import type { CallControl } from '#internal/contracts/control';
 import type {
   Candidate,
   CandidateExclusion,

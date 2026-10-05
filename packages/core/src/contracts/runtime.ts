@@ -12,10 +12,10 @@ import type {
   CandidateFilter,
   CandidateProvider,
   Environment,
-  Planner,
-  Selector,
   Verifier,
 } from './adapters.js';
+import type { Selector } from '#internal/selector/contracts';
+import type { Planner } from '#internal/planner/contracts';
 import type { RootGoalRecord } from './goal.js';
 import type { JsonObject, JsonValue } from './json.js';
 import type { RunCheckpoint, RunRecord, RunSummary } from './record.js';
@@ -77,7 +77,10 @@ export interface AgentOptions<TCriteria extends JsonValue = JsonValue> {
   readonly candidateFilter?: CandidateFilter;
   readonly selectorCapacity?: number;
   readonly limits?: Partial<RuntimeLimits>;
-  /** Mark callbacks backed by model requests; omitted stages run locally without model charges. */
+  /**
+   * Mark custom callbacks backed by model requests. Planner and Selector model
+   * identities always enable their stages, including when this array is empty.
+   */
   readonly modelStages?: readonly ModelStage[];
   readonly onDiagnostic?: (diagnostic: RuntimeDiagnostic) => void;
 }

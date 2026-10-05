@@ -1,4 +1,4 @@
-import type { CallControl } from '#internal/contracts/adapters';
+import type { CallControl } from '#internal/contracts/control';
 import { ContractError } from '#internal/errors';
 import { requireTimestamp } from '#internal/validation/fields';
 
@@ -32,10 +32,36 @@ export function captureControl(input: CallControl): CapturedControl {
     },
     '/control/deadlineAt',
   );
+  if (
+    input.reportModelResponse !== undefined &&
+    typeof input.reportModelResponse !== 'function'
+  )
+    throw new ContractError(
+      'INVALID_CANDIDATE_REQUEST',
+      'candidate_request',
+      '/control/reportModelResponse',
+      'expected_function',
+    );
+  if (
+    input.reportModelChoice !== undefined &&
+    typeof input.reportModelChoice !== 'function'
+  )
+    throw new ContractError(
+      'INVALID_CANDIDATE_REQUEST',
+      'candidate_request',
+      '/control/reportModelChoice',
+      'expected_function',
+    );
   return Object.freeze({
     signal: input.signal,
     deadlineAt,
     deadlineMs: Date.parse(deadlineAt),
+    ...(input.reportModelResponse === undefined
+      ? {}
+      : { reportModelResponse: input.reportModelResponse }),
+    ...(input.reportModelChoice === undefined
+      ? {}
+      : { reportModelChoice: input.reportModelChoice }),
   });
 }
 
@@ -53,6 +79,12 @@ export function invokeControlled<T>(
     const invocationControl = Object.freeze({
       signal: controller.signal,
       deadlineAt: control.deadlineAt,
+      ...(control.reportModelResponse === undefined
+        ? {}
+        : { reportModelResponse: control.reportModelResponse }),
+      ...(control.reportModelChoice === undefined
+        ? {}
+        : { reportModelChoice: control.reportModelChoice }),
     });
     let settled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;

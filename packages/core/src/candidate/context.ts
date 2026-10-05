@@ -1,7 +1,5 @@
-import type {
-  ActionCapability,
-  CandidateRequest,
-} from '#internal/contracts/adapters';
+import type { ActionCapability } from '#internal/contracts/action';
+import type { CandidateRequest } from '#internal/contracts/adapters';
 import type { CandidateGenerationInput } from '#internal/contracts/candidate-processing';
 import type { CandidateSet } from '#internal/contracts/candidate';
 import { ContractError } from '#internal/errors';
@@ -232,7 +230,7 @@ export function captureCandidateRequest(
 /** Provider path labels are opaque; the full sequence must match the derived path. */
 export function validateCandidateBasis(
   set: CandidateSet,
-  request: CandidateRequest,
+  request: CandidateGenerationInput,
 ): void {
   const current = request.context;
   const expected = {

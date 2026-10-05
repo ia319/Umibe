@@ -13,6 +13,10 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { execPath } from 'node:process';
 import { fileURLToPath } from 'node:url';
+import {
+  modelConsumerRuntime,
+  modelConsumerTypes,
+} from './pack-model-fixtures.mjs';
 
 const repositoryRoot = fileURLToPath(new URL('../', import.meta.url));
 const packageRoot = join(repositoryRoot, 'packages/core');
@@ -95,6 +99,66 @@ function checkPackManifest(value, requiredFiles) {
   return value.filename;
 }
 
+/** Install only the declared archives with independent package and metadata caches.
+ * @param {string} root
+ * @param {string[]} archives
+ * @param {Record<string, string>} overrides
+ */
+function installConsumer(root, archives, overrides) {
+  mkdirSync(root);
+  writeFileSync(
+    join(root, 'package.json'),
+    JSON.stringify({
+      name: 'umibe-pack-consumer',
+      private: true,
+      type: 'module',
+    }),
+    { encoding: 'utf8' },
+  );
+  writeFileSync(
+    join(root, 'pnpm-workspace.yaml'),
+    readFileSync(join(repositoryRoot, 'pnpm-workspace.yaml'), 'utf8'),
+    { encoding: 'utf8' },
+  );
+  runPnpm([
+    '--dir',
+    root,
+    'config',
+    'set',
+    '--location=project',
+    '--json',
+    'packages',
+    '[]',
+  ]);
+  runPnpm([
+    '--dir',
+    root,
+    'config',
+    'set',
+    '--location=project',
+    '--json',
+    'overrides',
+    JSON.stringify(overrides),
+  ]);
+  runPnpm([
+    '--dir',
+    root,
+    'config',
+    'set',
+    '--location=project',
+    'cacheDir',
+    join(root, 'cache'),
+  ]);
+  runPnpm([
+    '--dir',
+    root,
+    '--store-dir',
+    join(root, 'store'),
+    'add',
+    ...archives,
+  ]);
+}
+
 const temporaryParent = realpathSync(tmpdir());
 const temporaryRoot = mkdtempSync(join(temporaryParent, 'umibe-pack-check-'));
 try {
@@ -113,7 +177,10 @@ try {
       ]),
     )
   );
-  const tarball = resolve(temporaryRoot, checkPackManifest(packed, []));
+  const tarball = resolve(
+    temporaryRoot,
+    checkPackManifest(packed, ['dist/model/index.js', 'dist/model/index.d.ts']),
+  );
   assert.equal(dirname(tarball), temporaryRoot);
   assert.ok(existsSync(tarball), 'pnpm pack did not create the archive');
 
@@ -160,75 +227,36 @@ try {
 
   // The consumer lives outside the workspace, so package exports and dependencies
   // must resolve from the installed archive rather than source aliases.
-  mkdirSync(consumerRoot);
-  writeFileSync(
-    join(consumerRoot, 'package.json'),
-    JSON.stringify({
-      name: 'umibe-pack-consumer',
-      private: true,
-      type: 'module',
-    }),
-    { encoding: 'utf8' },
-  );
-  writeFileSync(
-    join(consumerRoot, 'pnpm-workspace.yaml'),
-    readFileSync(join(repositoryRoot, 'pnpm-workspace.yaml'), 'utf8'),
-    { encoding: 'utf8' },
-  );
-  runPnpm([
-    '--dir',
+  installConsumer(
     consumerRoot,
-    'config',
-    'set',
-    '--location=project',
-    '--json',
-    'packages',
-    '[]',
-  ]);
-  runPnpm([
-    '--dir',
-    consumerRoot,
-    'config',
-    'set',
-    '--location=project',
-    '--json',
-    'overrides',
-    JSON.stringify({
+    [
+      tarball,
+      sqliteTarball,
+      sdkTarball,
+      `zod@${coreManifest.dependencies.zod}`,
+    ],
+    {
       '@umibe/core': `file:${tarball.replaceAll('\\', '/')}`,
       '@umibe/storage-sqlite': `file:${sqliteTarball.replaceAll('\\', '/')}`,
-    }),
-  ]);
-  runPnpm([
-    '--dir',
-    consumerRoot,
-    'config',
-    'set',
-    '--location=project',
-    'cacheDir',
-    join(temporaryRoot, 'cache'),
-  ]);
-  // A new consumer must resolve and install declared dependencies without the
-  // developer's cached metadata, package files, or previous native builds.
-  runPnpm([
-    '--dir',
-    consumerRoot,
-    '--store-dir',
-    join(temporaryRoot, 'store'),
-    'add',
-    tarball,
-    sqliteTarball,
-    sdkTarball,
-    `zod@${coreManifest.dependencies.zod}`,
-  ]);
+    },
+  );
 
   writeFileSync(
     join(consumerRoot, 'consumer.mjs'),
     `import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { SqliteRunStore } from '@umibe/storage-sqlite';
-import { createAgent as createSdkAgent } from 'umibe';
-import { createAgent, ActionRegistry, defineAction, MemoryRunStore, parseJsonValue, parseGoalGraph, parseObservation, prepareCandidates, checkCandidates, filterCandidates, selectCandidates, recheckCandidate } from '@umibe/core';
+import { createAgent as createSdkAgent, createPlanner as createSdkPlanner, createSelector as createSdkSelector } from 'umibe';
+import { createAgent, createPlanner, createSelector, ActionRegistry, defineAction, MemoryRunStore, parseJsonValue, parseGoalGraph, parseObservation, prepareCandidates, checkCandidates, filterCandidates, selectCandidates, recheckCandidate } from '@umibe/core';
+import { ModelRequestError } from '@umibe/core/model';
 import { z } from 'zod';
+
+assert.equal(createSdkPlanner, createPlanner);
+assert.equal(createSdkSelector, createSelector);
+assert.equal(new ModelRequestError('invalid_request').code, 'invalid_request');
+for (const provider of ['@umibe/provider-openai', '@umibe/provider-cloudflare', 'openai'])
+  await assert.rejects(import(provider), { code: 'ERR_MODULE_NOT_FOUND' });
+assert.equal(createSelector({ model: { kind: 'choice', identity: { provider: 'custom', model: 'choice' }, maxOptions: 255, choose() { throw new Error('Construction must not call a model'); } } }).capacity, 254);
 
 let defaultCalls = 0;
 let checks = 0;
@@ -470,6 +498,17 @@ import { z } from 'zod';
 import { SqliteRunStore, type SqliteInspection } from '@umibe/storage-sqlite';
 import { createAgent as createSdkAgent, type AgentOptions as SdkAgentOptions, type StorageInspection, type RunInspection as SdkRunInspection } from 'umibe';
 import type { RunStore } from '@umibe/core';
+import { createPlanner, createSelector } from '@umibe/core';
+import { createPlanner as createSdkPlanner, createSelector as createSdkSelector } from 'umibe';
+import type { ChoiceModel, StructuredOutputModel } from '@umibe/core/model';
+declare const nativeModel: ChoiceModel;
+declare const structuredModel: StructuredOutputModel;
+createPlanner({ model: structuredModel });
+createSdkPlanner({ model: structuredModel });
+createSelector({ model: nativeModel });
+createSdkSelector({ model: structuredModel });
+// @ts-expect-error Native choice cannot generate plans.
+createPlanner({ model: nativeModel });
 const sqlite = new SqliteRunStore('typed.sqlite');
 const storageContract: RunStore = sqlite;
 const inspection: Promise<SqliteInspection> = sqlite.inspect();
@@ -593,8 +632,70 @@ revision.revisions.push(goalRevision);
     stdio: 'inherit',
     timeout: 30_000,
   });
+  for (const provider of /** @type {const} */ (['openai', 'cloudflare'])) {
+    const providerPacked = /** @type {unknown} */ (
+      JSON.parse(
+        runPnpm([
+          '--dir',
+          join(repositoryRoot, 'packages/providers', provider),
+          'pack',
+          '--json',
+          '--pack-destination',
+          temporaryRoot,
+        ]),
+      )
+    );
+    const providerTarball = resolve(
+      temporaryRoot,
+      checkPackManifest(providerPacked, []),
+    );
+    assert.equal(dirname(providerTarball), temporaryRoot);
+    assert.ok(
+      existsSync(providerTarball),
+      'pnpm pack did not create the provider archive',
+    );
+    const providerRoot = join(temporaryRoot, provider);
+    installConsumer(providerRoot, [tarball, providerTarball], {
+      '@umibe/core': `file:${tarball.replaceAll('\\', '/')}`,
+    });
+    writeFileSync(join(providerRoot, 'consumer.mjs'), modelConsumerRuntime, {
+      encoding: 'utf8',
+    });
+    writeFileSync(
+      join(providerRoot, 'consumer.mts'),
+      modelConsumerTypes[provider],
+      { encoding: 'utf8' },
+    );
+    writeFileSync(
+      join(providerRoot, 'tsconfig.json'),
+      JSON.stringify({
+        compilerOptions: {
+          noEmit: true,
+          strict: true,
+          module: 'NodeNext',
+          moduleResolution: 'NodeNext',
+          target: 'ES2023',
+          types: [],
+        },
+        files: ['consumer.mts'],
+      }),
+      { encoding: 'utf8' },
+    );
+    execFileSync(execPath, ['consumer.mjs', provider], {
+      cwd: providerRoot,
+      encoding: 'utf8',
+      stdio: 'inherit',
+      timeout: 15_000,
+    });
+    execFileSync(execPath, [compilerPath, '-p', 'tsconfig.json'], {
+      cwd: providerRoot,
+      encoding: 'utf8',
+      stdio: 'inherit',
+      timeout: 30_000,
+    });
+  }
   console.log(
-    'Archive contents, ESM import, runtime behavior, and types passed.',
+    'Archive contents, independent provider HTTP, ESM imports, runtime behavior, and types passed.',
   );
 } finally {
   assert.equal(dirname(realpathSync(temporaryRoot)), temporaryParent);

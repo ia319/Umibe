@@ -8,27 +8,30 @@ import type {
   RunHandle,
   ResumeRun,
 } from '#internal/contracts/runtime';
-import type { CallControl, PlannerRequest } from '#internal/contracts/adapters';
+import type { CallControl } from '#internal/contracts/control';
+import type {
+  PlannerRequest,
+  PlanningTrigger,
+} from '#internal/planner/contracts';
 import type { JsonValue } from '#internal/contracts/json';
 import type {
   GoalAssessment,
   GoalGraphSnapshot,
   GoalRecord,
 } from '#internal/contracts/goal';
-import type { PlanningTrigger } from '#internal/contracts/planning';
 import type { ApplicationEvent } from '#internal/contracts/event';
 import { captureControl, invokeControlled } from '#internal/candidate/control';
 import { prepareCandidates } from '#internal/candidate/prepare';
 import { checkCandidates } from '#internal/candidate/check';
 import { filterCandidates } from '#internal/candidate/filter';
-import { selectCandidates } from '#internal/candidate/select';
+import { selectCandidates } from '#internal/selector/select';
 import { canonicalJson } from '#internal/candidate/identity';
 import { ContractError } from '#internal/errors';
 import { requireObject, requireString } from '#internal/validation/fields';
 import { parseJsonValue } from '#internal/validation/json';
 import { parseObservation } from '#internal/validation/observation';
 import { parseGoalGraph } from '#internal/validation/goal';
-import { parsePlanProposal } from '#internal/validation/planning';
+import { parsePlanProposal } from '#internal/planner/validation';
 import { readGoalAssessment } from '#internal/validation/assessment';
 import { parseApplicationEvent } from '#internal/validation/event';
 import { captureDecisionRequest } from '#internal/candidate/context';
@@ -65,6 +68,7 @@ export class RunDriver<TCriteria extends JsonValue> {
   #resumeController: AbortController | null = null;
   #pendingEvents = 0;
   #loopDelay: IntervalHistogram | null = null;
+  readonly #callbacks = new Set<Promise<unknown>>();
 
   constructor(
     readonly session: RunSession,
@@ -416,15 +420,38 @@ export class RunDriver<TCriteria extends JsonValue> {
     };
   }
 
-  private async call<T>(
+  private call<T>(
     stage: CallbackStage,
     input: unknown,
     invoke: (control: CallControl) => Promise<T>,
     requestId: string = randomUUID(),
+    control: CallControl = this.control(stage),
+  ): Promise<T> {
+    const pending = this.invokeCallback(
+      stage,
+      input,
+      invoke,
+      requestId,
+      control,
+    );
+    this.#callbacks.add(pending);
+    // Pipeline timeouts may return before callback accounting has committed.
+    // Track the bounded gateway, never the uncooperative underlying adapter.
+    void pending
+      .finally(() => this.#callbacks.delete(pending))
+      .catch(() => undefined);
+    return pending;
+  }
+
+  private async invokeCallback<T>(
+    stage: CallbackStage,
+    input: unknown,
+    invoke: (control: CallControl) => Promise<T>,
+    requestId: string,
+    control: CallControl,
   ): Promise<T> {
     const session = this.session;
     const epoch = session.state.decision.decisionEpoch;
-    const control = this.control(stage);
     const startedAt = Date.now();
     await session.commit(session.state, [
       session.event('callback_started', stage, {
@@ -444,16 +471,34 @@ export class RunDriver<TCriteria extends JsonValue> {
     const model =
       modelStage !== null &&
       this.options.modelStages?.includes(modelStage) === true;
+    const modelIdentity =
+      stage === 'planning'
+        ? this.options.planner.model
+        : stage === 'selection'
+          ? this.options.selector.model
+          : undefined;
     const result = model
       ? await invokeModel(
           session,
-          { requestId, decisionEpoch: epoch, purpose: modelStage },
+          {
+            requestId,
+            decisionEpoch: epoch,
+            purpose: modelStage,
+            ...(modelIdentity === undefined ? {} : { model: modelIdentity }),
+          },
           control,
           async (control) => ({ value: await invoke(control), usage: null }),
         )
       : await invokeControlled(captureControl(control), invoke);
     if (session.failure !== null) throw new CallStopped();
     const accepted = session.canDispatch(epoch);
+    const reasonCode =
+      session.state.control.stopCause?.reasonCode ??
+      (result.outcome === 'failed' && 'reasonCode' in result
+        ? result.reasonCode
+        : model && result.outcome === 'deadlineExceeded'
+          ? 'deadline_exceeded'
+          : `${stage}_${result.outcome}`);
     const delay = this.#loopDelay;
     const sampled = delay !== null && delay.count > 0;
     await session.commit(session.state, [
@@ -461,6 +506,10 @@ export class RunDriver<TCriteria extends JsonValue> {
         requestId,
         decisionEpoch: epoch,
         outcome: result.outcome,
+        ...(result.outcome !== 'returned' ? { reasonCode } : {}),
+        ...('issue' in result && result.issue !== undefined
+          ? { issue: { ...result.issue } }
+          : {}),
         currentAtReceipt: accepted,
         durationMs: Math.max(0, Date.now() - startedAt),
         eventLoopDelay: {
@@ -475,7 +524,7 @@ export class RunDriver<TCriteria extends JsonValue> {
     ]);
     if (!session.canDispatch(epoch)) throw new CallStopped();
     if (result.outcome !== 'returned') {
-      await this.block(`${stage}_${result.outcome}`);
+      await this.block(reasonCode);
       throw new CallStopped();
     }
     return result.value;
@@ -995,17 +1044,19 @@ export class RunDriver<TCriteria extends JsonValue> {
           input,
           this.registry,
           {
-            generate: (request) =>
+            generate: (request, control) =>
               this.call(
                 'candidates',
                 request,
                 (control) =>
                   this.options.candidateProvider.generate(request, control),
                 request.requestId,
+                control,
               ),
           },
           this.control('candidates'),
         );
+        await Promise.allSettled(this.#callbacks);
         if (!session.canDispatch(input.decisionEpoch)) {
           if (this.#refresh) continue;
           break;
@@ -1036,16 +1087,18 @@ export class RunDriver<TCriteria extends JsonValue> {
           this.options.candidateFilter === undefined
             ? undefined
             : {
-                filter: (request) =>
+                filter: (request, control) =>
                   this.call(
                     'filtering',
                     request,
                     (control) =>
                       this.options.candidateFilter!.filter(request, control),
                     request.requestId,
+                    control,
                   ),
               },
         );
+        await Promise.allSettled(this.#callbacks);
         if (!session.canDispatch(input.decisionEpoch)) {
           if (this.#refresh) continue;
           break;
@@ -1089,17 +1142,22 @@ export class RunDriver<TCriteria extends JsonValue> {
         const selected = await selectCandidates(
           filtered.filtered,
           {
-            select: (request) =>
+            ...(this.options.selector.capacity === undefined
+              ? {}
+              : { capacity: this.options.selector.capacity }),
+            select: (request, control) =>
               this.call(
                 'selection',
                 request,
                 (control) => this.options.selector.select(request, control),
                 request.requestId,
+                control,
               ),
           },
           this.control('selection'),
           this.options.selectorCapacity,
         );
+        await Promise.allSettled(this.#callbacks);
         if (!session.canDispatch(input.decisionEpoch)) {
           if (this.#refresh) continue;
           break;
@@ -1188,6 +1246,7 @@ export class RunDriver<TCriteria extends JsonValue> {
           error instanceof ContractError ? error.reason : 'callback_failed',
         );
     } finally {
+      await Promise.allSettled(this.#callbacks);
       if (session.failure === null) await this.settleStop();
     }
   }

@@ -1,9 +1,13 @@
 import type { CandidateSet } from '#internal/contracts/candidate';
-import type { SelectionResult } from '#internal/contracts/selection';
+import type { SelectionResult } from '#internal/selector/contracts';
 import { ContractError } from '#internal/errors';
-import { requireKeys, requireObject, requireString } from './fields.js';
-import type { FieldContext } from './fields.js';
-import { parseJsonValue } from './json.js';
+import {
+  requireKeys,
+  requireObject,
+  requireString,
+} from '#internal/validation/fields';
+import type { FieldContext } from '#internal/validation/fields';
+import { parseJsonValue } from '#internal/validation/json';
 
 const context: FieldContext = {
   code: 'INVALID_SELECTION',

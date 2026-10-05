@@ -1,13 +1,11 @@
 import { z } from 'zod';
 import type {
+  ActionCapability,
   ActionDefinition,
   PreparedAction,
   Reconciliation,
 } from '#internal/contracts/action';
-import type {
-  ActionCapability,
-  CallControl,
-} from '#internal/contracts/adapters';
+import type { CallControl } from '#internal/contracts/control';
 import type { ActionIntent } from '#internal/contracts/record';
 import type { JsonObject } from '#internal/contracts/json';
 import { ContractError } from '#internal/errors';

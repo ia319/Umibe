@@ -1,5 +1,17 @@
-import type { CallControl } from '#internal/contracts/adapters';
+import type { CallControl } from '#internal/contracts/control';
 import type { JsonObject } from '#internal/contracts/json';
+import type {
+  ModelIdentity,
+  ModelResponseMetadata,
+  ModelResponseIssue,
+  ModelChoiceMetadata,
+} from '#internal/model/metadata';
+import {
+  captureModelIdentity,
+  captureModelResponse,
+  captureModelChoice,
+  captureModelIssue,
+} from '#internal/model/validation';
 import { captureControl, invokeControlled } from '#internal/candidate/control';
 import { ContractError } from '#internal/errors';
 import {
@@ -13,20 +25,53 @@ import type { RunSession } from './session.js';
 export type ModelFailureCode =
   | 'rate_limited'
   | 'unavailable'
+  | 'deadline_exceeded'
   | 'unauthorized'
+  | 'invalid_request'
+  | 'input_limit'
+  | 'refused'
+  | 'output_truncated'
   | 'invalid_response'
   | 'request_failed';
 
-/** Adapters classify failures explicitly; raw exception text never controls retries. */
+/**
+ * Classify one model attempt without exposing provider error text.
+ * Only rate limits, unavailable services and timeouts may be retried. An SDK
+ * timeout uses deadline_exceeded; it never extends the caller's total deadline.
+ * retryAfterMs is a minimum delay in milliseconds, not a new timeout.
+ * Invalid delay or diagnostic fields throw RangeError; diagnostics contain no response values.
+ */
 export class ModelRequestError extends Error {
+  readonly issue: ModelResponseIssue | null;
   constructor(
     readonly code: ModelFailureCode,
     readonly retryAfterMs = 0,
+    issue?: ModelResponseIssue,
   ) {
     super(code);
     if (!Number.isSafeInteger(retryAfterMs) || retryAfterMs < 0)
       throw new RangeError('retryAfterMs must be a nonnegative safe integer');
     this.name = 'ModelRequestError';
+    if (
+      issue !== undefined &&
+      (!['protocol', 'planning', 'selection'].includes(issue.phase) ||
+        typeof issue.path !== 'string' ||
+        issue.path.length > 256 ||
+        !/^(?:\/[A-Za-z0-9_-]+)*$/.test(issue.path) ||
+        typeof issue.reason !== 'string' ||
+        !/^[a-z][a-z0-9_]{0,63}$/.test(issue.reason))
+    )
+      throw new RangeError(
+        'issue must contain a safe phase, path and reason code',
+      );
+    this.issue =
+      issue === undefined
+        ? null
+        : Object.freeze({
+            phase: issue.phase,
+            path: issue.path,
+            reason: issue.reason,
+          });
   }
 }
 
@@ -34,6 +79,7 @@ export interface ModelRequestBasis {
   readonly requestId: string;
   readonly decisionEpoch: number;
   readonly purpose: 'planning' | 'selection' | 'candidates' | 'verification';
+  readonly model?: ModelIdentity;
 }
 
 export type ModelCallResult<T> =
@@ -44,7 +90,8 @@ export type ModelCallResult<T> =
     }
   | {
       readonly outcome: 'failed';
-      readonly reasonCode: ModelFailureCode | 'deadline_exceeded';
+      readonly reasonCode: ModelFailureCode;
+      readonly issue?: ModelResponseIssue;
     }
   | {
       readonly outcome:
@@ -92,13 +139,16 @@ export async function invokeModel<T>(
       'invalid_purpose',
     );
   const captured = captureControl(controlInput);
+  const model =
+    basis.model === undefined ? null : captureModelIdentity(basis.model);
   const signal = AbortSignal.any([captured.signal, session.signal]);
   const limits = session.state.limits;
   const interruption = ():
     'cancelled' | 'invalidated' | 'deadlineExceeded' | null => {
-    if (signal.aborted) return 'cancelled';
+    if (session.signal.aborted) return 'cancelled';
     if (!session.canDispatch(request.decisionEpoch)) return 'invalidated';
     if (Date.now() >= captured.deadlineMs) return 'deadlineExceeded';
+    if (signal.aborted) return 'cancelled';
     return null;
   };
 
@@ -136,14 +186,18 @@ export async function invokeModel<T>(
       }
       return { outcome: 'budgetExceeded' };
     }
-    const details = { ...request, attempt };
+    const details = {
+      ...request,
+      attempt,
+      model: model === null ? null : { ...model },
+    };
     await session.commit(
       {
         ...session.state,
         modelAttempts: session.state.modelAttempts + 1,
         pendingModels: [
           ...session.state.pendingModels,
-          { ...details, phase: 'reserved' },
+          { ...request, attempt, phase: 'reserved' },
         ],
       },
       [session.event('model_reserved', 'request_reserved', details)],
@@ -171,6 +225,12 @@ export async function invokeModel<T>(
       ).toISOString(),
     });
     let dispatchCommit: Promise<void> | undefined;
+    const response: {
+      metadata: ModelResponseMetadata | null;
+      choice: ModelChoiceMetadata | null;
+      reportIssues: Partial<Record<'response' | 'choice', ModelResponseIssue>>;
+      open: boolean;
+    } = { metadata: null, choice: null, reportIssues: {}, open: true };
     const startedAt = Date.now();
     const result = await invokeControlled(control, (attemptControl) => {
       dispatchCommit = session.commit(
@@ -184,8 +244,50 @@ export async function invokeModel<T>(
         },
         [session.event('model_dispatched', 'request_dispatched', details)],
       );
-      return invoke(attemptControl, attempt);
+      return invoke(
+        Object.freeze({
+          ...attemptControl,
+          reportModelResponse: (metadata: ModelResponseMetadata) => {
+            if (
+              !response.open ||
+              response.metadata !== null ||
+              attemptControl.signal.aborted ||
+              interruption() !== null
+            )
+              return;
+            try {
+              response.metadata = captureModelResponse(metadata);
+            } catch (error) {
+              response.reportIssues.response ??= captureModelIssue(
+                'protocol',
+                error,
+              );
+              throw new ModelRequestError('invalid_response');
+            }
+          },
+          reportModelChoice: (metadata: ModelChoiceMetadata) => {
+            if (
+              !response.open ||
+              response.choice !== null ||
+              attemptControl.signal.aborted ||
+              interruption() !== null
+            )
+              return;
+            try {
+              response.choice = captureModelChoice(metadata);
+            } catch (error) {
+              response.reportIssues.choice ??= captureModelIssue(
+                'protocol',
+                error,
+              );
+              throw new ModelRequestError('invalid_response');
+            }
+          },
+        }),
+        attempt,
+      );
     });
+    response.open = false;
     await dispatchCommit;
     if (dispatchCommit === undefined) {
       await session.commit(
@@ -203,9 +305,14 @@ export async function invokeModel<T>(
       return { outcome: signal.aborted ? 'cancelled' : 'deadlineExceeded' };
     }
     const invalidated = interruption();
-    let usage: JsonObject | null = null;
-    let failure: ModelFailureCode | 'deadline_exceeded' | null = null;
-    if (result.outcome === 'returned') {
+    const issue =
+      result.outcome === 'failed' && result.error instanceof ModelRequestError
+        ? result.error.issue
+        : null;
+    let usage: JsonObject | null =
+      response.metadata?.usage == null ? null : { ...response.metadata.usage };
+    let failure: ModelFailureCode | null = null;
+    if (result.outcome === 'returned' && response.metadata === null) {
       try {
         usage =
           result.value.usage === null
@@ -236,10 +343,31 @@ export async function invokeModel<T>(
       [
         session.event(
           'model_finished',
-          invalidated ?? failure ?? result.outcome,
+          (invalidated === null
+            ? null
+            : session.state.control.stopCause?.reasonCode) ??
+            invalidated ??
+            failure ??
+            result.outcome,
           {
             ...details,
             usage,
+            ...(issue === null ? {} : { issue: { ...issue } }),
+            ...(Object.keys(response.reportIssues).length === 0
+              ? {}
+              : {
+                  reportIssues: parseJsonValue(
+                    response.reportIssues,
+                    validation.stage,
+                  ),
+                }),
+            ...(response.choice === null
+              ? {}
+              : { choice: parseJsonValue(response.choice, validation.stage) }),
+            response:
+              response.metadata === null
+                ? null
+                : parseJsonValue(response.metadata, validation.stage),
             durationMs: Math.max(0, Date.now() - startedAt),
           },
         ),
@@ -257,7 +385,11 @@ export async function invokeModel<T>(
       reasonCode === 'unavailable' ||
       reasonCode === 'deadline_exceeded';
     if (!retryable || attempt > limits.modelRetries)
-      return { outcome: 'failed', reasonCode };
+      return {
+        outcome: 'failed',
+        reasonCode,
+        ...(issue === null ? {} : { issue }),
+      };
 
     const retryAfterMs =
       result.outcome === 'failed' && result.error instanceof ModelRequestError
@@ -280,7 +412,10 @@ export async function invokeModel<T>(
       }),
       () => new Promise<never>(() => {}),
     );
-    if (waited.outcome === 'cancelled') return { outcome: 'cancelled' };
+    // An outer role boundary aborts its child signal at the same deadline.
+    // Resolve the original control cause before interpreting that abort as cancellation.
+    if (waited.outcome === 'cancelled')
+      return { outcome: interruption() ?? 'cancelled' };
   }
   throw new Error('Unreachable model attempt limit');
 }

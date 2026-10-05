@@ -1,6 +1,6 @@
 import { afterEach, expect, test, vi } from 'vitest';
-import type { PlannerRequest } from '#internal/contracts/adapters';
-import type { PlanProposal } from '#internal/contracts/planning';
+import type { PlannerRequest, PlanProposal } from '#internal/planner/contracts';
+
 import { createAgent } from './agent.js';
 import {
   applicationEvent,

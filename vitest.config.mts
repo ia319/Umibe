@@ -5,6 +5,12 @@ export default defineConfig({
   resolve: {
     alias: [
       {
+        find: /^@umibe\/core\/model$/,
+        replacement: fileURLToPath(
+          new URL('./packages/core/src/model/index.ts', import.meta.url),
+        ),
+      },
+      {
         find: '@umibe/core/storage-adapter',
         replacement: fileURLToPath(
           new URL('./packages/core/src/storage/adapter.ts', import.meta.url),
@@ -26,6 +32,10 @@ export default defineConfig({
   },
   test: {
     environment: 'node',
-    include: ['packages/*/src/**/*.test.ts'],
+    include: [
+      'scripts/**/*.test.mjs',
+      'packages/*/src/**/*.test.ts',
+      'packages/providers/*/src/**/*.test.ts',
+    ],
   },
 });

@@ -1,8 +1,8 @@
 import { expect, test } from 'vitest';
-import type { PlannerRequest } from '../contracts/adapters.js';
-import { parseGoalGraph } from './goal.js';
-import { parseObservation } from './observation.js';
-import { parsePlanProposal } from './planning.js';
+import type { PlannerRequest } from '#internal/planner/contracts';
+import { parseGoalGraph } from '#internal/validation/goal';
+import { parseObservation } from '#internal/validation/observation';
+import { parsePlanProposal } from './validation.js';
 
 function request(): PlannerRequest {
   const rootGoalRef = { id: 'root', version: 2 };

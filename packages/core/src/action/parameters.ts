@@ -1,9 +1,9 @@
 import type { z } from 'zod';
 import type {
+  ActionCapability,
   FixedActionCall,
   ParameterChange,
 } from '#internal/contracts/action';
-import type { ActionCapability } from '#internal/contracts/adapters';
 import type { ParameterSource } from '#internal/contracts/candidate';
 import type { JsonObject, JsonValue } from '#internal/contracts/json';
 import { ContractError } from '#internal/errors';

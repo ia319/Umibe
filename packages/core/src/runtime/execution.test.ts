@@ -9,7 +9,7 @@ import type { Environment } from '#internal/contracts/adapters';
 import type { ActionResult } from '#internal/contracts/record';
 import type { GoalAssessment } from '#internal/contracts/goal';
 import { filterCandidates } from '#internal/candidate/filter';
-import { selectCandidates } from '#internal/candidate/select';
+import { selectCandidates } from '#internal/selector/select';
 import {
   callControl,
   checkedBatch,

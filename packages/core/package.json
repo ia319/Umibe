@@ -11,6 +11,10 @@
     }
   },
   "exports": {
+    "./model": {
+      "types": "./dist/model/index.d.ts",
+      "import": "./dist/model/index.js"
+    },
     "./storage-adapter": {
       "types": "./dist/storage/adapter.d.ts",
       "import": "./dist/storage/adapter.js"

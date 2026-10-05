@@ -1,10 +1,11 @@
-import type { PlannerRequest } from '#internal/contracts/adapters';
 import type {
+  PlannerRequest,
   PlanProposal,
   GoalRevision,
   ProposedGoal,
   ProposedParent,
-} from '#internal/contracts/planning';
+} from '#internal/planner/contracts';
+
 import type { JsonValue } from '#internal/contracts/json';
 import type { GoalRef, PlanRef } from '#internal/contracts/references';
 import { ContractError } from '#internal/errors';
@@ -13,10 +14,14 @@ import {
   requireKeys,
   requireObject,
   requireString,
-} from './fields.js';
-import type { FieldContext } from './fields.js';
-import { isJsonArray, parseJsonValue } from './json.js';
-import { readGoalRef, readObservationRef, readPlanRef } from './references.js';
+} from '#internal/validation/fields';
+import type { FieldContext } from '#internal/validation/fields';
+import { isJsonArray, parseJsonValue } from '#internal/validation/json';
+import {
+  readGoalRef,
+  readObservationRef,
+  readPlanRef,
+} from '#internal/validation/references';
 import { reviseGoalGraph } from '#internal/goal/revisions';
 
 const context: FieldContext = {
@@ -170,27 +175,8 @@ function validateNewGoals(
   }
 }
 
-/** Reject a stale or structurally invalid planner answer before any graph mutation.
- * @param input - Untrusted planner output.
- * @param request - The exact request that produced the answer.
- * @param limits - Application-owned admission limits.
- * @returns A detached, frozen proposal; it is still not an accepted plan.
- * @throws ContractError when the basis, relation or limits are invalid.
- */
-export function parsePlanProposal(
-  input: unknown,
-  request: PlannerRequest,
-  limits: ProposalLimits,
-): PlanProposal {
-  if (
-    !Number.isSafeInteger(limits.maxNewGoals) ||
-    limits.maxNewGoals < 1 ||
-    !Number.isSafeInteger(limits.maxTotalGoals) ||
-    limits.maxTotalGoals < 1 ||
-    !Number.isSafeInteger(limits.maxDepth) ||
-    limits.maxDepth < 1
-  )
-    fail('/limits', 'invalid_limits');
+/** Decode fields only; request identity, graph relations and admission limits remain unchecked. */
+export function parsePlanProposalShape(input: unknown): PlanProposal {
   const object = requireObject(
     parseJsonValue(input, context.stage),
     context,
@@ -212,29 +198,27 @@ export function parsePlanProposal(
     (outcome === 'blocked' || outcome === 'claimComplete')
   )
     fail('/goalOrder', 'unexpected_field');
-  if (outcome === 'continue' || outcome === 'switch') {
+  if (outcome === 'continue' || outcome === 'switch')
     requireKeys(object, [...common, 'nextGoalRef', 'guidance'], context, '');
-  } else if (outcome === 'decompose') {
+  else if (outcome === 'decompose')
     requireKeys(
       object,
       [...common, 'goals', 'nextTempId', 'guidance'],
       context,
       '',
     );
-  } else if (outcome === 'revise' || outcome === 'reconfirm') {
+  else if (outcome === 'revise' || outcome === 'reconfirm')
     requireKeys(
       object,
       [...common, 'revisions', 'nextGoalRef', 'guidance'],
       context,
       '',
     );
-  } else if (outcome === 'blocked') {
+  else if (outcome === 'blocked')
     requireKeys(object, [...common, 'reason'], context, '');
-  } else if (outcome === 'claimComplete') {
+  else if (outcome === 'claimComplete')
     requireKeys(object, [...common, 'goalRef'], context, '');
-  } else {
-    fail('/outcome', 'invalid_outcome');
-  }
+  else fail('/outcome', 'invalid_outcome');
   const basis = {
     requestId: requireString(object.requestId, context, '/requestId'),
     decisionEpoch: requireInteger(
@@ -259,48 +243,18 @@ export function parsePlanProposal(
       '/observationRef',
     ),
   };
-  const graph = request.context.graph;
-  if (
-    basis.requestId !== request.requestId ||
-    basis.decisionEpoch !== request.decisionEpoch ||
-    !sameGoalRef(basis.rootGoalRef, graph.rootGoalRef) ||
-    !sameGoalRef(basis.currentGoalRef, graph.currentGoalRef) ||
-    !samePlanRef(basis.planRef, request.context.planRef) ||
-    basis.observationRef.id !== request.context.observation.id ||
-    basis.observationRef.revision !== request.context.observation.revision
-  )
-    fail('', 'stale_request_basis');
-  if (outcome === 'continue' || outcome === 'switch') {
-    const nextGoalRef = readGoalRef(
-      object.nextGoalRef,
-      context,
-      '/nextGoalRef',
-    );
-    acceptedGoal(nextGoalRef, request, '/nextGoalRef');
-    if (
-      outcome === 'continue' &&
-      !sameGoalRef(nextGoalRef, graph.currentGoalRef)
-    ) {
-      fail('/nextGoalRef', 'continue_changed_goal');
-    }
+  if (outcome === 'continue' || outcome === 'switch')
     return Object.freeze({
       ...basis,
       outcome,
-      nextGoalRef,
+      nextGoalRef: readGoalRef(object.nextGoalRef, context, '/nextGoalRef'),
       guidance: requireString(object.guidance, context, '/guidance'),
       ...(object.goalOrder === undefined
         ? {}
-        : { goalOrder: readGoalOrder(object.goalOrder, request) }),
+        : { goalOrder: readGoalOrder(object.goalOrder) }),
     });
-  }
   if (outcome === 'decompose') {
     if (!isJsonArray(object.goals)) fail('/goals', 'expected_array');
-    const goals = Object.freeze(object.goals.map(readGoal));
-    validateNewGoals(goals, request, limits);
-    const nextTempId = requireString(object.nextTempId, context, '/nextTempId');
-    if (!goals.some((goal) => goal.tempId === nextTempId)) {
-      fail('/nextTempId', 'missing_next_goal');
-    }
     let goalOrder: readonly string[] | undefined;
     if (object.goalOrder !== undefined) {
       if (!isJsonArray(object.goalOrder)) fail('/goalOrder', 'expected_array');
@@ -309,17 +263,12 @@ export function parsePlanProposal(
           requireString(value, context, `/goalOrder/${index}`),
         ),
       );
-      if (
-        new Set(goalOrder).size !== goalOrder.length ||
-        goalOrder.some((id) => !goals.some((goal) => goal.tempId === id))
-      )
-        fail('/goalOrder', 'invalid_goal_order');
     }
     return Object.freeze({
       ...basis,
       outcome,
-      goals,
-      nextTempId,
+      goals: Object.freeze(object.goals.map(readGoal)),
+      nextTempId: requireString(object.nextTempId, context, '/nextTempId'),
       guidance: requireString(object.guidance, context, '/guidance'),
       ...(goalOrder === undefined ? {} : { goalOrder }),
     });
@@ -354,22 +303,98 @@ export function parsePlanProposal(
         });
       }),
     );
-    const nextGoalRef = readGoalRef(
-      object.nextGoalRef,
-      context,
-      '/nextGoalRef',
-    );
+    return Object.freeze({
+      ...basis,
+      outcome,
+      revisions,
+      nextGoalRef: readGoalRef(object.nextGoalRef, context, '/nextGoalRef'),
+      guidance: requireString(object.guidance, context, '/guidance'),
+      ...(object.goalOrder === undefined
+        ? {}
+        : { goalOrder: readGoalOrder(object.goalOrder) }),
+    });
+  }
+  if (outcome === 'blocked')
+    return Object.freeze({
+      ...basis,
+      outcome,
+      reason: requireString(object.reason, context, '/reason'),
+    });
+  return Object.freeze({
+    ...basis,
+    outcome: 'claimComplete',
+    goalRef: readGoalRef(object.goalRef, context, '/goalRef'),
+  });
+}
+
+/** Reject a stale or structurally invalid planner answer before any graph mutation.
+ * @param input - Untrusted planner output.
+ * @param request - The exact request that produced the answer.
+ * @param limits - Application-owned admission limits.
+ * @returns A detached, frozen proposal; it is still not an accepted plan.
+ * @throws ContractError when the basis, relation or limits are invalid.
+ */
+export function parsePlanProposal(
+  input: unknown,
+  request: PlannerRequest,
+  limits: ProposalLimits,
+): PlanProposal {
+  if (
+    !Number.isSafeInteger(limits.maxNewGoals) ||
+    limits.maxNewGoals < 1 ||
+    !Number.isSafeInteger(limits.maxTotalGoals) ||
+    limits.maxTotalGoals < 1 ||
+    !Number.isSafeInteger(limits.maxDepth) ||
+    limits.maxDepth < 1
+  )
+    fail('/limits', 'invalid_limits');
+  const proposal = parsePlanProposalShape(input);
+  const graph = request.context.graph;
+  if (
+    proposal.requestId !== request.requestId ||
+    proposal.decisionEpoch !== request.decisionEpoch ||
+    !sameGoalRef(proposal.rootGoalRef, graph.rootGoalRef) ||
+    !sameGoalRef(proposal.currentGoalRef, graph.currentGoalRef) ||
+    !samePlanRef(proposal.planRef, request.context.planRef) ||
+    proposal.observationRef.id !== request.context.observation.id ||
+    proposal.observationRef.revision !== request.context.observation.revision
+  )
+    fail('', 'stale_request_basis');
+  if (proposal.outcome === 'continue' || proposal.outcome === 'switch') {
+    acceptedGoal(proposal.nextGoalRef, request, '/nextGoalRef');
+    if (
+      proposal.outcome === 'continue' &&
+      !sameGoalRef(proposal.nextGoalRef, graph.currentGoalRef)
+    )
+      fail('/nextGoalRef', 'continue_changed_goal');
+    if (proposal.goalOrder !== undefined)
+      validateGoalOrder(proposal.goalOrder, request);
+  } else if (proposal.outcome === 'decompose') {
+    validateNewGoals(proposal.goals, request, limits);
+    if (!proposal.goals.some((goal) => goal.tempId === proposal.nextTempId))
+      fail('/nextTempId', 'missing_next_goal');
+    const order = proposal.goalOrder;
+    if (
+      order !== undefined &&
+      (new Set(order).size !== order.length ||
+        order.some((id) => !proposal.goals.some((goal) => goal.tempId === id)))
+    )
+      fail('/goalOrder', 'invalid_goal_order');
+  } else if (
+    proposal.outcome === 'revise' ||
+    proposal.outcome === 'reconfirm'
+  ) {
     const revised = reviseGoalGraph(
       graph,
       request.pendingGoals ?? [],
-      revisions,
-      nextGoalRef,
+      proposal.revisions,
+      proposal.nextGoalRef,
       {
         id: request.context.planRef?.id ?? 'proposed',
         version: (request.context.planRef?.version ?? 0) + 1,
         rootGoalVersion: graph.rootGoalRef.version,
       },
-      outcome,
+      proposal.outcome,
     );
     for (const goal of revised.graph.goals) {
       let cursor = goal;
@@ -381,44 +406,33 @@ export function parsePlanProposal(
       }
       if (depth > limits.maxDepth) fail('/revisions', 'depth_limit');
     }
-    return Object.freeze({
-      ...basis,
-      outcome,
-      revisions,
-      nextGoalRef,
-      guidance: requireString(object.guidance, context, '/guidance'),
-      ...(object.goalOrder === undefined
-        ? {}
-        : { goalOrder: readGoalOrder(object.goalOrder, request, revisions) }),
-    });
-  }
-  if (outcome === 'blocked') {
-    return Object.freeze({
-      ...basis,
-      outcome,
-      reason: requireString(object.reason, context, '/reason'),
-    });
-  }
-  const goalRef = readGoalRef(object.goalRef, context, '/goalRef');
-  if (!graph.goalPath.some((ref) => sameGoalRef(ref, goalRef))) {
+    if (proposal.goalOrder !== undefined)
+      validateGoalOrder(proposal.goalOrder, request, proposal.revisions);
+  } else if (
+    proposal.outcome === 'claimComplete' &&
+    !graph.goalPath.some((ref) => sameGoalRef(ref, proposal.goalRef))
+  )
     fail('/goalRef', 'completion_outside_current_path');
-  }
-  return Object.freeze({ ...basis, outcome: 'claimComplete', goalRef });
+  return proposal;
 }
 
-function readGoalOrder(
-  value: JsonValue,
+function readGoalOrder(value: JsonValue): readonly GoalRef[] {
+  if (!isJsonArray(value)) fail('/goalOrder', 'expected_array');
+  return Object.freeze(
+    value.map((item, index) =>
+      readGoalRef(item, context, `/goalOrder/${index}`),
+    ),
+  );
+}
+
+function validateGoalOrder(
+  refs: readonly GoalRef[],
   request: PlannerRequest,
   revisions: readonly GoalRevision[] = [],
-): readonly GoalRef[] {
-  if (!isJsonArray(value)) fail('/goalOrder', 'expected_array');
-  const refs = value.map((item, index) =>
-    readGoalRef(item, context, `/goalOrder/${index}`),
-  );
+): void {
   if (new Set(refs.map((ref) => ref.id)).size !== refs.length)
     fail('/goalOrder', 'duplicate_goal_ref');
   for (const ref of refs)
     if (!revisions.some((revision) => sameGoalRef(revision.goalRef, ref)))
       acceptedGoal(ref, request, '/goalOrder');
-  return Object.freeze(refs);
 }

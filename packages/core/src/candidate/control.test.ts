@@ -1,10 +1,8 @@
 import { getEventListeners } from 'node:events';
 import { afterEach, expect, test, vi } from 'vitest';
 import { z } from 'zod';
-import type {
-  CallControl,
-  CandidateRequest,
-} from '#internal/contracts/adapters';
+import type { CallControl } from '#internal/contracts/control';
+import type { CandidateRequest } from '#internal/contracts/adapters';
 import { captureControl, invokeControlled } from './control.js';
 import { prepareCandidates } from './prepare.js';
 import {

@@ -5,9 +5,9 @@ import type {
   GoalGraphSnapshot,
   GoalRecord,
 } from '#internal/contracts/goal';
-import type { DecisionContext } from '#internal/contracts/adapters';
+import type { DecisionContext } from '#internal/contracts/context';
 import type { JsonValue } from '#internal/contracts/json';
-import type { PlanProposal } from '#internal/contracts/planning';
+import type { PlanProposal } from '#internal/planner/contracts';
 import type { GoalRef, PlanRef } from '#internal/contracts/references';
 import { reviseGoalGraph } from '#internal/goal/revisions';
 import { parseGoalGraph } from '#internal/validation/goal';

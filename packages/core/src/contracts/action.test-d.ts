@@ -1,14 +1,11 @@
 import { z } from 'zod';
 import { assertType } from 'vitest';
 import type { ActionDefinition } from './action.js';
-import type {
-  CallControl,
-  DecisionContext,
-  VerificationRequest,
-  Verifier,
-} from './adapters.js';
+import type { CallControl } from '#internal/contracts/control';
+import type { DecisionContext } from '#internal/contracts/context';
+import type { VerificationRequest, Verifier } from './adapters.js';
 import type { GoalAssessment } from './goal.js';
-import type { SelectionResult } from './selection.js';
+import type { SelectionResult } from '#internal/selector/contracts';
 
 const moveSchema = z.strictObject({
   target: z.string(),

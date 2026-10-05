@@ -28,29 +28,47 @@ export type {
   GoalRevision,
   ProposedGoal,
   ProposedParent,
-} from '#internal/contracts/planning';
-export type { ProposalLimits } from '#internal/validation/planning';
-export { parsePlanProposal } from '#internal/validation/planning';
+  Planner,
+  PlannerRequest,
+} from '#internal/planner/contracts';
+export type { ProposalLimits } from '#internal/planner/validation';
+export { parsePlanProposal } from '#internal/planner/validation';
+export { createPlanner } from '#internal/planner/model';
+export type { PlannerOptions } from '#internal/planner/model';
 export { describeActionParameters } from '#internal/action/describe';
 export { ActionRegistry, defineAction } from '#internal/action/registry';
 export type { RegisteredAction } from '#internal/action/registry';
+export type { CallControl } from '#internal/contracts/control';
 export type {
-  ActionCapability,
-  CallControl,
+  ModelIdentity,
+  ModelResponseMetadata,
+  ModelUsage,
+  ModelResponseIssue,
+  ModelChoiceMetadata,
+} from '#internal/model/metadata';
+export type {
   CandidateProvider,
   CandidateRequest,
   CriteriaSupport,
-  DecisionContext,
-  RuntimeContext,
   Environment,
-  Planner,
-  PlannerRequest,
-  Selector,
-  SelectorRequest,
   VerificationRequest,
   Verifier,
+  CandidateFilter,
+  CandidateFilterRequest,
 } from '#internal/contracts/adapters';
 export type {
+  Selector,
+  SelectorRequest,
+  SelectionResult,
+} from '#internal/selector/contracts';
+export { createSelector } from '#internal/selector/model';
+export type { SelectorOptions } from '#internal/selector/model';
+export type {
+  DecisionContext,
+  RuntimeContext,
+} from '#internal/contracts/context';
+export type {
+  ActionCapability,
   ActionCheck,
   ActionDefinition,
   ActionExecutionContext,
@@ -72,21 +90,16 @@ export type {
   CandidateSet,
   ParameterSource,
 } from '#internal/contracts/candidate';
-export type { SelectionResult } from '#internal/contracts/selection';
 export { parseCandidateSet } from '#internal/validation/candidate';
 export { prepareCandidates } from '#internal/candidate/prepare';
 export { checkCandidates } from '#internal/candidate/check';
 export { filterCandidates } from '#internal/candidate/filter';
-export { selectCandidates } from '#internal/candidate/select';
+export { selectCandidates } from '#internal/selector/select';
 export { recheckCandidate } from '#internal/candidate/recheck';
 export type {
   CandidateFilterEntry,
   CandidateFilterResult,
 } from '#internal/contracts/candidate-filter';
-export type {
-  CandidateFilter,
-  CandidateFilterRequest,
-} from '#internal/contracts/adapters';
 export type {
   CandidateFilteringReport,
   CandidateFilteringResult,
@@ -108,7 +121,7 @@ export type {
   CheckedCandidates,
   PreparedCandidates,
 } from '#internal/contracts/candidate-processing';
-export { parseSelection } from '#internal/validation/selection';
+export { parseSelection } from '#internal/selector/validation';
 export type { ApplicationEvent } from '#internal/contracts/event';
 export { parseApplicationEvent } from '#internal/validation/event';
 export type {

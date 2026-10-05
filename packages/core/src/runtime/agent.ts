@@ -19,6 +19,7 @@ import { parseGoalGraph } from '#internal/validation/goal';
 import { parseObservation } from '#internal/validation/observation';
 import { parseApplicationEvent } from '#internal/validation/event';
 import { captureLimits } from './limits.js';
+import { captureModelIdentity } from '#internal/model/validation';
 import { RunSession } from './session.js';
 import { RunDriver } from './runner.js';
 
@@ -70,10 +71,44 @@ export function createAgent<TCriteria extends JsonValue>(
       '/modelStages',
       'invalid_model_stage',
     );
+  const plannerModel =
+    input.planner.model === undefined
+      ? undefined
+      : captureModelIdentity(input.planner.model);
+  const selectorModel =
+    input.selector.model === undefined
+      ? undefined
+      : captureModelIdentity(input.selector.model);
   const options = Object.freeze({
     ...input,
     limits,
-    modelStages: Object.freeze([...new Set(input.modelStages ?? [])].sort()),
+    // Capture identity once while preserving class adapter method receivers.
+    planner:
+      plannerModel === undefined
+        ? input.planner
+        : Object.freeze({
+            model: plannerModel,
+            plan: input.planner.plan.bind(input.planner),
+          }),
+    selector:
+      selectorModel === undefined
+        ? input.selector
+        : Object.freeze({
+            model: selectorModel,
+            ...(input.selector.capacity === undefined
+              ? {}
+              : { capacity: input.selector.capacity }),
+            select: input.selector.select.bind(input.selector),
+          }),
+    modelStages: Object.freeze(
+      [
+        ...new Set([
+          ...(input.modelStages ?? []),
+          ...(plannerModel === undefined ? [] : ['planning' as const]),
+          ...(selectorModel === undefined ? [] : ['selection' as const]),
+        ]),
+      ].sort(),
+    ),
   });
   const identity = Object.freeze({
     applicationId:

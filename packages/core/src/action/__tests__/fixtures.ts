@@ -1,8 +1,6 @@
 import type { ActionExecutionContext } from '#internal/contracts/action';
-import type {
-  CallControl,
-  DecisionContext,
-} from '#internal/contracts/adapters';
+import type { CallControl } from '#internal/contracts/control';
+import type { DecisionContext } from '#internal/contracts/context';
 import type { ActionResult } from '#internal/contracts/record';
 import { parseGoalGraph } from '#internal/validation/goal';
 import { parseObservation } from '#internal/validation/observation';
