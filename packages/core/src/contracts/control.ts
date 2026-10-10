@@ -1,4 +1,5 @@
 import type {
+  ModelIdentity,
   ModelResponseMetadata,
   ModelChoiceMetadata,
 } from '#internal/model/metadata';
@@ -8,6 +9,16 @@ export interface CallControl {
   readonly signal: AbortSignal;
   /** Absolute UTC deadline, including the time spent waiting for an adapter. */
   readonly deadlineAt: string;
+  /**
+   * Meter one provider request, including decoding and metadata reports, within
+   * the current role deadline. Calls must be awaited serially and cannot outlive
+   * the role. Agent supplies this only for roles that own per-request accounting;
+   * direct callers own their budgets. Rejects on cancellation or model failure.
+   */
+  readonly requestModel?: <T>(
+    model: ModelIdentity,
+    invoke: (control: CallControl) => Promise<T>,
+  ) => Promise<T>;
   /**
    * Report one response before decoding role output. The core copies and freezes
    * the first valid report; later reports and reports after settlement or abort

@@ -33,6 +33,16 @@ export function captureControl(input: CallControl): CapturedControl {
     '/control/deadlineAt',
   );
   if (
+    input.requestModel !== undefined &&
+    typeof input.requestModel !== 'function'
+  )
+    throw new ContractError(
+      'INVALID_CANDIDATE_REQUEST',
+      'candidate_request',
+      '/control/requestModel',
+      'expected_function',
+    );
+  if (
     input.reportModelResponse !== undefined &&
     typeof input.reportModelResponse !== 'function'
   )
@@ -56,6 +66,9 @@ export function captureControl(input: CallControl): CapturedControl {
     signal: input.signal,
     deadlineAt,
     deadlineMs: Date.parse(deadlineAt),
+    ...(input.requestModel === undefined
+      ? {}
+      : { requestModel: input.requestModel }),
     ...(input.reportModelResponse === undefined
       ? {}
       : { reportModelResponse: input.reportModelResponse }),
@@ -79,6 +92,9 @@ export function invokeControlled<T>(
     const invocationControl = Object.freeze({
       signal: controller.signal,
       deadlineAt: control.deadlineAt,
+      ...(control.requestModel === undefined
+        ? {}
+        : { requestModel: control.requestModel }),
       ...(control.reportModelResponse === undefined
         ? {}
         : { reportModelResponse: control.reportModelResponse }),
