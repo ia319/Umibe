@@ -1124,7 +1124,12 @@ export class RunDriver<TCriteria extends JsonValue> {
         }
         if (session.state.control.status !== 'running') break;
         const planning = session.state.scheduling.planning;
-        if (planning !== null) await this.plan(planning);
+        if (planning !== null) {
+          await this.plan(planning);
+          // Planning can outlast observation-only events without invalidating
+          // the goal graph. Ground the next decision in the current environment.
+          if (session.state.control.status === 'running') await this.observe();
+        }
         if (
           this.#refresh ||
           session.state.control.status !== 'running' ||
