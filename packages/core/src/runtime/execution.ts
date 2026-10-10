@@ -150,6 +150,7 @@ export class ActionCoordinator {
     let attempt: Attempt | null = null;
     try {
       if (
+        session.state.limits.maxActionAttempts !== null &&
         session.state.actionAttempts >= session.state.limits.maxActionAttempts
       ) {
         await this.block('action_budget_exhausted');

@@ -1,21 +1,22 @@
 import { ContractError } from '#internal/errors';
 
+/** Set a max-prefixed limit to null to disable that count limit; usage is still recorded. */
 export interface RuntimeLimits {
-  readonly maxModelAttempts: number;
+  readonly maxModelAttempts: number | null;
   readonly modelTimeoutMs: number;
   readonly modelRetries: number;
   readonly callbackTimeoutMs: number;
   readonly verificationTimeoutMs: number;
-  readonly maxActionAttempts: number;
+  readonly maxActionAttempts: number | null;
   readonly actionTimeoutMs: number;
   readonly stopGraceMs: number;
   readonly actionRetries: number;
   /** Root depth is zero. */
-  readonly maxGoalDepth: number;
+  readonly maxGoalDepth: number | null;
   /** Cumulative new child IDs, including closed and invalidated goals. */
-  readonly maxSubgoals: number;
-  readonly maxNoProgress: number;
-  readonly maxRecoveryAttempts: number;
+  readonly maxSubgoals: number | null;
+  readonly maxNoProgress: number | null;
+  readonly maxRecoveryAttempts: number | null;
 }
 
 export function captureLimits(input: Partial<RuntimeLimits>): RuntimeLimits {
@@ -44,7 +45,9 @@ export function captureLimits(input: Partial<RuntimeLimits>): RuntimeLimits {
       );
   const limits = { ...defaults, ...input };
   for (const [key, value] of Object.entries(limits)) {
+    if (value === null && key.startsWith('max')) continue;
     if (
+      typeof value !== 'number' ||
       !Number.isSafeInteger(value) ||
       (key.endsWith('Ms') && value > 2_147_483_647) ||
       value < (key.endsWith('Retries') || key.startsWith('max') ? 0 : 1) ||

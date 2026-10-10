@@ -9,6 +9,7 @@ import type {
   ResumeRun,
 } from '#internal/contracts/runtime';
 import type { CallControl } from '#internal/contracts/control';
+import type { ModelIdentity } from '#internal/model/metadata';
 import type {
   PlannerRequest,
   PlanningTrigger,
@@ -36,7 +37,7 @@ import { readGoalAssessment } from '#internal/validation/assessment';
 import { parseApplicationEvent } from '#internal/validation/event';
 import { captureDecisionRequest } from '#internal/candidate/context';
 import { ActionCoordinator } from './execution.js';
-import { invokeModel } from './model.js';
+import { invokeModel, ModelRequestError } from './model.js';
 import type { RunSession } from './session.js';
 import type { RunRecordDraft } from '#internal/storage/contracts';
 import { selectionBasis } from './scheduling.js';
@@ -468,15 +469,20 @@ export class RunDriver<TCriteria extends JsonValue> {
       stage === 'verification'
         ? stage
         : null;
+    const perRequest =
+      stage === 'selection' &&
+      this.options.selector.modelAccounting === 'perRequest';
     const model =
       modelStage !== null &&
-      this.options.modelStages?.includes(modelStage) === true;
+      this.options.modelStages?.includes(modelStage) === true &&
+      !perRequest;
     const modelIdentity =
       stage === 'planning'
         ? this.options.planner.model
         : stage === 'selection'
           ? this.options.selector.model
           : undefined;
+    const modelRequests = new Set<Promise<unknown>>();
     const result = model
       ? await invokeModel(
           session,
@@ -489,16 +495,90 @@ export class RunDriver<TCriteria extends JsonValue> {
           control,
           async (control) => ({ value: await invoke(control), usage: null }),
         )
-      : await invokeControlled(captureControl(control), invoke);
+      : await invokeControlled(captureControl(control), async (roleControl) => {
+          if (!perRequest || modelStage === null) return invoke(roleControl);
+          let open = true;
+          let pending: Promise<unknown> | null = null;
+          let sequence = 0;
+          try {
+            return await invoke({
+              ...roleControl,
+              requestModel: async <R>(
+                identity: ModelIdentity,
+                request: (child: CallControl) => Promise<R>,
+              ): Promise<R> => {
+                if (
+                  !open ||
+                  roleControl.signal.aborted ||
+                  !session.canDispatch(epoch)
+                )
+                  throw new DOMException(
+                    'Model request cancelled',
+                    'AbortError',
+                  );
+                if (pending !== null)
+                  throw new ContractError(
+                    'INVALID_RUN_CONTROL',
+                    'model_request',
+                    '/control/requestModel',
+                    'concurrent_model_request',
+                  );
+                const child = invokeModel(
+                  session,
+                  {
+                    requestId: `${requestId}/model-${++sequence}`,
+                    decisionEpoch: epoch,
+                    purpose: modelStage,
+                    model: identity,
+                  },
+                  roleControl,
+                  async (childControl) => ({
+                    value: await request(childControl),
+                    usage: null,
+                  }),
+                );
+                pending = child;
+                modelRequests.add(child);
+                try {
+                  const answer = await child;
+                  if (answer.outcome === 'returned') return answer.value;
+                  if (answer.outcome === 'failed')
+                    throw new ModelRequestError(
+                      answer.reasonCode,
+                      0,
+                      answer.issue,
+                    );
+                  if (answer.outcome === 'deadlineExceeded')
+                    throw new ModelRequestError('deadline_exceeded');
+                  throw new DOMException(
+                    'Model request cancelled',
+                    'AbortError',
+                  );
+                } finally {
+                  pending = null;
+                  modelRequests.delete(child);
+                }
+              },
+            });
+          } finally {
+            open = false;
+          }
+        });
+    // The enclosing timeout can settle before a child finishes persisting its usage.
+    await Promise.allSettled(modelRequests);
     if (session.failure !== null) throw new CallStopped();
     const accepted = session.canDispatch(epoch);
     const reasonCode =
       session.state.control.stopCause?.reasonCode ??
       (result.outcome === 'failed' && 'reasonCode' in result
         ? result.reasonCode
-        : model && result.outcome === 'deadlineExceeded'
-          ? 'deadline_exceeded'
-          : `${stage}_${result.outcome}`);
+        : result.outcome === 'failed' &&
+            'error' in result &&
+            result.error instanceof ModelRequestError
+          ? result.error.code
+          : model && result.outcome === 'deadlineExceeded'
+            ? 'deadline_exceeded'
+            : `${stage}_${result.outcome}`);
     const delay = this.#loopDelay;
     const sampled = delay !== null && delay.count > 0;
     await session.commit(session.state, [
@@ -837,8 +917,9 @@ export class RunDriver<TCriteria extends JsonValue> {
       attempt,
       failed,
     );
+    const { maxNoProgress, maxRecoveryAttempts } = session.state.limits;
     const blocked = progress.find(
-      (item) => item.noProgress >= session.state.limits.maxNoProgress,
+      (item) => maxNoProgress !== null && item.noProgress >= maxNoProgress,
     );
     const recovery = [...session.state.decision.context.graph.goalPath]
       .reverse()
@@ -846,11 +927,13 @@ export class RunDriver<TCriteria extends JsonValue> {
       .find(
         (item) =>
           !item.recoveryPlanned &&
-          item.recoveryAttempts >= session.state.limits.maxRecoveryAttempts,
+          maxRecoveryAttempts !== null &&
+          item.recoveryAttempts >= maxRecoveryAttempts,
       );
     if (recovery && !blocked)
       progress = progress.map((item) =>
-        item.recoveryAttempts >= session.state.limits.maxRecoveryAttempts
+        maxRecoveryAttempts !== null &&
+        item.recoveryAttempts >= maxRecoveryAttempts
           ? { ...item, recoveryPlanned: true }
           : item,
       );
@@ -909,9 +992,18 @@ export class RunDriver<TCriteria extends JsonValue> {
       ),
       request,
       {
-        maxDepth: session.state.limits.maxGoalDepth + 1,
-        maxNewGoals: Math.max(1, session.state.limits.maxSubgoals),
-        maxTotalGoals: session.state.limits.maxSubgoals + 1,
+        maxDepth:
+          session.state.limits.maxGoalDepth === null
+            ? null
+            : session.state.limits.maxGoalDepth + 1,
+        maxNewGoals:
+          session.state.limits.maxSubgoals === null
+            ? null
+            : Math.max(1, session.state.limits.maxSubgoals),
+        maxTotalGoals:
+          session.state.limits.maxSubgoals === null
+            ? null
+            : session.state.limits.maxSubgoals + 1,
       },
     );
     if (proposal.outcome === 'blocked') {
@@ -1032,7 +1124,12 @@ export class RunDriver<TCriteria extends JsonValue> {
         }
         if (session.state.control.status !== 'running') break;
         const planning = session.state.scheduling.planning;
-        if (planning !== null) await this.plan(planning);
+        if (planning !== null) {
+          await this.plan(planning);
+          // Planning can outlast observation-only events without invalidating
+          // the goal graph. Ground the next decision in the current environment.
+          if (session.state.control.status === 'running') await this.observe();
+        }
         if (
           this.#refresh ||
           session.state.control.status !== 'running' ||
@@ -1185,20 +1282,23 @@ export class RunDriver<TCriteria extends JsonValue> {
           if (
             (selected.outcome === 'no_candidates' ||
               selected.outcome === 'abstain') &&
-            session.state.scheduling.recoveryAttempts === 0
+            (session.state.limits.maxRecoveryAttempts === null ||
+              session.state.scheduling.recoveryAttempts === 0)
           ) {
             await session.commit(
               {
                 ...session.state,
                 scheduling: {
                   ...session.state.scheduling,
-                  recoveryAttempts: 1,
+                  recoveryAttempts:
+                    session.state.scheduling.recoveryAttempts + 1,
                   selectionCause: 'remedy',
                   planning: {
-                    kind: 'recoveryExhausted',
+                    kind: 'selectionUnavailable',
                     goalRef:
                       session.state.decision.context.graph.currentGoalRef,
-                    failures: 1,
+                    reason: selected.outcome,
+                    attempts: session.state.scheduling.recoveryAttempts + 1,
                   },
                 },
               },

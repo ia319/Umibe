@@ -29,11 +29,12 @@ const context: FieldContext = {
   stage: 'plan_proposal',
 };
 
+/** A null value disables only that admission limit; graph invariants still apply. */
 export interface ProposalLimits {
-  readonly maxNewGoals: number;
-  readonly maxTotalGoals: number;
+  readonly maxNewGoals: number | null;
+  readonly maxTotalGoals: number | null;
   /** The root is depth one. */
-  readonly maxDepth: number;
+  readonly maxDepth: number | null;
 }
 
 function fail(path: string, reason: string): never {
@@ -114,12 +115,15 @@ function validateNewGoals(
   request: PlannerRequest,
   limits: ProposalLimits,
 ): void {
-  if (goals.length === 0 || goals.length > limits.maxNewGoals) {
+  if (
+    goals.length === 0 ||
+    (limits.maxNewGoals !== null && goals.length > limits.maxNewGoals)
+  ) {
     fail('/goals', 'new_goal_limit');
   }
   if (
-    request.context.graph.goals.length + goals.length >
-    limits.maxTotalGoals
+    limits.maxTotalGoals !== null &&
+    request.context.graph.goals.length + goals.length > limits.maxTotalGoals
   ) {
     fail('/goals', 'total_goal_limit');
   }
@@ -138,7 +142,7 @@ function validateNewGoals(
       if (visited.has(cursor.tempId)) fail(`/goals/${index}/parent`, 'cycle');
       visited.add(cursor.tempId);
       depth += 1;
-      if (depth >= limits.maxDepth)
+      if (limits.maxDepth !== null && depth >= limits.maxDepth)
         fail(`/goals/${index}/parent`, 'depth_limit');
       if (cursor.parent.kind === 'proposed') {
         const parent = proposed.get(cursor.parent.tempId);
@@ -168,7 +172,7 @@ function validateNewGoals(
         ancestor = next;
         acceptedDepth += 1;
       }
-      if (acceptedDepth + depth > limits.maxDepth)
+      if (limits.maxDepth !== null && acceptedDepth + depth > limits.maxDepth)
         fail(`/goals/${index}/parent`, 'depth_limit');
       break;
     }
@@ -340,12 +344,9 @@ export function parsePlanProposal(
   limits: ProposalLimits,
 ): PlanProposal {
   if (
-    !Number.isSafeInteger(limits.maxNewGoals) ||
-    limits.maxNewGoals < 1 ||
-    !Number.isSafeInteger(limits.maxTotalGoals) ||
-    limits.maxTotalGoals < 1 ||
-    !Number.isSafeInteger(limits.maxDepth) ||
-    limits.maxDepth < 1
+    [limits.maxNewGoals, limits.maxTotalGoals, limits.maxDepth].some(
+      (limit) => limit !== null && (!Number.isSafeInteger(limit) || limit < 1),
+    )
   )
     fail('/limits', 'invalid_limits');
   const proposal = parsePlanProposalShape(input);
@@ -404,7 +405,8 @@ export function parsePlanProposal(
         cursor = revised.graph.goals.find((item) => item.id === parentId)!;
         depth++;
       }
-      if (depth > limits.maxDepth) fail('/revisions', 'depth_limit');
+      if (limits.maxDepth !== null && depth > limits.maxDepth)
+        fail('/revisions', 'depth_limit');
     }
     if (proposal.goalOrder !== undefined)
       validateGoalOrder(proposal.goalOrder, request, proposal.revisions);

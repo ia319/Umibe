@@ -79,6 +79,17 @@ export function createAgent<TCriteria extends JsonValue>(
     input.selector.model === undefined
       ? undefined
       : captureModelIdentity(input.selector.model);
+  if (
+    input.selector.modelAccounting !== undefined &&
+    (input.selector.modelAccounting !== 'perRequest' ||
+      selectorModel === undefined)
+  )
+    throw new ContractError(
+      validation.code,
+      validation.stage,
+      '/selector/modelAccounting',
+      'invalid_model_accounting',
+    );
   const options = Object.freeze({
     ...input,
     limits,
@@ -95,6 +106,9 @@ export function createAgent<TCriteria extends JsonValue>(
         ? input.selector
         : Object.freeze({
             model: selectorModel,
+            ...(input.selector.modelAccounting === undefined
+              ? {}
+              : { modelAccounting: input.selector.modelAccounting }),
             ...(input.selector.capacity === undefined
               ? {}
               : { capacity: input.selector.capacity }),

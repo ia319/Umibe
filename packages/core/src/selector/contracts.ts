@@ -11,8 +11,13 @@ export interface SelectorRequest {
 }
 
 export interface Selector {
-  /** Declares one model request per attempt and enables automatic Agent metering. */
+  /** Enables automatic Agent metering, once per select call unless modelAccounting is perRequest. */
   readonly model?: ModelIdentity;
+  /**
+   * Each native request must use control.requestModel instead of charging the
+   * whole select callback once. Requires model; preserves the selection role.
+   */
+  readonly modelAccounting?: 'perRequest';
   /** Maximum action candidates per call, as a positive safe integer; omitted means undeclared. */
   readonly capacity?: number;
   select(

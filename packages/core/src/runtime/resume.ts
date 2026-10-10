@@ -52,7 +52,10 @@ export function prepareResume(
       'maxNoProgress',
       'maxRecoveryAttempts',
     ] as const)
-      if (limits[key] < state.limits[key])
+      if (
+        limits[key] !== null &&
+        (state.limits[key] === null || limits[key] < state.limits[key])
+      )
         throw new ContractError(
           validation.code,
           validation.stage,

@@ -155,7 +155,10 @@ export async function invokeModel<T>(
   for (let attempt = 1; attempt <= limits.modelRetries + 1; attempt++) {
     const stopped = interruption();
     if (stopped !== null) return { outcome: stopped };
-    if (session.state.modelAttempts >= limits.maxModelAttempts) {
+    if (
+      limits.maxModelAttempts !== null &&
+      session.state.modelAttempts >= limits.maxModelAttempts
+    ) {
       const cause = session.event(
         'budget_exhausted',
         'model_budget_exhausted',

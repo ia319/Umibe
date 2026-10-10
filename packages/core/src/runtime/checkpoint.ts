@@ -84,6 +84,12 @@ const trigger = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('planInvalidated'), eventId: text }),
   z.strictObject({ kind: z.literal('branchExhausted'), goalRef: ref }),
   z.strictObject({
+    kind: z.literal('selectionUnavailable'),
+    goalRef: ref,
+    reason: z.enum(['abstain', 'no_candidates']),
+    attempts: count,
+  }),
+  z.strictObject({
     kind: z.literal('recoveryExhausted'),
     goalRef: ref,
     failures: count,
@@ -110,19 +116,19 @@ const schema = z.strictObject({
   decision,
   limits: z
     .strictObject({
-      maxModelAttempts: count,
+      maxModelAttempts: count.nullable(),
       modelTimeoutMs: count.min(1),
       modelRetries: count,
       callbackTimeoutMs: count.min(1),
       verificationTimeoutMs: count.min(1),
-      maxActionAttempts: count,
+      maxActionAttempts: count.nullable(),
       actionTimeoutMs: count.min(1),
       stopGraceMs: count.min(1),
       actionRetries: count,
-      maxGoalDepth: count,
-      maxSubgoals: count,
-      maxNoProgress: count.min(1),
-      maxRecoveryAttempts: count.min(1),
+      maxGoalDepth: count.nullable(),
+      maxSubgoals: count.nullable(),
+      maxNoProgress: count.min(1).nullable(),
+      maxRecoveryAttempts: count.min(1).nullable(),
     })
     .transform(captureLimits),
   modelAttempts: count,
@@ -224,12 +230,15 @@ export function parseRuntimeState(input: unknown): SessionState {
     );
     if (
       state.goals.created < children.size ||
-      state.goals.created > state.limits.maxSubgoals
+      (state.limits.maxSubgoals !== null &&
+        state.goals.created > state.limits.maxSubgoals)
     )
       fail('/goals/created', 'invalid_subgoal_count');
     if (
-      state.modelAttempts > state.limits.maxModelAttempts ||
-      state.actionAttempts > state.limits.maxActionAttempts
+      (state.limits.maxModelAttempts !== null &&
+        state.modelAttempts > state.limits.maxModelAttempts) ||
+      (state.limits.maxActionAttempts !== null &&
+        state.actionAttempts > state.limits.maxActionAttempts)
     )
       fail('/limits', 'usage_exceeds_limit');
     if (

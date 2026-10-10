@@ -49,7 +49,7 @@ export interface ResumeRun {
   readonly effectiveConstraints?: JsonObject;
   /** Keep the root ID and increment its version by one; supply effectiveConstraints with a changed root. */
   readonly goal?: GoalDefinition;
-  /** Increase limits only. Existing usage, progress and recovery counters remain cumulative. */
+  /** Increase limits or set them to null; an uncapped limit cannot become finite. Counters remain cumulative. */
   readonly limits?: Partial<
     Pick<
       RuntimeLimits,
