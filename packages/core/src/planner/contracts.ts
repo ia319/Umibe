@@ -32,6 +32,13 @@ export type PlanningTrigger =
   | { readonly kind: 'planInvalidated'; readonly eventId: string }
   | { readonly kind: 'branchExhausted'; readonly goalRef: GoalRef }
   | {
+      readonly kind: 'selectionUnavailable';
+      readonly goalRef: GoalRef;
+      readonly reason: 'abstain' | 'no_candidates';
+      /** Number of selection recovery requests, not an exhausted attempt limit. */
+      readonly attempts: number;
+    }
+  | {
       readonly kind: 'recoveryExhausted';
       readonly goalRef: GoalRef;
       readonly failures: number;

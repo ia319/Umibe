@@ -837,8 +837,9 @@ export class RunDriver<TCriteria extends JsonValue> {
       attempt,
       failed,
     );
+    const { maxNoProgress, maxRecoveryAttempts } = session.state.limits;
     const blocked = progress.find(
-      (item) => item.noProgress >= session.state.limits.maxNoProgress,
+      (item) => maxNoProgress !== null && item.noProgress >= maxNoProgress,
     );
     const recovery = [...session.state.decision.context.graph.goalPath]
       .reverse()
@@ -846,11 +847,13 @@ export class RunDriver<TCriteria extends JsonValue> {
       .find(
         (item) =>
           !item.recoveryPlanned &&
-          item.recoveryAttempts >= session.state.limits.maxRecoveryAttempts,
+          maxRecoveryAttempts !== null &&
+          item.recoveryAttempts >= maxRecoveryAttempts,
       );
     if (recovery && !blocked)
       progress = progress.map((item) =>
-        item.recoveryAttempts >= session.state.limits.maxRecoveryAttempts
+        maxRecoveryAttempts !== null &&
+        item.recoveryAttempts >= maxRecoveryAttempts
           ? { ...item, recoveryPlanned: true }
           : item,
       );
@@ -909,9 +912,18 @@ export class RunDriver<TCriteria extends JsonValue> {
       ),
       request,
       {
-        maxDepth: session.state.limits.maxGoalDepth + 1,
-        maxNewGoals: Math.max(1, session.state.limits.maxSubgoals),
-        maxTotalGoals: session.state.limits.maxSubgoals + 1,
+        maxDepth:
+          session.state.limits.maxGoalDepth === null
+            ? null
+            : session.state.limits.maxGoalDepth + 1,
+        maxNewGoals:
+          session.state.limits.maxSubgoals === null
+            ? null
+            : Math.max(1, session.state.limits.maxSubgoals),
+        maxTotalGoals:
+          session.state.limits.maxSubgoals === null
+            ? null
+            : session.state.limits.maxSubgoals + 1,
       },
     );
     if (proposal.outcome === 'blocked') {
@@ -1185,20 +1197,23 @@ export class RunDriver<TCriteria extends JsonValue> {
           if (
             (selected.outcome === 'no_candidates' ||
               selected.outcome === 'abstain') &&
-            session.state.scheduling.recoveryAttempts === 0
+            (session.state.limits.maxRecoveryAttempts === null ||
+              session.state.scheduling.recoveryAttempts === 0)
           ) {
             await session.commit(
               {
                 ...session.state,
                 scheduling: {
                   ...session.state.scheduling,
-                  recoveryAttempts: 1,
+                  recoveryAttempts:
+                    session.state.scheduling.recoveryAttempts + 1,
                   selectionCause: 'remedy',
                   planning: {
-                    kind: 'recoveryExhausted',
+                    kind: 'selectionUnavailable',
                     goalRef:
                       session.state.decision.context.graph.currentGoalRef,
-                    failures: 1,
+                    reason: selected.outcome,
+                    attempts: session.state.scheduling.recoveryAttempts + 1,
                   },
                 },
               },

@@ -197,6 +197,41 @@ test('completion advice cannot substitute for verification', () => {
   expect(input.context.graph.goals[0]?.lifecycle).toBe('inProgress');
 });
 
+test('uncapped admission still rejects cycles, missing parents and empty decompositions', () => {
+  const input = request();
+  const limits = { maxNewGoals: null, maxTotalGoals: null, maxDepth: null };
+  const proposal = {
+    ...basis(input),
+    outcome: 'decompose',
+    nextTempId: 'a',
+    guidance: 'Explore',
+    goals: [
+      {
+        tempId: 'a',
+        parent: { kind: 'proposed', tempId: 'b' },
+        description: 'A',
+        criteria: { done: true },
+      },
+      {
+        tempId: 'b',
+        parent: { kind: 'proposed', tempId: 'a' },
+        description: 'B',
+        criteria: { done: true },
+      },
+    ],
+  };
+  expect(() => parsePlanProposal(proposal, input, limits)).toThrowError(
+    expect.objectContaining({ reason: 'cycle' }),
+  );
+  proposal.goals[1]!.parent.tempId = 'missing';
+  expect(() => parsePlanProposal(proposal, input, limits)).toThrowError(
+    expect.objectContaining({ reason: 'missing_proposed_parent' }),
+  );
+  expect(() =>
+    parsePlanProposal({ ...proposal, goals: [] }, input, limits),
+  ).toThrowError(expect.objectContaining({ reason: 'new_goal_limit' }));
+});
+
 test('validates revision relations, immutable roots and reconfirmation content', () => {
   const input = request();
   const limits = { maxNewGoals: 2, maxTotalGoals: 4, maxDepth: 4 };

@@ -111,7 +111,7 @@ export function preparePlan(
   state: GoalState,
   proposal: Exclude<PlanProposal, { outcome: 'blocked' | 'claimComplete' }>,
   planRef: PlanRef,
-  maxSubgoals: number,
+  maxSubgoals: number | null,
 ): {
   graph: GoalGraphSnapshot;
   state: GoalState;
@@ -124,7 +124,7 @@ export function preparePlan(
   let order = state.order;
   if (proposal.outcome === 'decompose') {
     created += proposal.goals.length;
-    if (created > maxSubgoals)
+    if (maxSubgoals !== null && created > maxSubgoals)
       throw new ContractError(
         'INVALID_PLAN_PROPOSAL',
         'goal_admission',
