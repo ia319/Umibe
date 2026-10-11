@@ -16,7 +16,7 @@ import type {
   RunStore,
   RunLease,
 } from '#internal/storage/contracts';
-import { requireObject, requireString } from '#internal/validation/fields';
+import { requireString } from '#internal/validation/fields';
 import { parseJsonValue } from '#internal/validation/json';
 import { parseGoalGraph } from '#internal/validation/goal';
 import {
@@ -39,6 +39,8 @@ import {
   runtimeStateSchemaVersion,
 } from './checkpoint.js';
 import type { RuntimeIdentity, PendingModelAttempt } from './checkpoint.js';
+import { captureSessionSnapshot } from './session-snapshot.js';
+import type { SessionSnapshot } from './session-snapshot.js';
 
 /** Authorizes one live stop boundary; recovery discards it before reviewing the proposal. */
 export interface PendingPlanAdoption {
@@ -101,6 +103,7 @@ const validation = {
 export class RunSession {
   readonly runId: string;
   #state: SessionState;
+  #snapshot: SessionSnapshot | null = null;
   #checkpoint: RunCheckpoint | null = null;
   #committedState: SessionState | null = null;
   #tail: Promise<void> = Promise.resolve();
@@ -816,89 +819,15 @@ export class RunSession {
     records: readonly RunRecordDraft[],
   ): Promise<void> {
     this.ensureOpen();
-    const path = new Set(
-      state.decision.context.graph.goalPath.map((ref) => ref.id),
-    );
-    state = {
-      ...state,
-      decision: Object.freeze({
-        ...state.decision,
-        context: Object.freeze({
-          ...state.decision.context,
-          runtime: Object.freeze({
-            execution:
-              state.execution === null
-                ? null
-                : Object.freeze({
-                    executionId: state.execution.intent.executionId,
-                    phase: state.execution.phase,
-                    intent: state.execution.intent,
-                    progress: state.execution.progress,
-                    stopCause: state.execution.stopCause,
-                  }),
-            recentResults: state.recentResults,
-            progress: Object.freeze(
-              state.progress
-                .filter(({ goalRef }) =>
-                  state.decision.context.graph.goals.some(
-                    (goal) =>
-                      goal.id === goalRef.id &&
-                      goal.version === goalRef.version,
-                  ),
-                )
-                .map(({ goalRef, noProgress, recoveryAttempts, highWater }) =>
-                  Object.freeze({
-                    goalRef,
-                    noProgress,
-                    recoveryAttempts,
-                    highWater,
-                  }),
-                ),
-            ),
-            blocker: state.control.blocker,
-            completedSiblings: Object.freeze(
-              state.decision.context.graph.goals
-                .filter(
-                  (goal) =>
-                    !path.has(goal.id) &&
-                    goal.lifecycle === 'succeeded' &&
-                    goal.parentGoalRef !== null &&
-                    path.has(goal.parentGoalRef.id),
-                )
-                .flatMap((goal) =>
-                  goal.lastAssessment === null
-                    ? []
-                    : [
-                        Object.freeze({
-                          goalRef: { id: goal.id, version: goal.version },
-                          assessment: goal.lastAssessment,
-                        }),
-                      ],
-                ),
-            ),
-          }),
-        }),
-      }),
-    };
-    const checkpointState = requireObject(
-      parseJsonValue(state, validation.stage),
-      validation,
-      '/state',
-    );
-    // Preserve execution identity while freezing nested policy state exposed to adapters.
-    const pendingObjects: object[] = [state];
-    const frozen = new Set<object>();
-    while (pendingObjects.length > 0) {
-      const value = pendingObjects.pop()!;
-      if (frozen.has(value)) continue;
-      frozen.add(value);
-      Object.freeze(value);
-      const children: unknown[] = Object.values(value);
-      for (const child of children)
-        if (child !== null && typeof child === 'object')
-          pendingObjects.push(child);
-    }
-    this.#state = Object.freeze(state);
+    // Only this session's captured state can reuse its detached persistence payload.
+    const snapshot =
+      this.#snapshot !== null && this.#snapshot.state === state
+        ? this.#snapshot
+        : captureSessionSnapshot(state);
+    state = snapshot.state;
+    const checkpointState = snapshot.checkpointState;
+    this.#snapshot = snapshot;
+    this.#state = state;
     this.#pending += 1;
     const pending = this.#tail.then(async () => {
       if (this.#failure !== null) throw this.#failure;
