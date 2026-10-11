@@ -252,13 +252,16 @@ export function acceptSelectionBatch(
         batches,
       }),
     });
-  return acceptSelection(filtered, {
-    decisionId: cursor.selectionId,
-    candidateSetId: cursor.request.candidates.id,
-    ...(winnerIds.length === 0
-      ? { outcome: 'abstain', reason: 'model_abstained' }
-      : { outcome: 'selected', candidateId: winnerIds[0]! }),
-  });
+  return acceptSelection(
+    filtered,
+    Object.freeze<SelectionResult>({
+      decisionId: cursor.selectionId,
+      candidateSetId: cursor.request.candidates.id,
+      ...(winnerIds.length === 0
+        ? { outcome: 'abstain', reason: 'model_abstained' }
+        : { outcome: 'selected', candidateId: winnerIds[0]! }),
+    }),
+  );
 }
 
 function getCursorBinding(cursor: SelectionCursor): CursorBinding {

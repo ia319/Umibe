@@ -137,13 +137,15 @@ export async function selectCandidates(
   return acceptSelection(filtered, selection);
 }
 
-/** Bind an accepted selection to the original filtered token and its prepared call. */
+/**
+ * Bind an immutable selection validated against this filtered set, or synthesized
+ * from its accepted batch results, to the original token and prepared call.
+ */
 export function acceptSelection(
   filtered: FilteredCandidates,
-  output: unknown,
+  selection: SelectionResult,
 ): CandidateSelectionResult {
   assertFilteredCandidates(filtered);
-  const selection = parseSelection(output, filtered.set);
   return selection.outcome === 'selected'
     ? registerSelectedCandidate({
         outcome: 'selected',

@@ -272,10 +272,7 @@ export function createSelector(options: SelectorOptions): Selector {
         await control.recordModelProjection({
           role: 'selection',
           version: 1,
-          source:
-            batchCapacity === undefined
-              ? parseJsonValue(request, 'selector_request')
-              : source,
+          source: parseJsonValue(request, 'selector_request'),
           request: parseJsonValue(modelRequest, 'selector_request'),
         });
         if (control.signal.aborted)
