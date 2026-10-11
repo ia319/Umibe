@@ -1,5 +1,4 @@
 import { Worker } from 'node:worker_threads';
-import { writeSync } from 'node:fs';
 import { ContractError, StoreError } from '@umibe/core';
 import type {
   StoreCommand,
@@ -64,14 +63,6 @@ export class WorkerChannel {
     );
     this.exited = new Promise((resolve) => {
       this.worker.on('exit', (code) => {
-        if (
-          process.env.UMIBE_SQLITE_TRACE === '1' &&
-          this.failure !== undefined
-        )
-          writeSync(
-            2,
-            `[sqlite-diag main ${process.pid}] failed worker exit ${code}\n`,
-          );
         if (!this.closing || this.pending.size > 0)
           this.fail(
             new StoreError('STORE_WORKER_FAILED', `worker_exit_${code}`),
@@ -110,11 +101,6 @@ export class WorkerChannel {
     this.controller.abort(error);
     for (const request of this.pending.values()) request.reject(error);
     this.pending.clear();
-    if (process.env.UMIBE_SQLITE_TRACE === '1')
-      writeSync(
-        2,
-        `[sqlite-diag main ${process.pid}] channel failed after ${String(error)}\n`,
-      );
   }
 
   close(): Promise<void> {

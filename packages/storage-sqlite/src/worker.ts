@@ -1,5 +1,4 @@
 import { parentPort, workerData } from 'node:worker_threads';
-import { writeSync } from 'node:fs';
 import { ContractError, StoreError } from '@umibe/core';
 import { RunDatabase } from './database.js';
 import type {
@@ -93,15 +92,7 @@ port.on('message', function handleRequest({ id, command }: StoreRequest) {
           detail.reason === 'process_owner_lost'),
     };
   }
-  // Flush this boundary before native Worker shutdown can interrupt buffered output.
-  if (process.env.UMIBE_SQLITE_TRACE === '1' && !response.ok && response.fatal)
-    writeSync(
-      2,
-      `[sqlite-diag worker ${process.pid}] send fatal ${command.op} ${response.error.reason}\n`,
-    );
   port.postMessage(response);
-  if (process.env.UMIBE_SQLITE_TRACE === '1' && !response.ok && response.fatal)
-    writeSync(2, `[sqlite-diag worker ${process.pid}] fatal response posted\n`);
   if (command.op === 'close' || (!response.ok && response.fatal)) {
     // Stop queued commands and drain native finalizers without releasing a failed owner's claim.
     port.off('message', handleRequest);
