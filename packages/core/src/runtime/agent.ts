@@ -133,7 +133,8 @@ export function createAgent<TCriteria extends JsonValue>(
         '/selector/batchCapacity',
         'invalid_batch_capacity',
       );
-  } else if (input.selector.capacity !== undefined)
+  }
+  if (input.selector.capacity !== undefined)
     requireInteger(
       input.selector.capacity,
       1,
@@ -147,12 +148,12 @@ export function createAgent<TCriteria extends JsonValue>(
     ...(input.selector.modelAccounting === undefined
       ? {}
       : { modelAccounting: input.selector.modelAccounting }),
+    ...(input.selector.capacity === undefined
+      ? {}
+      : { capacity: input.selector.capacity }),
     ...(input.selector.kind === 'single'
       ? {
           kind: 'single' as const,
-          ...(input.selector.capacity === undefined
-            ? {}
-            : { capacity: input.selector.capacity }),
           select: input.selector.select.bind(input.selector),
         }
       : {

@@ -2241,13 +2241,19 @@ export class RunDriver<TCriteria extends JsonValue> {
     if (!session.canDispatch(input.decisionEpoch)) throw new CallStopped();
     const selector = this.options.selector;
     if (selector.kind === 'resumable') {
+      const capacity =
+        this.options.selectorCapacity === undefined
+          ? selector.capacity
+          : selector.capacity === undefined
+            ? this.options.selectorCapacity
+            : Math.min(this.options.selectorCapacity, selector.capacity);
       const started = beginSelection(
         filtered.filtered,
         operations.id,
         operationId,
         selector.batchCapacity,
         this.control('selection'),
-        this.options.selectorCapacity,
+        capacity,
       );
       if (started.outcome === 'pending') {
         this.#selection = started.cursor;

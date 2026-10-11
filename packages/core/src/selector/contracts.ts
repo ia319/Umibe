@@ -48,6 +48,8 @@ export interface ResumableSelector {
   readonly model?: ModelIdentity;
   /** Route the batch's native request through control.requestModel. Requires model. */
   readonly modelAccounting?: 'perRequest';
+  /** Maximum total action candidates before batching; omitted means no declared count limit. */
+  readonly capacity?: number;
   /** Action candidates per batch, as a safe integer of at least two. */
   readonly batchCapacity: number;
   /**

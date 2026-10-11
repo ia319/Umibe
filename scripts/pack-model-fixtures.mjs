@@ -71,7 +71,14 @@ try {
     assert.equal((await model.choose({ instructions: 'Choose', input: 'Synthetic', options: [{ id: 'a', description: null }, { id: 'none', description: 'Abstain' }] }, control())).optionId, 'a');
     assert.equal(createSelector({ model }).capacity, 254);
   }
-  const selected = await createSelector({ model }).select({ requestId: 'selection', decisionEpoch: 1, context, candidates }, control());
+  const selector = model.kind === 'choice'
+    ? createSelector({ model, overflow: 'compareBatches' })
+    : createSelector({ model });
+  const request = { requestId: 'selection', decisionEpoch: 1, context, candidates };
+  const selectionControl = control();
+  const selected = selector.kind === 'resumable'
+    ? await selector.advance({ ...request, selectionId: 'selection', operationSetId: 'operations', operationId: 'sample', sourceCandidateSetId: candidates.id, deadlineAt: selectionControl.deadlineAt, round: 0, batchIndex: 0 }, selectionControl)
+    : await selector.select(request, selectionControl);
   assert.deepEqual(selected, { outcome: 'selected', decisionId: 'selection', candidateSetId: 'fixed', candidateId: 'candidate' });
   assert.equal(calls, provider === 'openai' ? 3 : 2);
   console.log(provider + ' packed capability and roles passed (' + calls + ' local HTTP requests)');
@@ -96,11 +103,11 @@ model.choose(request, control);
 `,
   cloudflare: String.raw`
 import { createCloudflareModel, type CloudflareModelOptions } from '@umibe/provider-cloudflare';
-import { createPlanner, createSelector, type Selector } from '@umibe/core';
+import { createPlanner, createSelector, type ResumableSelector } from '@umibe/core';
 import type { ChoiceModel, ChoiceRequest, ChoiceResponse, CallControl } from '@umibe/core/model';
 const options: CloudflareModelOptions = { accountId: 'test-account', apiToken: 'test-only', model: '@cf/cloudflare/clef' };
 const model: ChoiceModel = createCloudflareModel(options);
-const selector: Selector = createSelector({ model });
+const selector: ResumableSelector = createSelector({ model, overflow: 'compareBatches' });
 declare const request: ChoiceRequest;
 declare const control: CallControl;
 const result: Promise<ChoiceResponse> = model.choose(request, control);
