@@ -21,7 +21,11 @@ import type {
   GoalRecord,
 } from '#internal/contracts/goal';
 import type { ApplicationEvent } from '#internal/contracts/event';
-import type { ChangeBatch } from '#internal/contracts/changes';
+import type {
+  ChangeBatch,
+  RecordedChange,
+  RecordedChangeBatch,
+} from '#internal/contracts/changes';
 import type { Observation } from '#internal/contracts/observation';
 import { captureControl, invokeControlled } from '#internal/candidate/control';
 import { prepareCandidates } from '#internal/candidate/prepare';
@@ -41,6 +45,7 @@ import { captureDecisionRequest } from '#internal/candidate/context';
 import { ActionCoordinator } from './execution.js';
 import { invokeModel, ModelRequestError } from './model.js';
 import { captureObservation } from './observation.js';
+import { captureCallback } from './callback-receipt.js';
 import type { RunSession } from './session.js';
 import type { RunRecordDraft } from '#internal/storage/contracts';
 import { selectionBasis } from './scheduling.js';
@@ -174,6 +179,7 @@ export class RunDriver<TCriteria extends JsonValue> {
 
   private async acceptEvent(event: ApplicationEvent): Promise<void> {
     const session = this.session;
+    const receivedAt = new Date().toISOString();
     // Deduplication precedes admission: a repeated stop event must not stop a
     // resumed run. Recompute applicability after the asynchronous history read.
     const previous = await this.options.store.readRecord(
@@ -232,7 +238,41 @@ export class RunDriver<TCriteria extends JsonValue> {
         recentEvents: [...context.recentEvents, event].slice(-50),
       },
     });
-    const scheduling = invalidates
+    const observationOnly =
+      event.impact === 'observation' && event.control === 'none';
+    const requestsReview = observationOnly || invalidates;
+    const eventSequence =
+      session.state.observations.eventSequence + (observationOnly ? 1 : 0);
+    const reviewVersion =
+      session.state.scheduling.reviewVersion + (requestsReview ? 1 : 0);
+    if (
+      !Number.isSafeInteger(eventSequence) ||
+      !Number.isSafeInteger(reviewVersion)
+    )
+      throw new ContractError(
+        validation.code,
+        validation.stage,
+        '/sequence',
+        'sequence_exhausted',
+      );
+    const changes: readonly RecordedChange[] = observationOnly
+      ? [
+          {
+            sourceEvent: event.type,
+            occurredAt: event.observedAt,
+            data: parseJsonValue(event, 'event'),
+            sourceEventId: event.eventId,
+            ...(event.executionId === null
+              ? {}
+              : { executionId: event.executionId }),
+            sequence: eventSequence,
+            batchId: event.eventId,
+            source: `application:${event.source.id}`,
+            receivedAt,
+          },
+        ]
+      : [];
+    let scheduling = invalidates
       ? {
           ...session.state.scheduling,
           planning:
@@ -242,6 +282,8 @@ export class RunDriver<TCriteria extends JsonValue> {
           selectionCause: 'candidates_changed' as const,
         }
       : session.state.scheduling;
+    if (requestsReview)
+      scheduling = { ...scheduling, reviewPending: true, reviewVersion };
     const records: RunRecordDraft[] = [
       {
         formatVersion: 1,
@@ -265,7 +307,35 @@ export class RunDriver<TCriteria extends JsonValue> {
         },
       ),
     ];
-    const state = { ...session.state, decision, scheduling };
+    if (observationOnly) {
+      const batch: RecordedChangeBatch = {
+        id: event.eventId,
+        runId: session.runId,
+        source: `application:${event.source.id}`,
+        receivedAt,
+        changes,
+      };
+      records.push(
+        session.event('observation_changes', 'facts_received', {
+          batch: parseJsonValue(batch, 'change_batch'),
+        }),
+      );
+    }
+    const state = {
+      ...session.state,
+      decision,
+      scheduling,
+      observations: observationOnly
+        ? {
+            ...session.state.observations,
+            eventSequence,
+            unreadChanges: [
+              ...session.state.observations.unreadChanges,
+              ...changes,
+            ],
+          }
+        : session.state.observations,
+    };
     const controlsRun =
       applicable &&
       (event.control === 'pauseRun' || event.control === 'cancelRun');
@@ -358,8 +428,29 @@ export class RunDriver<TCriteria extends JsonValue> {
         ).toISOString(),
       };
       if (root.version !== session.state.control.rootGoalRef.version) {
-        const supported = await invokeControlled(
-          captureControl(control),
+        const current = () =>
+          this.#resumeController === controller &&
+          !controller.signal.aborted &&
+          !session.ownershipSignal.aborted &&
+          session.failure === null &&
+          session.state.control.status === 'paused' &&
+          session.state.decision.decisionEpoch === epoch;
+        const supported = await captureCallback(
+          session,
+          {
+            stage: 'support',
+            phase: 'resume',
+            decisionEpoch: epoch,
+            input: root.criteria,
+          },
+          {
+            ...control,
+            signal: AbortSignal.any([
+              controller.signal,
+              session.ownershipSignal,
+            ]),
+          },
+          current,
           (control) => this.options.verifier.support(root.criteria, control),
         );
         if (supported.outcome !== 'returned')
@@ -368,6 +459,13 @@ export class RunDriver<TCriteria extends JsonValue> {
             'resume',
             '/goal',
             `support_${supported.outcome}`,
+          );
+        if (!current())
+          throw new ContractError(
+            validation.code,
+            'resume',
+            '/goal',
+            'resume_invalidated',
           );
         criteria = this.decodeSupport(supported.value);
       }

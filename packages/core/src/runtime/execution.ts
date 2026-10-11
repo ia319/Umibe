@@ -8,9 +8,10 @@ import type { CallControl } from '#internal/contracts/control';
 import type { Environment } from '#internal/contracts/adapters';
 import type { SelectedCandidate } from '#internal/contracts/candidate-processing';
 import type { ActionIntent, ActionResult } from '#internal/contracts/record';
-import type { JsonObject } from '#internal/contracts/json';
+import type { JsonObject, JsonValue } from '#internal/contracts/json';
 import type { CandidateGenerationInput } from '#internal/contracts/candidate-processing';
 import { captureControl, invokeControlled } from '#internal/candidate/control';
+import type { InvocationResult } from '#internal/candidate/control';
 import { getSelectedCall } from '#internal/candidate/handles';
 import {
   candidateInvalidationReason,
@@ -25,6 +26,7 @@ import { readActionResult } from '#internal/validation/record';
 import type { RunSession } from './session.js';
 import type { RunCause } from './state.js';
 import { captureObservation } from './observation.js';
+import { ModelRequestError } from './model.js';
 
 export interface ExecutionSnapshot {
   readonly basis: CandidateGenerationInput;
@@ -53,6 +55,11 @@ interface Attempt {
   reconciled: boolean;
   stop: ((cause: RunCause) => void) | null;
 }
+
+type ActionResponse =
+  | { readonly outcome: 'returned'; readonly value: JsonValue }
+  | { readonly outcome: 'invalid'; readonly error: unknown }
+  | { readonly outcome: 'failed'; readonly error: unknown };
 
 const validation = {
   code: 'INVALID_RUN_CONTROL',
@@ -361,7 +368,10 @@ export class ActionCoordinator {
     const supplied = captureControl(controlInput);
     this.#reconciling = true;
     try {
-      const answer = await invokeControlled(
+      const answer = await this.invokeActionCallback(
+        attempt,
+        'action_reconciliation',
+        { intent: parseJsonValue(attempt.intent, validation.stage) },
         captureControl({
           signal: AbortSignal.any([
             supplied.signal,
@@ -374,6 +384,7 @@ export class ActionCoordinator {
             ),
           ).toISOString(),
         }),
+        () => attempt.result === previous && !attempt.reconciled,
         (control) => this.registry.reconcile(attempt.intent, control),
       );
       if (attempt.result !== previous)
@@ -382,39 +393,14 @@ export class ActionCoordinator {
       try {
         if (answer.outcome !== 'returned')
           reconciliation = { outcome: 'unknown', reason: answer.outcome };
+        else if (answer.value.outcome === 'failed')
+          reconciliation = { outcome: 'unknown', reason: 'failed' };
         else {
-          const value = requireObject(
-            parseJsonValue(answer.value, validation.stage),
-            validation,
-            '/reconciliation',
+          if (answer.value.outcome === 'invalid') throw answer.value.error;
+          reconciliation = this.captureReconciliation(
+            attempt,
+            answer.value.value,
           );
-          if (value.outcome === 'unknown')
-            reconciliation = {
-              outcome: 'unknown',
-              reason: requireString(value.reason, validation, '/reason'),
-            };
-          else if (
-            value.outcome === 'notPerformed' &&
-            value.underlyingSettled === true
-          )
-            reconciliation = {
-              outcome: 'notPerformed',
-              underlyingSettled: true,
-              reason: requireString(value.reason, validation, '/reason'),
-            };
-          else if (
-            value.outcome === 'performed' &&
-            value.underlyingSettled === true
-          ) {
-            const result = this.captureResult(attempt, value.result);
-            if (result.outcome === 'unknown')
-              throw new Error('Unconfirmed reconciliation');
-            reconciliation = {
-              outcome: 'performed',
-              underlyingSettled: true,
-              result,
-            };
-          } else throw new Error('Invalid reconciliation');
         }
       } catch {
         reconciliation = {
@@ -531,6 +517,10 @@ export class ActionCoordinator {
       let finished = false;
       let observed: ActionResult | undefined;
       let grace: ReturnType<typeof setTimeout> | undefined;
+      const current = () =>
+        this.#attempt === attempt &&
+        !attempt.reconciled &&
+        (attempt.result === null || attempt.result.outcome === 'unknown');
       // Storage failure closes dispatch immediately; cleanup still observes the action.
       void dispatchCommit.catch(reject);
       const cleanup = () => {
@@ -629,24 +619,37 @@ export class ActionCoordinator {
           signal: controller.signal,
           deadlineAt,
           reportProgress: (progress) => {
-            if (finished || controller.signal.aborted) return;
-            try {
-              attempt.progress = requireObject(
-                parseJsonValue(progress, validation.stage),
-                validation,
-                '/progress',
-              );
-            } catch {
-              stopWithReason('invalid_action_progress');
-              return;
-            }
-            void session
-              .commit(session.state, [
-                session.event('action_progress', 'progress_reported', {
-                  executionId: attempt.intent.executionId,
-                  progress: attempt.progress,
-                }),
-              ])
+            const receipt = this.captureActionReceipt(
+              attempt,
+              'action_progress',
+              attempt.intent.executionId,
+              { signal: controller.signal, deadlineAt },
+              () => current() && !finished && !controller.signal.aborted,
+              { outcome: 'returned', value: progress },
+            );
+            void receipt.committed
+              .then(async () => {
+                if (finished || controller.signal.aborted || attempt.reconciled)
+                  return;
+                try {
+                  if (receipt.response.outcome !== 'returned')
+                    throw receipt.response.error;
+                  attempt.progress = requireObject(
+                    receipt.response.value,
+                    validation,
+                    '/progress',
+                  );
+                } catch {
+                  stopWithReason('invalid_action_progress');
+                  return;
+                }
+                await session.commit(session.state, [
+                  session.event('action_progress', 'progress_reported', {
+                    executionId: attempt.intent.executionId,
+                    progress: attempt.progress,
+                  }),
+                ]);
+              })
               .catch(() => undefined);
           },
         });
@@ -658,32 +661,79 @@ export class ActionCoordinator {
       void Promise.resolve(returned)
         .then(
           async (raw) => {
+            const receipt = this.captureActionReceipt(
+              attempt,
+              'action_execution',
+              attempt.intent.executionId,
+              { signal: controller.signal, deadlineAt },
+              current,
+              { outcome: 'returned', value: raw },
+            );
+            try {
+              await receipt.committed;
+            } catch (error) {
+              finished = true;
+              cleanup();
+              if (call.verifyResult === undefined)
+                this.releaseConfirmedReceipt(
+                  attempt,
+                  'action_execution',
+                  receipt.response,
+                );
+              throw error;
+            }
             if (attempt.reconciled) return;
             let result: ActionResult;
             try {
-              result = this.captureResult(attempt, raw);
+              if (receipt.response.outcome !== 'returned')
+                throw receipt.response.error;
+              result = this.captureResult(attempt, receipt.response.value);
               observed = result;
               if (call.verifyResult !== undefined) {
-                const verified = await invokeControlled(
+                const verificationInput = result;
+                const verified = await this.invokeActionCallback(
+                  attempt,
+                  'action_verification',
+                  {
+                    intent: parseJsonValue(attempt.intent, validation.stage),
+                    result: parseJsonValue(verificationInput, validation.stage),
+                  },
                   captureControl({
-                    signal: new AbortController().signal,
+                    signal: session.ownershipSignal,
                     deadlineAt: new Date(
                       Date.now() + session.state.limits.verificationTimeoutMs,
                     ).toISOString(),
                   }),
+                  current,
                   (control) =>
-                    call.verifyResult!(attempt.intent, result, control),
+                    call.verifyResult!(
+                      attempt.intent,
+                      verificationInput,
+                      control,
+                    ),
                 );
+                if (attempt.reconciled) return;
+                if (
+                  verified.outcome === 'returned' &&
+                  verified.value.outcome === 'invalid'
+                )
+                  throw verified.value.error;
                 result =
-                  verified.outcome === 'returned'
-                    ? this.captureResult(attempt, verified.value)
+                  verified.outcome === 'returned' &&
+                  verified.value.outcome === 'returned'
+                    ? this.captureResult(attempt, verified.value.value)
                     : this.unknownResult(
                         attempt,
                         'result_verification_failed',
                         result,
                       );
               }
-            } catch {
+            } catch (error) {
+              if (session.failure !== null) {
+                finished = true;
+                cleanup();
+                throw error;
+              }
               result = this.unknownResult(
                 attempt,
                 'invalid_action_result',
@@ -693,13 +743,235 @@ export class ActionCoordinator {
             if (result.outcome === 'unknown') controller.abort();
             await accept(result);
           },
-          async () => {
+          async (error: unknown) => {
+            const receipt = this.captureActionReceipt(
+              attempt,
+              'action_execution',
+              attempt.intent.executionId,
+              { signal: controller.signal, deadlineAt },
+              current,
+              { outcome: 'failed', error },
+            );
+            try {
+              await receipt.committed;
+            } catch (failure) {
+              finished = true;
+              cleanup();
+              throw failure;
+            }
+            if (attempt.reconciled) return;
             controller.abort();
             await accept(this.unknownResult(attempt, 'execution_failed'));
           },
         )
         .catch(reject);
     });
+  }
+
+  private async invokeActionCallback(
+    attempt: Attempt,
+    phase: 'action_verification' | 'action_reconciliation',
+    input: JsonObject,
+    controlInput: CallControl,
+    current: () => boolean,
+    invoke: (control: CallControl) => Promise<unknown>,
+  ): Promise<InvocationResult<ActionResponse>> {
+    const session = this.session;
+    const control = captureControl(controlInput);
+    const requestId = randomUUID();
+    const startedAt = Date.now();
+    const request = {
+      requestId,
+      executionId: attempt.intent.executionId,
+      decisionId: attempt.intent.decisionId,
+    };
+    await session.commit(session.state, [
+      session.event('callback_started', phase, {
+        ...request,
+        input: parseJsonValue(input, validation.stage),
+      }),
+    ]);
+    const result: InvocationResult<ActionResponse> =
+      session.failure !== null || session.ownershipSignal.aborted || !current()
+        ? { outcome: 'cancelled' }
+        : await invokeControlled(control, async (callbackControl) => {
+            let received:
+              | { outcome: 'returned'; value: unknown }
+              | { outcome: 'failed'; error: unknown };
+            try {
+              received = {
+                outcome: 'returned',
+                value: await invoke(callbackControl),
+              };
+            } catch (error) {
+              received = { outcome: 'failed', error };
+            }
+            const receipt = this.captureActionReceipt(
+              attempt,
+              phase,
+              requestId,
+              callbackControl,
+              current,
+              received,
+            );
+            try {
+              await receipt.committed;
+            } catch (error) {
+              this.releaseConfirmedReceipt(attempt, phase, receipt.response);
+              throw error;
+            }
+            return receipt.response;
+          });
+    try {
+      await session.commit(session.state, [
+        session.event('callback_finished', phase, {
+          ...request,
+          outcome:
+            result.outcome === 'returned'
+              ? result.value.outcome
+              : result.outcome,
+          currentAtReceipt: current(),
+          durationMs: Math.max(0, Date.now() - startedAt),
+        }),
+      ]);
+    } catch (error) {
+      if (result.outcome === 'returned')
+        this.releaseConfirmedReceipt(attempt, phase, result.value);
+      throw error;
+    }
+    return result;
+  }
+
+  private captureActionReceipt(
+    attempt: Attempt,
+    phase:
+      | 'action_execution'
+      | 'action_verification'
+      | 'action_reconciliation'
+      | 'action_progress',
+    requestId: string,
+    control: CallControl,
+    current: () => boolean,
+    received:
+      | { readonly outcome: 'returned'; readonly value: unknown }
+      | { readonly outcome: 'failed'; readonly error: unknown },
+  ): { readonly response: ActionResponse; readonly committed: Promise<void> } {
+    const session = this.session;
+    const receivedAt = Date.now();
+    let response: ActionResponse;
+    let details: JsonObject;
+    if (received.outcome === 'returned') {
+      try {
+        // Capture adapter-owned values before an await, applicability check,
+        // or schema normalization can hide or change the received payload.
+        const value = parseJsonValue(received.value, validation.stage);
+        response = { outcome: 'returned', value };
+        details = { outcome: 'returned', response: value };
+      } catch (error) {
+        response = { outcome: 'invalid', error };
+        details = {
+          outcome: 'returned',
+          capture: 'invalid_json',
+          ...(error instanceof ContractError
+            ? {
+                issue: {
+                  code: error.code,
+                  stage: error.stage,
+                  path: error.path,
+                  reason: error.reason,
+                },
+              }
+            : {}),
+        };
+      }
+    } else {
+      const error = received.error;
+      response = received;
+      details = {
+        outcome: 'failed',
+        reasonCode:
+          error instanceof ModelRequestError
+            ? error.code
+            : error instanceof ContractError
+              ? error.reason
+              : 'callback_rejected',
+        ...(error instanceof ModelRequestError && error.issue !== null
+          ? { issue: { ...error.issue } }
+          : error instanceof ContractError
+            ? {
+                issue: {
+                  code: error.code,
+                  stage: error.stage,
+                  path: error.path,
+                  reason: error.reason,
+                },
+              }
+            : {}),
+      };
+    }
+    const receipt = session.event('callback_received', phase, {
+      requestId,
+      executionId: attempt.intent.executionId,
+      decisionId: attempt.intent.decisionId,
+      receivedAt: new Date(receivedAt).toISOString(),
+      currentAtReceipt: current(),
+      cancelledAtReceipt: control.signal.aborted,
+      deadlineExceededAtReceipt: receivedAt >= Date.parse(control.deadlineAt),
+      ...details,
+    });
+    const committed = (async () => {
+      try {
+        await session.commit(session.state, [receipt]);
+      } catch (error) {
+        session.report('receipt_failed', receipt.eventId);
+        throw error;
+      }
+    })();
+    return { response, committed };
+  }
+
+  private releaseConfirmedReceipt(
+    attempt: Attempt,
+    phase: 'action_execution' | 'action_verification' | 'action_reconciliation',
+    response: ActionResponse,
+  ): void {
+    if (attempt.reconciled || response.outcome !== 'returned') return;
+    // Failed storage cannot accept new state, but a confirmed late boundary
+    // still releases the lease held for the external effect.
+    try {
+      const boundary =
+        phase === 'action_reconciliation'
+          ? this.captureReconciliation(attempt, response.value)
+          : this.captureResult(attempt, response.value);
+      if (boundary.outcome !== 'unknown') attempt.release();
+    } catch {
+      // An invalid result cannot confirm that the effect has settled.
+    }
+  }
+
+  private captureReconciliation(
+    attempt: Attempt,
+    raw: JsonValue,
+  ): Reconciliation {
+    const value = requireObject(raw, validation, '/reconciliation');
+    if (value.outcome === 'unknown')
+      return {
+        outcome: 'unknown',
+        reason: requireString(value.reason, validation, '/reason'),
+      };
+    if (value.outcome === 'notPerformed' && value.underlyingSettled === true)
+      return {
+        outcome: 'notPerformed',
+        underlyingSettled: true,
+        reason: requireString(value.reason, validation, '/reason'),
+      };
+    if (value.outcome === 'performed' && value.underlyingSettled === true) {
+      const result = this.captureResult(attempt, value.result);
+      if (result.outcome === 'unknown')
+        throw new Error('Unconfirmed reconciliation');
+      return { outcome: 'performed', underlyingSettled: true, result };
+    }
+    throw new Error('Invalid reconciliation');
   }
 
   private captureResult(attempt: Attempt, value: unknown): ActionResult {
