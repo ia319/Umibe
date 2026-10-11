@@ -89,7 +89,28 @@ test.each(['selected', 'abstain'] as const)(
         : { reason: 'not_useful' }),
     });
     const [sent, control] = model.generate.mock.calls[0]!;
-    expect(sent.input).toEqual({ request });
+    expect(sent.input).toMatchObject({
+      context: {
+        rootGoal: { id: 'root', description: 'Collect samples' },
+        goals: [
+          { id: 'area', description: 'Search the assigned area' },
+          { id: 'collect', description: 'Collect nearby samples' },
+          { id: 'old-area', description: 'Abandoned area' },
+        ],
+        goalPath: request.context.graph.goalPath,
+        constraints: request.context.effectiveConstraints,
+        applicationContext: request.context.applicationContext,
+        snapshot: {
+          data: request.context.observation.data,
+          coverage: request.context.observation.coverage,
+        },
+        blocker: 'needs_evidence',
+      },
+      coverage: request.candidates.coverage,
+      candidates: [
+        { id: 'candidate-0', params: { target: 'target-0', count: 2 } },
+      ],
+    });
     expect(sent.instructions).not.toContain(
       request.context.applicationContext!.note,
     );
@@ -353,14 +374,9 @@ test('executes the original fixed call after a valid model selection', async () 
   const h = runnerFixture(0, 1);
   const model = modelFor(null);
   model.generate.mockImplementationOnce(({ input }) => {
-    if (
-      !isJsonObject(input) ||
-      !isJsonObject(input.request) ||
-      !isJsonObject(input.request.candidates) ||
-      !isJsonArray(input.request.candidates.candidates)
-    )
+    if (!isJsonObject(input) || !isJsonArray(input.candidates))
       throw new Error('Expected fixed candidates');
-    const candidate = input.request.candidates.candidates[0];
+    const candidate = input.candidates[0];
     if (!isJsonObject(candidate) || typeof candidate.id !== 'string')
       throw new Error('Expected candidate identity');
     expect(candidate.params).toEqual({ target: 'north', count: 1 });

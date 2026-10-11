@@ -7,6 +7,7 @@ import type {
   StructuredOutputModel,
   ChoiceModel,
   ChoiceResponse,
+  StructuredOutputRequest,
 } from '#internal/model/contracts';
 import type { JsonValue } from '#internal/contracts/json';
 import { captureModelIdentity } from '#internal/model/validation';
@@ -21,6 +22,7 @@ import { parseJsonValue } from '#internal/validation/json';
 import { parseCandidateSet } from '#internal/validation/candidate';
 import { modelOutputError } from '#internal/model/output-error';
 import { ModelRequestError } from '#internal/runtime/model';
+import { projectSelectionInput } from '#internal/model/projection';
 import {
   decodeSelectionOutput,
   selectorInstructions,
@@ -204,22 +206,50 @@ export function createSelector(options: SelectorOptions): SingleCallSelector {
         | { kind: 'choice'; value: ChoiceResponse; abstainId: string };
       if (model.kind === 'choice') {
         const formatted = formatChoiceSelection(request);
+        if (control.recordModelProjection !== undefined) {
+          await control.recordModelProjection({
+            role: 'selection',
+            version: 1,
+            source: parseJsonValue(request, 'selector_request'),
+            request: parseJsonValue(formatted.request, 'selector_request'),
+          });
+          if (control.signal.aborted)
+            throw new DOMException('Model request cancelled', 'AbortError');
+          if (Date.now() >= control.deadlineMs)
+            throw new ModelRequestError('deadline_exceeded');
+        }
         output = {
           kind: 'choice',
           value: await model.choose(formatted.request, control),
           abstainId: formatted.abstainId,
         };
       } else {
+        const modelRequest: StructuredOutputRequest = Object.freeze({
+          instructions: selectorInstructions,
+          input: parseJsonValue(
+            projectSelectionInput(request),
+            'selector_request',
+          ),
+          output: Object.freeze({
+            name: 'umibe_selection',
+            schema: selectorOutputSchema,
+          }),
+        });
+        if (control.recordModelProjection !== undefined) {
+          await control.recordModelProjection({
+            role: 'selection',
+            version: 1,
+            source: parseJsonValue(request, 'selector_request'),
+            request: parseJsonValue(modelRequest, 'selector_request'),
+          });
+          if (control.signal.aborted)
+            throw new DOMException('Model request cancelled', 'AbortError');
+          if (Date.now() >= control.deadlineMs)
+            throw new ModelRequestError('deadline_exceeded');
+        }
         output = {
           kind: 'structuredOutput',
-          value: await model.generate(
-            {
-              instructions: selectorInstructions,
-              input: parseJsonValue({ request }, 'selector_request'),
-              output: { name: 'umibe_selection', schema: selectorOutputSchema },
-            },
-            control,
-          ),
+          value: await model.generate(modelRequest, control),
         };
       }
       if (control.signal.aborted)

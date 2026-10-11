@@ -7,6 +7,7 @@ import type {
   ModelChoiceMetadata,
   ModelRequestRecord,
   ModelResponseRecord,
+  ModelProjectionRecord,
 } from '#internal/model/metadata';
 import {
   captureModelIdentity,
@@ -15,6 +16,7 @@ import {
   captureModelIssue,
   captureModelRequestRecord,
   captureModelResultRecord,
+  captureModelProjectionRecord,
 } from '#internal/model/validation';
 import { captureControl, invokeControlled } from '#internal/candidate/control';
 import { ContractError } from '#internal/errors';
@@ -262,6 +264,7 @@ export async function invokeModel<T>(
     let requestOpen = true;
     let bodySequence = 0;
     let resultSequence = 0;
+    let projectionSequence = 0;
     const response: {
       metadata: ModelResponseMetadata | null;
       choice: ModelChoiceMetadata | null;
@@ -290,6 +293,31 @@ export async function invokeModel<T>(
         output = await invoke(
           Object.freeze({
             ...attemptControl,
+            recordModelProjection: async (input: ModelProjectionRecord) => {
+              const projection = captureModelProjectionRecord(input);
+              if (
+                !response.open ||
+                !requestOpen ||
+                attemptControl.signal.aborted ||
+                interruption() !== null
+              )
+                throw new DOMException('Model request cancelled', 'AbortError');
+              await session.commit(session.state, [
+                session.event('model_projection', 'input_projected', {
+                  ...details,
+                  projectionSequence: ++projectionSequence,
+                  projection: { ...projection },
+                }),
+              ]);
+              // A saved projection cannot authorize a send after this attempt closes.
+              if (
+                !response.open ||
+                !requestOpen ||
+                attemptControl.signal.aborted ||
+                interruption() !== null
+              )
+                throw new DOMException('Model request cancelled', 'AbortError');
+            },
             recordModelRequest: async (input: ModelRequestRecord) => {
               const body = captureModelRequestRecord(input);
               if (

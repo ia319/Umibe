@@ -114,10 +114,8 @@ async function fixture(provider, mode = 'selected') {
           );
           if (
             !isJsonObject(input) ||
-            !isJsonObject(input.request) ||
-            !isJsonObject(input.request.candidates) ||
-            !isJsonArray(input.request.candidates.candidates) ||
-            !isJsonObject(input.request.candidates.candidates[0])
+            !isJsonArray(input.candidates) ||
+            !isJsonObject(input.candidates[0])
           )
             throw new Error('Missing candidate');
           output =
@@ -130,9 +128,7 @@ async function fixture(provider, mode = 'selected') {
               : {
                   outcome: 'selected',
                   candidateId:
-                    mode === 'foreign'
-                      ? 'foreign'
-                      : input.request.candidates.candidates[0].id,
+                    mode === 'foreign' ? 'foreign' : input.candidates[0].id,
                   reason: null,
                 };
         }

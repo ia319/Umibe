@@ -9,6 +9,7 @@ export type {
 export type {
   ModelIdentity,
   ModelRequestRecord,
+  ModelProjectionRecord,
   ModelResponseRecord,
   ModelResponseMetadata,
   ModelUsage,

@@ -1,3 +1,5 @@
+import type { JsonValue } from '#internal/contracts/json';
+
 /** Public model identifiers only. Never include credentials or endpoint URLs. */
 export interface ModelIdentity {
   readonly provider: string;
@@ -10,6 +12,15 @@ export interface ModelRequestRecord {
   /** HTTP method or JSON-RPC method, as sent. */
   readonly method: string;
   readonly body: string;
+}
+
+/** Source facts and the exact role projection before provider-specific conversion. */
+export interface ModelProjectionRecord {
+  readonly role: 'planning' | 'selection' | 'decision';
+  readonly version: 1;
+  /** Complete captured role request; retained IDs join projected choices and evidence. */
+  readonly source: JsonValue;
+  readonly request: JsonValue;
 }
 
 /** Raw provider bytes, recorded independently from decoding and acceptance. */

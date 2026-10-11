@@ -166,14 +166,12 @@ test('sends the planner schema through the SDK and requires independent completi
   if (!isJsonObject(message) || typeof message.content !== 'string')
     throw new Error('Expected application data');
   expect(JSON.parse(message.content)).toMatchObject({
-    request: {
-      trigger: { kind: 'initial' },
-      context: {
-        effectiveConstraints: input.effectiveConstraints,
-        applicationContext: input.context,
-        observation: {
-          coverage: { completeness: 'partial', uncheckedScopes: ['far-side'] },
-        },
+    trigger: { kind: 'initial' },
+    context: {
+      constraints: input.effectiveConstraints,
+      applicationContext: input.context,
+      snapshot: {
+        coverage: { completeness: 'partial', uncheckedScopes: ['far-side'] },
       },
     },
     criteriaDescription: 'Require observations of the requested count.',

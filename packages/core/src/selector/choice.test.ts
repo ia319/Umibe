@@ -67,21 +67,46 @@ test.each(['selected', 'abstain'] as const)(
     };
     const model = choiceModel();
     model.choose.mockImplementationOnce((sent, control) => {
-      const { observation, ...context } = request.context;
-      const { candidates, ...candidateContext } = request.candidates;
-      expect(sent.input).toEqual(observation);
+      const observation = request.context.observation;
+      const candidate = request.candidates.candidates[0]!;
+      expect(sent.input).toEqual({
+        source: observation.source,
+        observedAt: observation.observedAt,
+        coverage: observation.coverage,
+        data: observation.data,
+      });
       expect(sent.instructions).toMatchObject({
         references: {
-          requestId: request.requestId,
-          decisionEpoch: request.decisionEpoch,
-          context,
-          candidates: candidateContext,
+          context: {
+            rootGoal: { id: 'root', description: 'Collect samples' },
+            goals: [
+              { id: 'area', description: 'Search the assigned area' },
+              { id: 'collect', description: 'Collect nearby samples' },
+              { id: 'old-area', description: 'Abandoned area' },
+            ],
+            goalPath: request.context.graph.goalPath,
+            constraints: request.context.effectiveConstraints,
+            applicationContext: request.context.applicationContext,
+            blocker: 'needs_evidence',
+          },
+          coverage: request.candidates.coverage,
         },
       });
-      expect(context.graph.goalPath).toHaveLength(3);
+      expect(request.context.graph.goalPath).toHaveLength(3);
       expect(sent.options[0]).toEqual({
         id: 'candidate',
-        description: candidates[0],
+        description: {
+          actionId: candidate.actionId,
+          actionVersion: candidate.actionVersion,
+          params: candidate.params,
+          paramSources: candidate.paramSources,
+          description: candidate.description,
+          expectedEffects: candidate.expectedEffects,
+          cost: candidate.cost,
+          risk: candidate.risk,
+          source: candidate.source,
+          goalRef: candidate.goalRef,
+        },
       });
       expect(Object.isFrozen(sent.options[0]!.description)).toBe(true);
       expect(Object.isFrozen(sent.instructions)).toBe(true);

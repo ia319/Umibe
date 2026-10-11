@@ -44,6 +44,7 @@ export type { CallControl } from '#internal/contracts/control';
 export type {
   ModelIdentity,
   ModelRequestRecord,
+  ModelProjectionRecord,
   ModelResponseRecord,
   ModelResponseMetadata,
   ModelUsage,

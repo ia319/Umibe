@@ -5,6 +5,7 @@ import type {
   ModelResponseIssue,
   ModelRequestRecord,
   ModelResponseRecord,
+  ModelProjectionRecord,
 } from './metadata.js';
 import type { JsonValue } from '#internal/contracts/json';
 import { ContractError } from '#internal/errors';
@@ -81,6 +82,41 @@ export function captureModelRequestRecord(input: unknown): ModelRequestRecord {
     protocol: value.protocol,
     method: requireString(value.method, context, '/method'),
     body: value.body,
+  });
+}
+
+export function captureModelProjectionRecord(
+  input: unknown,
+): ModelProjectionRecord {
+  const value = requireObject(
+    parseJsonValue(input, context.stage),
+    context,
+    '',
+  );
+  requireKeys(value, ['role', 'version', 'source', 'request'], context, '');
+  if (
+    value.role !== 'planning' &&
+    value.role !== 'selection' &&
+    value.role !== 'decision'
+  )
+    throw new ContractError(
+      context.code,
+      context.stage,
+      '/role',
+      'invalid_projection_role',
+    );
+  if (value.version !== 1)
+    throw new ContractError(
+      context.code,
+      context.stage,
+      '/version',
+      'unsupported_projection_version',
+    );
+  return Object.freeze({
+    role: value.role,
+    version: value.version,
+    source: value.source!,
+    request: value.request!,
   });
 }
 

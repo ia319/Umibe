@@ -744,6 +744,7 @@ export class RunDriver<TCriteria extends JsonValue> {
       // authorizing model work and metadata as soon as that role settles.
       const bindRoleLifetime = (control: CallControl): CallControl => {
         const requestModel = control.requestModel;
+        const recordModelProjection = control.recordModelProjection;
         const recordModelRequest = control.recordModelRequest;
         return Object.freeze<CallControl>({
           ...control,
@@ -761,6 +762,15 @@ export class RunDriver<TCriteria extends JsonValue> {
                   });
                   checkRoleOpen();
                   return result;
+                },
+              }),
+          ...(recordModelProjection === undefined
+            ? {}
+            : {
+                recordModelProjection: async (projection) => {
+                  checkRoleOpen();
+                  await recordModelProjection(projection);
+                  checkRoleOpen();
                 },
               }),
           ...(recordModelRequest === undefined
