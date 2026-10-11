@@ -201,20 +201,22 @@ export async function runScenario(options) {
         maxRecoveryAttempts: 1,
       },
       environment: {
-        observe: () =>
-          Promise.resolve({
-            runId,
-            id: 'synthetic-observation',
-            revision: ++revision,
-            observedAt: new Date().toISOString(),
-            source: 'synthetic',
-            coverage: {
-              scope: 'sample',
-              completeness: 'complete',
-              uncheckedScopes: [],
-            },
-            data: { count: { status: 'known', value: count } },
-          }),
+        observe: {
+          snapshot: () =>
+            Promise.resolve({
+              runId,
+              id: 'synthetic-observation',
+              revision: ++revision,
+              observedAt: new Date().toISOString(),
+              source: 'synthetic',
+              coverage: {
+                scope: 'sample',
+                completeness: 'complete',
+                uncheckedScopes: [],
+              },
+              data: { count: { status: 'known', value: count } },
+            }),
+        },
       },
       verifier: {
         support: (criteria) => {

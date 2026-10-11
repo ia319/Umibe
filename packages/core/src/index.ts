@@ -51,6 +51,7 @@ export type {
   CandidateRequest,
   CriteriaSupport,
   Environment,
+  ObservationSource,
   VerificationRequest,
   Verifier,
   CandidateFilter,
@@ -83,6 +84,14 @@ export type {
   ObservationFact,
 } from '#internal/contracts/observation';
 export { parseObservation } from '#internal/validation/observation';
+export type {
+  ObservationScope,
+  ChangeFact,
+  ChangeBatch,
+  RecordedChange,
+  RecordedChangeBatch,
+} from '#internal/contracts/changes';
+export { parseChangeBatch } from '#internal/validation/changes';
 export type {
   Candidate,
   CandidateCoverage,

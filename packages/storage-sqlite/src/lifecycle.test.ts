@@ -229,14 +229,16 @@ test('lets two Agents share the database without sharing a run', async () => {
     ...h.options,
     applicationId: 'storage-tests',
     environment: {
-      async observe(
-        context: Parameters<typeof h.observe>[0],
-        control: Parameters<typeof h.observe>[1],
-      ) {
-        return {
-          ...(await h.observe(context, control)),
-          runId: context?.graph.runId ?? nextRunId,
-        };
+      observe: {
+        async snapshot(
+          context: Parameters<typeof h.observe>[0],
+          control: Parameters<typeof h.observe>[1],
+        ) {
+          return {
+            ...(await h.observe(context, control)),
+            runId: context?.graph.runId ?? nextRunId,
+          };
+        },
       },
     },
   };
@@ -347,14 +349,16 @@ test('stops both Agents after their shared Worker exits and ignores late model r
     applicationId: 'worker-failure-tests',
     modelStages: ['planning'] as const,
     environment: {
-      async observe(
-        context: Parameters<typeof h.observe>[0],
-        control: Parameters<typeof h.observe>[1],
-      ) {
-        return {
-          ...(await h.observe(context, control)),
-          runId: context?.graph.runId ?? initializingRun,
-        };
+      observe: {
+        async snapshot(
+          context: Parameters<typeof h.observe>[0],
+          control: Parameters<typeof h.observe>[1],
+        ) {
+          return {
+            ...(await h.observe(context, control)),
+            runId: context?.graph.runId ?? initializingRun,
+          };
+        },
       },
     },
   };

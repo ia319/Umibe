@@ -112,14 +112,16 @@ async function harness(
     limits,
   );
   await session.transition({ kind: 'start' });
-  const observe = vi.fn<Environment['observe']>((context) =>
+  const observe = vi.fn<Environment['observe']['snapshot']>((context) =>
     Promise.resolve({
       ...(context ?? session.state.decision.context).observation,
       revision:
         (context ?? session.state.decision.context).observation.revision + 1,
     }),
   );
-  const coordinator = new ActionCoordinator(session, registry, { observe });
+  const coordinator = new ActionCoordinator(session, registry, {
+    observe: { snapshot: observe },
+  });
   return {
     store,
     session,
@@ -187,7 +189,7 @@ test('rejects a consumed selection across coordinator instances', async () => {
   const h = await harness({ retryMode: 'never' }, { actionRetries: 1 });
   await h.coordinator.execute(h.selected);
   const other = new ActionCoordinator(h.session, h.registry, {
-    observe: h.observe,
+    observe: { snapshot: h.observe },
   });
 
   await expect(other.execute(h.selected)).rejects.toMatchObject({
@@ -271,7 +273,7 @@ test('claims execution before observation across coordinator instances and cance
   h.observe.mockImplementation(() => new Promise(() => undefined));
   const pending = h.coordinator.execute(h.selected);
   const other = new ActionCoordinator(h.session, h.registry, {
-    observe: h.observe,
+    observe: { snapshot: h.observe },
   });
   await expect(other.execute(h.selected)).rejects.toMatchObject({
     reason: 'execution_busy',
@@ -540,7 +542,7 @@ test('preserves retry lineage when a reserved retry is cancelled before dispatch
     modelStages: [],
   });
   h.coordinator = new ActionCoordinator(h.session, h.registry, {
-    observe: h.observe,
+    observe: { snapshot: h.observe },
   });
   await h.session.transition({ kind: 'resume' });
   await h.coordinator.execute(await select(h.registry));

@@ -21,6 +21,8 @@ import type {
   GoalRecord,
 } from '#internal/contracts/goal';
 import type { ApplicationEvent } from '#internal/contracts/event';
+import type { ChangeBatch } from '#internal/contracts/changes';
+import type { Observation } from '#internal/contracts/observation';
 import { captureControl, invokeControlled } from '#internal/candidate/control';
 import { prepareCandidates } from '#internal/candidate/prepare';
 import { checkCandidates } from '#internal/candidate/check';
@@ -103,6 +105,15 @@ export class RunDriver<TCriteria extends JsonValue> {
 
   get hasPendingEvents(): boolean {
     return this.#pendingEvents !== 0;
+  }
+
+  async publish(batch: ChangeBatch): Promise<void> {
+    this.#pendingEvents++;
+    try {
+      await this.session.publishChanges(batch);
+    } finally {
+      this.#pendingEvents--;
+    }
   }
 
   start(): void {
@@ -367,6 +378,34 @@ export class RunDriver<TCriteria extends JsonValue> {
           '/execution',
           'execution_unsettled',
         );
+      let initialObservation: Observation | undefined;
+      if (!session.state.observations.initialized) {
+        const observed = await invokeControlled(
+          captureControl({
+            ...control,
+            signal: AbortSignal.any([
+              controller.signal,
+              session.ownershipSignal,
+            ]),
+          }),
+          (control) => this.options.environment.observe.snapshot(null, control),
+        );
+        if (observed.outcome !== 'returned')
+          throw new ContractError(
+            validation.code,
+            'resume',
+            '/observation',
+            `initial_observation_${observed.outcome}`,
+          );
+        initialObservation = parseObservation(observed.value);
+        if (initialObservation.runId !== session.runId)
+          throw new ContractError(
+            validation.code,
+            'resume',
+            '/observation/runId',
+            'cross_run_observation',
+          );
+      }
       if (
         controller.signal.aborted ||
         session.state.control.status !== 'paused' ||
@@ -380,11 +419,39 @@ export class RunDriver<TCriteria extends JsonValue> {
         );
       // Reconciliation and event delivery may have added records while validation was pending.
       next = prepareResume(session.state, update, record.eventId);
+      if (initialObservation !== undefined)
+        next = {
+          ...next,
+          observations: { ...next.observations, initialized: true },
+          decision: {
+            ...next.decision,
+            context: {
+              ...next.decision.context,
+              observation: initialObservation,
+            },
+          },
+        };
       if (criteria !== undefined) {
         this.#criteria.clear();
         this.#criteria.set(`${root.id}:${root.version}`, criteria);
       }
-      await session.transition({ kind: 'resume' }, [record], next);
+      await session.transition(
+        { kind: 'resume' },
+        [
+          record,
+          ...(initialObservation === undefined
+            ? []
+            : [
+                session.event('observation_accepted', 'initial_observation', {
+                  observation: parseJsonValue(
+                    initialObservation,
+                    'observation',
+                  ),
+                }),
+              ]),
+        ],
+        next,
+      );
       if (
         controller.signal.aborted ||
         !session.canDispatch(session.state.decision.decisionEpoch)
@@ -659,7 +726,7 @@ export class RunDriver<TCriteria extends JsonValue> {
     const context = session.state.decision.context;
     const observation = parseObservation(
       await this.call('observation', context, (control) =>
-        this.options.environment.observe(context, control),
+        this.options.environment.observe.snapshot(context, control),
       ),
     );
     const previous = session.state.decision.context.observation;

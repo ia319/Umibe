@@ -161,25 +161,27 @@ const agent = createAgent({
     }),
   ],
   environment: {
-    observe: () => {
-      // The environment owns its revision sequence across host restarts.
-      writeFileSync(revisionPath, String(++revision), {
-        encoding: 'utf8',
-        flush: true,
-      });
-      return Promise.resolve({
-        runId: 'run',
-        id: 'observation',
-        revision,
-        observedAt: new Date().toISOString(),
-        source: 'fixture',
-        coverage: {
-          scope: 'samples',
-          completeness: 'complete',
-          uncheckedScopes: [],
-        },
-        data: { count: { status: 'known', value: effects().length } },
-      });
+    observe: {
+      snapshot: () => {
+        // The environment owns its revision sequence across host restarts.
+        writeFileSync(revisionPath, String(++revision), {
+          encoding: 'utf8',
+          flush: true,
+        });
+        return Promise.resolve({
+          runId: 'run',
+          id: 'observation',
+          revision,
+          observedAt: new Date().toISOString(),
+          source: 'fixture',
+          coverage: {
+            scope: 'samples',
+            completeness: 'complete',
+            uncheckedScopes: [],
+          },
+          data: { count: { status: 'known', value: effects().length } },
+        });
+      },
     },
   },
   planner: {

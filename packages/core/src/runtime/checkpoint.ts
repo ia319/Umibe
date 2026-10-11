@@ -4,6 +4,7 @@ import { captureDecisionRequest } from '#internal/candidate/context';
 import { canonicalJson } from '#internal/candidate/identity';
 import { parseJsonValue } from '#internal/validation/json';
 import { parseGoalGraph, readGoalRecord } from '#internal/validation/goal';
+import { parseRecordedChange } from '#internal/validation/changes';
 import {
   parseRunCheckpoint,
   readActionIntent,
@@ -13,7 +14,7 @@ import type { RunCheckpoint } from '#internal/contracts/record';
 import type { SessionState } from './session.js';
 import { captureLimits } from './limits.js';
 
-export const runtimeStateSchemaVersion = 2;
+export const runtimeStateSchemaVersion = 3;
 const context = {
   code: 'INVALID_RUN_CHECKPOINT',
   stage: 'runtime_checkpoint',
@@ -158,6 +159,8 @@ const schema = z.strictObject({
     .nullable(),
   scheduling: z.strictObject({
     policyVersion: z.literal(1),
+    reviewPending: z.boolean(),
+    reviewVersion: count.min(1),
     planning: trigger.nullable(),
     recoveryAttempts: count,
     lastSelectionBasis: text.nullable(),
@@ -168,6 +171,12 @@ const schema = z.strictObject({
       'resumed',
       'remedy',
     ]),
+  }),
+  observations: z.strictObject({
+    initialized: z.boolean(),
+    eventSequence: count,
+    lastReviewedEventSequence: count,
+    unreadChanges: z.array(z.unknown().transform(parseRecordedChange)),
   }),
   goals: z.strictObject({
     created: count,
@@ -220,6 +229,48 @@ export function parseRuntimeState(input: unknown): SessionState {
     const same = (a: unknown, b: unknown) =>
       canonicalJson(parseJsonValue(a, context.stage)) ===
       canonicalJson(parseJsonValue(b, context.stage));
+    const observations = state.observations;
+    if (!observations.initialized) {
+      const observation = state.decision.context.observation;
+      if (
+        !['created', 'pausing', 'paused', 'cancelling', 'cancelled'].includes(
+          state.control.status,
+        ) ||
+        state.modelAttempts !== 0 ||
+        state.actionAttempts !== 0 ||
+        state.pendingModels.length !== 0 ||
+        state.execution !== null ||
+        state.recentResults.length !== 0 ||
+        state.decision.context.lastActionResult !== null ||
+        observations.lastReviewedEventSequence !== 0
+      )
+        fail('/observations/initialized', 'work_before_initial_observation');
+      if (
+        observation.source !== 'core:initialization' ||
+        observation.revision !== 0 ||
+        observation.coverage.scope !== 'initialization' ||
+        observation.coverage.completeness !== 'partial' ||
+        !same(observation.coverage.uncheckedScopes, ['environment']) ||
+        Object.keys(observation.data).length !== 0
+      )
+        fail('/decision/context/observation', 'invalid_initialization_marker');
+    }
+    if (
+      observations.lastReviewedEventSequence > observations.eventSequence ||
+      observations.unreadChanges.length !==
+        observations.eventSequence - observations.lastReviewedEventSequence ||
+      observations.unreadChanges.some(
+        (change, index) =>
+          change.sequence !==
+          observations.lastReviewedEventSequence + index + 1,
+      )
+    )
+      fail('/observations', 'invalid_unread_sequence');
+    if (
+      observations.unreadChanges.length > 0 &&
+      !state.scheduling.reviewPending
+    )
+      fail('/scheduling/reviewPending', 'unread_changes_without_review');
     if (!same(state.control.rootGoalRef, current.rootGoalRef))
       fail('/control/rootGoalRef', 'root_mismatch');
     const children = new Set(

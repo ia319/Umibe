@@ -14,10 +14,10 @@ import { prepareRunCommit } from '@umibe/core/storage-adapter';
 import type { SqliteInspection, StoreResults } from './protocol.js';
 import { processHasExited } from './ownership.js';
 
-const schemaVersion = 1;
+const schemaVersion = 2;
 const schema = `
 CREATE TABLE schema_metadata (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), version INTEGER NOT NULL);
-INSERT INTO schema_metadata VALUES (1, 1);
+INSERT INTO schema_metadata VALUES (1, 2);
 CREATE TABLE runtime_owner (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), pid INTEGER NOT NULL CHECK (pid > 0), token TEXT NOT NULL);
 CREATE TABLE runs (
   run_id TEXT PRIMARY KEY, revision INTEGER NOT NULL CHECK (revision > 0),

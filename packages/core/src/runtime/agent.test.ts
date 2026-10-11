@@ -39,13 +39,15 @@ test.each(['paused', 'cancelled'] as const)(
     const agent = createAgent({
       ...h.options,
       environment: {
-        async observe(context, control) {
-          return {
-            ...(await h.observe(context, control)),
-            runId: context?.graph.runId ?? initializingRunId,
-          };
+        observe: {
+          async snapshot(context, control) {
+            return {
+              ...(await h.observe(context, control)),
+              runId: context?.graph.runId ?? initializingRunId,
+            };
+          },
+          changes: () => dispose,
         },
-        subscribe: () => dispose,
       },
     });
     const first = await agent.start(h.input);
@@ -83,7 +85,7 @@ test.each(['paused', 'cancelled'] as const)(
       await expect(agent.close()).rejects.toThrowError(
         expect.objectContaining({ reason: 'agent_active' }),
       );
-      expect(dispose).not.toHaveBeenCalled();
+      expect(dispose).toHaveBeenCalledTimes(status === 'cancelled' ? 1 : 0);
       const records = vi.fn();
       agent.subscribe(first.runId, records);
       await agent.emit(applicationEvent({ impact: 'observation' }));
@@ -93,7 +95,7 @@ test.each(['paused', 'cancelled'] as const)(
       await pending;
       await agent.close();
     }
-    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(dispose).toHaveBeenCalledTimes(2);
     expect(() => agent.subscribe(first.runId, vi.fn())).toThrowError(
       expect.objectContaining({ reason: 'agent_closed' }),
     );

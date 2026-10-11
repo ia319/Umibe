@@ -41,20 +41,22 @@ function planningAgent(baseURL: string, limits: AgentOptions['limits'] = {}) {
     selector: { select: vi.fn() },
     candidateProvider: { generate },
     environment: {
-      observe: () =>
-        Promise.resolve({
-          runId: 'run',
-          id: 'observation',
-          revision: ++revision,
-          observedAt: new Date().toISOString(),
-          source: 'local_http_test',
-          coverage: {
-            scope: 'nearby',
-            completeness: 'partial',
-            uncheckedScopes: ['far-side'],
-          },
-          data: { count: { status: 'known', value: 0 } },
-        }),
+      observe: {
+        snapshot: () =>
+          Promise.resolve({
+            runId: 'run',
+            id: 'observation',
+            revision: ++revision,
+            observedAt: new Date().toISOString(),
+            source: 'local_http_test',
+            coverage: {
+              scope: 'nearby',
+              completeness: 'partial',
+              uncheckedScopes: ['far-side'],
+            },
+            data: { count: { status: 'known', value: 0 } },
+          }),
+      },
     },
     verifier: {
       support: (criteria) =>

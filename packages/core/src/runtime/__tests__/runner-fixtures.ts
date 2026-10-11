@@ -62,7 +62,7 @@ export function runnerFixture(initial = 0, target = 2) {
   let count = initial;
   let revision = 0;
   const store = new MemoryRunStore();
-  const observe = vi.fn<Environment['observe']>(() =>
+  const observe = vi.fn<Environment['observe']['snapshot']>(() =>
     Promise.resolve({
       ...generationInput().context.observation,
       revision: ++revision,
@@ -178,7 +178,7 @@ export function runnerFixture(initial = 0, target = 2) {
   const options: AgentOptions<{ count: number }> = {
     store,
     actions: [action],
-    environment: { observe },
+    environment: { observe: { snapshot: observe } },
     planner: { plan },
     candidateProvider: { generate },
     selector: { select },

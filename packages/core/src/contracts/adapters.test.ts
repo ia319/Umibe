@@ -5,7 +5,7 @@ import type { Selector } from '#internal/selector/contracts';
 import type { Planner } from '#internal/planner/contracts';
 import type { DecisionContext } from '#internal/contracts/context';
 import type { ActionDefinition } from './action.js';
-import type { ApplicationEvent } from './event.js';
+import type { ChangeBatch } from './changes.js';
 import { parseCandidateSet } from '../validation/candidate.js';
 import { parseGoalGraph } from '../validation/goal.js';
 import { parseObservation } from '../validation/observation.js';
@@ -342,45 +342,51 @@ test('manually wires planning, full candidate calls, selection, action and verif
   expect(current.graph.goals[0]?.lifecycle).toBe('inProgress');
 });
 
-test('supports pull observations and application-pushed events without choosing a policy', async () => {
+test('supports pull observations and application-pushed facts without choosing a policy', async () => {
   const pull: Environment = {
-    observe() {
-      return Promise.resolve(observation(false));
+    observe: {
+      snapshot() {
+        return Promise.resolve(observation(false));
+      },
     },
   };
-  expect((await pull.observe(null, control)).data.seen?.status).toBe('absent');
+  expect((await pull.observe.snapshot(null, control)).data.seen?.status).toBe(
+    'absent',
+  );
 
-  const event: ApplicationEvent = {
-    kind: 'application',
-    eventId: 'event-1',
-    runId: 'run-1',
-    type: 'villageSeen',
-    source: { kind: 'application', id: 'world' },
-    observedAt: '2026-09-29T00:00:00.000Z',
-    reasonCode: 'new_fact',
-    impact: 'candidates',
-    timing: 'immediate',
-    control: 'none',
-    currentGoalRef: { id: 'search', version: 1 },
-    planRef: { id: 'plan-1', version: 1, rootGoalVersion: 1 },
-    goalPathRef: 'path-1',
-    executionId: null,
-    observationRef: { id: 'obs-2', revision: 2 },
-    affectedGoalRefs: [],
-    details: {},
+  const batch: ChangeBatch = {
+    id: 'batch-1',
+    source: 'world',
+    changes: [
+      {
+        sourceEvent: 'villageSeen',
+        occurredAt: '2026-09-29T00:00:00.000Z',
+        data: {},
+      },
+    ],
   };
   const push: Environment = {
-    observe() {
-      return Promise.resolve(observation(true));
-    },
-    subscribe(emit) {
-      emit(event);
-      return () => {};
+    observe: {
+      snapshot() {
+        return Promise.resolve(observation(true));
+      },
+      changes(_scope, publish) {
+        void publish(batch);
+        return () => {};
+      },
     },
   };
-  const emitted: ApplicationEvent[] = [];
-  const unsubscribe = push.subscribe?.((value) => emitted.push(value));
-  expect(emitted).toEqual([event]);
-  expect((await push.observe(null, control)).data.seen?.status).toBe('known');
+  const emitted: ChangeBatch[] = [];
+  const unsubscribe = push.observe.changes?.(
+    { runId: 'run-1', signal: control.signal },
+    (value) => {
+      emitted.push(value);
+      return Promise.resolve();
+    },
+  );
+  expect(emitted).toEqual([batch]);
+  expect((await push.observe.snapshot(null, control)).data.seen?.status).toBe(
+    'known',
+  );
   unsubscribe?.();
 });

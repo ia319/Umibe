@@ -202,10 +202,10 @@ test('discards a late blocked proposal after a plan invalidation event', async (
   expect(h.execute).toHaveBeenCalledTimes(1);
 });
 
-test('automatically receives environment events and releases the subscription on close', async () => {
+test('automatically receives environment facts and releases the subscription on close', async () => {
   vi.useFakeTimers();
   const h = runnerFixture();
-  let emit!: Parameters<NonNullable<Environment['subscribe']>>[0];
+  let publish!: Parameters<NonNullable<Environment['observe']['changes']>>[1];
   const dispose = vi.fn();
   const diagnostics = vi.fn();
   h.plan.mockImplementation(() => new Promise(() => undefined));
@@ -213,18 +213,31 @@ test('automatically receives environment events and releases the subscription on
     ...h.options,
     onDiagnostic: diagnostics,
     environment: {
-      observe: h.observe,
-      subscribe(callback) {
-        emit = callback;
-        return dispose;
+      observe: {
+        snapshot: h.observe,
+        changes(_scope, callback) {
+          publish = callback;
+          return dispose;
+        },
       },
     },
   });
   const run = await agent.start(h.input);
-  emit(applicationEvent({ control: 'cancelRun' }));
+  await publish({
+    id: 'batch-1',
+    source: 'fixture',
+    changes: [{ sourceEvent: 'changed', occurredAt: null, data: {} }],
+  });
+  await agent.cancel('run', 'user_cancelled');
   await vi.advanceTimersByTimeAsync(0);
   await expect(run.result).resolves.toMatchObject({ status: 'cancelled' });
-  emit(applicationEvent({ control: 'pauseRun' }));
+  await expect(
+    publish({
+      id: 'batch-2',
+      source: 'fixture',
+      changes: [{ sourceEvent: 'changed', occurredAt: null, data: {} }],
+    }),
+  ).rejects.toThrow();
   await vi.advanceTimersByTimeAsync(0);
   expect(diagnostics).toHaveBeenCalledWith(
     expect.objectContaining({ code: 'environment_event_failed' }),

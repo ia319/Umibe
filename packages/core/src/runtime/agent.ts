@@ -7,6 +7,7 @@ import type {
   StartRun,
 } from '#internal/contracts/runtime';
 import type { JsonValue } from '#internal/contracts/json';
+import type { ChangeBatch } from '#internal/contracts/changes';
 import { captureControl, invokeControlled } from '#internal/candidate/control';
 import { ContractError } from '#internal/errors';
 import {
@@ -40,13 +41,13 @@ export function createAgent<TCriteria extends JsonValue>(
     [input.planner, 'plan'],
     [input.selector, 'select'],
     [input.candidateProvider, 'generate'],
-    [input.environment, 'observe'],
+    [input.environment?.observe, 'snapshot'],
     [input.verifier, 'support'],
     [input.verifier, 'verify'],
     [input.store, 'commit'],
   ] as const) {
     if (
-      adapter === null ||
+      adapter == null ||
       typeof adapter !== 'object' ||
       typeof Reflect.get(adapter, callback) !== 'function'
     )
@@ -139,7 +140,7 @@ export function createAgent<TCriteria extends JsonValue>(
   const starting = new Set<string>();
   let closed = false;
   let closing: Promise<void> | null = null;
-  let unsubscribe: (() => void) | undefined;
+  const subscriptions = new Map<string, () => void>();
   const owned = (runId: string) => {
     if (closed)
       throw new ContractError(
@@ -158,29 +159,76 @@ export function createAgent<TCriteria extends JsonValue>(
       );
     return run;
   };
-  const subscribeEnvironment = (session: RunSession) => {
-    if (unsubscribe !== undefined || !options.environment.subscribe) return;
+  const subscribeEnvironment = (
+    session: RunSession,
+    publish: (batch: ChangeBatch) => Promise<void>,
+  ) => {
+    const source = options.environment.observe;
+    if (source.changes === undefined) return;
+    const runId = session.runId;
+    if (
+      ['cancelled', 'succeeded', 'failed'].includes(
+        session.state.control.status,
+      )
+    )
+      return;
+    const lifecycle = new AbortController();
+    const signal = AbortSignal.any([session.ownershipSignal, lifecycle.signal]);
+    let active = true;
+    let unsubscribe: () => void;
     try {
-      unsubscribe = options.environment.subscribe((input) => {
+      unsubscribe = source.changes({ runId, signal }, async (input) => {
         try {
-          const event = parseApplicationEvent(input);
-          const target = runs.get(event.runId);
-          if (target)
-            void target
-              .emit(event)
-              .catch(() =>
-                target.session.report(
-                  'environment_event_failed',
-                  event.eventId,
-                ),
-              );
-        } catch {
+          if (!active || signal.aborted)
+            throw new ContractError(
+              validation.code,
+              validation.stage,
+              '/observation',
+              'subscription_released',
+            );
+          // Session publication captures mutable source input before any awaits.
+          await publish(input);
+        } catch (error) {
           session.report('environment_event_failed', null);
+          throw error;
         }
       });
-    } catch {
-      session.report('environment_subscription_failed', null);
+      if (typeof unsubscribe !== 'function')
+        throw new ContractError(
+          validation.code,
+          validation.stage,
+          '/observe/changes',
+          'missing_unsubscribe',
+        );
+    } catch (error) {
+      active = false;
+      lifecycle.abort();
+      throw error;
     }
+    const dispose = () => {
+      if (!active) return;
+      active = false;
+      signal.removeEventListener('abort', dispose);
+      lifecycle.abort();
+      unwatch();
+      subscriptions.delete(runId);
+      try {
+        unsubscribe();
+      } catch {
+        session.report('environment_subscription_failed', null);
+      }
+    };
+    const unwatch = session.subscribe(() => {
+      if (
+        ['cancelled', 'succeeded', 'failed'].includes(
+          session.committedState.control.status,
+        )
+      )
+        dispose();
+    });
+    subscriptions.set(runId, dispose);
+    signal.addEventListener('abort', dispose, { once: true });
+    if (signal.aborted) dispose();
   };
   const load = async (input: string): Promise<RunDriver<TCriteria>> => {
     if (closed)
@@ -209,11 +257,18 @@ export function createAgent<TCriteria extends JsonValue>(
         identity,
       );
       try {
+        subscribeEnvironment(
+          session,
+          (batch) =>
+            runs.get(runId)?.publish(batch) ?? session.publishChanges(batch),
+        );
         const driver = new RunDriver(session, registry, options);
         runs.set(runId, driver);
-        subscribeEnvironment(session);
         return driver;
       } catch (error) {
+        subscriptions.get(runId)?.();
+        runs.delete(runId);
+        await session.drain();
         await session.close();
         throw error;
       }
@@ -295,25 +350,9 @@ export function createAgent<TCriteria extends JsonValue>(
           'run_owned',
         );
       starting.add(runId);
+      let session: RunSession | undefined;
       try {
-        const observed = await invokeControlled(
-          captureControl({
-            signal: new AbortController().signal,
-            deadlineAt: new Date(
-              Date.now() + limits.callbackTimeoutMs,
-            ).toISOString(),
-          }),
-          (control) => options.environment.observe(null, control),
-        );
-        if (observed.outcome !== 'returned')
-          throw new ContractError(
-            validation.code,
-            validation.stage,
-            '/observation',
-            `initial_observation_${observed.outcome}`,
-          );
-        const observation = parseObservation(observed.value);
-        const session = await RunSession.create(
+        session = await RunSession.create(
           options.store,
           {
             requestId: randomUUID(),
@@ -322,7 +361,21 @@ export function createAgent<TCriteria extends JsonValue>(
               graph,
               planRef: null,
               planGuidance: null,
-              observation,
+              // This marker permits durable ingress before a source snapshot exists.
+              // Session admission blocks all model and action work until initialization.
+              observation: {
+                runId,
+                id: randomUUID(),
+                revision: 0,
+                observedAt: new Date().toISOString(),
+                source: 'core:initialization',
+                coverage: {
+                  scope: 'initialization',
+                  completeness: 'partial',
+                  uncheckedScopes: ['environment'],
+                },
+                data: {},
+              },
               constraintsVersion: 1,
               effectiveConstraints,
               applicationContext,
@@ -333,20 +386,67 @@ export function createAgent<TCriteria extends JsonValue>(
           options.onDiagnostic ?? (() => undefined),
           limits,
           identity,
+          true,
+        );
+        const created = session;
+        subscribeEnvironment(
+          session,
+          (batch) =>
+            runs.get(runId)?.publish(batch) ?? created.publishChanges(batch),
+        );
+        const observed = await invokeControlled(
+          captureControl({
+            signal: session.ownershipSignal,
+            deadlineAt: new Date(
+              Date.now() + limits.callbackTimeoutMs,
+            ).toISOString(),
+          }),
+          (control) => options.environment.observe.snapshot(null, control),
+        );
+        if (observed.outcome !== 'returned')
+          throw new ContractError(
+            validation.code,
+            validation.stage,
+            '/observation',
+            `initial_observation_${observed.outcome}`,
+          );
+        const observation = parseObservation(observed.value);
+        if (observation.runId !== runId)
+          throw new ContractError(
+            validation.code,
+            validation.stage,
+            '/observation/runId',
+            'cross_run_observation',
+          );
+        await session.commit(
+          {
+            ...session.state,
+            observations: { ...session.state.observations, initialized: true },
+            decision: {
+              ...session.state.decision,
+              context: { ...session.state.decision.context, observation },
+            },
+          },
+          [
+            session.event('observation_accepted', 'initial_observation', {
+              observation: parseJsonValue(observation, 'observation'),
+            }),
+          ],
         );
         const driver = new RunDriver(session, registry, options);
         runs.set(runId, driver);
-        try {
-          await session.transition({ kind: 'start' });
-        } catch (error) {
-          runs.delete(runId);
-          await session.close();
-          throw error;
-        }
+        await session.transition({ kind: 'start' });
         const handle = driver.handle();
-        subscribeEnvironment(session);
         driver.start();
         return handle;
+      } catch (error) {
+        subscriptions.get(runId)?.();
+        runs.delete(runId);
+        if (session !== undefined) {
+          await session.drain();
+          await session.close();
+        }
+        throw error;
       } finally {
         starting.delete(runId);
       }
@@ -392,14 +492,7 @@ export function createAgent<TCriteria extends JsonValue>(
       closing = Promise.all(
         [...runs.values()].map((run) => run.session.close()),
       ).then(() => undefined);
-      try {
-        unsubscribe?.();
-      } catch {
-        runs
-          .values()
-          .next()
-          .value?.session.report('environment_subscription_failed', null);
-      }
+      for (const dispose of [...subscriptions.values()]) dispose();
       runs.clear();
       await closing;
     },

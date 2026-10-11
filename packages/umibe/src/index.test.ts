@@ -64,7 +64,7 @@ test('imports without creating files and runs memory mode without constructing a
     const unused = async () => { throw new Error('Must not be invoked'); };
     const agent = createAgent({ persistence: { mode: 'memory' }, actions: [],
       planner: { plan: unused }, selector: { select: unused }, candidateProvider: { generate: unused },
-      environment: { observe: unused }, verifier: { support: unused, verify: unused } });
+      environment: { observe: { snapshot: unused } }, verifier: { support: unused, verify: unused } });
     assert.equal((await agent.inspect()).kind, 'memory');
     assert.equal(await agent.inspect('absent'), null);
     await agent.close();

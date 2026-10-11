@@ -468,7 +468,7 @@ export class ActionCoordinator {
           Date.now() + session.state.limits.callbackTimeoutMs,
         ).toISOString(),
       }),
-      (control) => this.environment.observe(context, control),
+      (control) => this.environment.observe.snapshot(context, control),
     );
     if (!session.canDispatch(epoch)) return 'run_or_decision_inactive';
     if (result.outcome !== 'returned') {

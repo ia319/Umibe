@@ -6,6 +6,9 @@ import { parseJsonValue } from '#internal/validation/json';
 
 export interface SchedulingState {
   readonly policyVersion: 1;
+  readonly reviewPending: boolean;
+  /** Increases for each admitted trigger, so accepting one review cannot lose a later trigger. */
+  readonly reviewVersion: number;
   readonly planning: PlanningTrigger | null;
   readonly recoveryAttempts: number;
   readonly lastSelectionBasis: string | null;

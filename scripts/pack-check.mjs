@@ -360,7 +360,7 @@ await assert.rejects(checkCandidates({ ...generation.prepared }, { signal: new A
 const agentStore = new MemoryRunStore();
 const agent = createAgent({
   actions: [action], store: agentStore,
-  environment: { observe: () => Promise.resolve({ ...context.observation, runId: 'agent-consumer', data: { ready: { status: 'known', value: true } } }) },
+  environment: { observe: { snapshot: () => Promise.resolve({ ...context.observation, runId: 'agent-consumer', data: { ready: { status: 'known', value: true } } }) } },
   planner: { plan: () => { throw new Error('Already satisfied goal must not plan'); } },
   selector: { select: () => { throw new Error('Already satisfied goal must not select'); } },
   candidateProvider: { generate: () => { throw new Error('Already satisfied goal must not generate'); } },
@@ -400,7 +400,7 @@ const taskOptions = {
       return Promise.resolve({ executionId: execution.executionId, outcome: 'succeeded', reasonCode: 'sampled', underlyingSettled: true, confirmedEffects: { count: collected }, unresolvedEffects: {}, progress: {}, stopCauseEventId: null });
     },
   })],
-  environment: { observe: () => Promise.resolve({ ...context.observation, runId: 'nested-consumer', revision: ++revision, observedAt: new Date().toISOString(), data: { count: { status: 'known', value: collected } } }) },
+  environment: { observe: { snapshot: () => Promise.resolve({ ...context.observation, runId: 'nested-consumer', revision: ++revision, observedAt: new Date().toISOString(), data: { count: { status: 'known', value: collected } } }) } },
   planner: { plan(request) {
     plans += 1;
     const current = request.context;
