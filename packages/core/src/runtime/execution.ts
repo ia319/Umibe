@@ -39,8 +39,12 @@ export interface ExecutionSnapshot {
   readonly reconciliation: 'performed' | 'notPerformed' | null;
 }
 
-export type ActionDispatchResult =
-  | { readonly outcome: 'recorded'; readonly result: ActionResult }
+export type ActionStartResult =
+  | {
+      readonly outcome: 'started';
+      readonly executionId: string;
+      readonly completion: Promise<ActionResult>;
+    }
   | { readonly outcome: 'notExecuted'; readonly reasonCode: string };
 
 interface Attempt {
@@ -100,63 +104,66 @@ export class ActionCoordinator {
    * recovered without that token require a freshly checked call with identical parameters.
    * No automatic retries occur. Unknown effects retain the session's execution
    * lease until a late result or reconciliation confirms a complete boundary.
+   * A started result confirms dispatch, not success. Completion waits for result
+   * persistence and stop settlement; a storage rejection does not prove that the
+   * external action stopped. The completion remains observed until cleanup ends.
    */
-  async execute(
+  async start(
     selected: SelectedCandidate,
     retryOf: string | null = null,
-  ): Promise<ActionDispatchResult> {
+  ): Promise<ActionStartResult> {
     const session = this.session;
     const call = getSelectedCall(selected);
     const epoch = selected.filtered.checked.prepared.request.decisionEpoch;
     if (!session.canDispatch(epoch))
       return { outcome: 'notExecuted', reasonCode: 'run_or_decision_inactive' };
-    let retries = 0;
-    const prior = session.state.execution;
-    if (prior?.reconciliation === 'notPerformed') {
-      if (
-        prior.intent.actionId !== call.call.actionId ||
-        prior.intent.actionVersion !== call.call.actionVersion ||
-        canonicalJson(prior.intent.params) !== canonicalJson(call.call.params)
-      ) {
-        await this.block('retry_call_changed');
-        return { outcome: 'notExecuted', reasonCode: 'retry_call_changed' };
-      }
-      retryOf ??= prior.intent.executionId;
-    }
-    if (retryOf === null && consumedSelections.has(selected))
-      throw new ContractError(
-        validation.code,
-        validation.stage,
-        '/selected',
-        'selection_already_used',
-      );
-    if (retryOf !== null) {
-      const previous = session.state.execution;
-      if (
-        previous?.intent.executionId !== retryOf ||
-        (previous.reconciliation !== 'notPerformed' &&
-          this.#attempt?.selected !== selected) ||
-        previous.result === null ||
-        previous.result.outcome === 'unknown' ||
-        previous.result.outcome === 'succeeded' ||
-        previous.retries >= session.state.limits.actionRetries ||
-        call.retryMode !== previous.retryMode ||
-        previous.retryMode === 'never' ||
-        (call.retryMode === 'reconcile' &&
-          previous.reconciliation !== 'notPerformed')
-      ) {
-        throw new ContractError(
-          validation.code,
-          validation.stage,
-          '/retryOf',
-          'retry_not_allowed',
-        );
-      }
-      retries = previous.retries + 1;
-    }
     const release = session.claimExecution();
     let attempt: Attempt | null = null;
     try {
+      let retries = 0;
+      const prior = session.state.execution;
+      if (prior?.reconciliation === 'notPerformed') {
+        if (
+          prior.intent.actionId !== call.call.actionId ||
+          prior.intent.actionVersion !== call.call.actionVersion ||
+          canonicalJson(prior.intent.params) !== canonicalJson(call.call.params)
+        ) {
+          await this.block('retry_call_changed');
+          return { outcome: 'notExecuted', reasonCode: 'retry_call_changed' };
+        }
+        retryOf ??= prior.intent.executionId;
+      }
+      if (retryOf === null && consumedSelections.has(selected))
+        throw new ContractError(
+          validation.code,
+          validation.stage,
+          '/selected',
+          'selection_already_used',
+        );
+      if (retryOf !== null) {
+        const previous = session.state.execution;
+        if (
+          previous?.intent.executionId !== retryOf ||
+          (previous.reconciliation !== 'notPerformed' &&
+            this.#attempt?.selected !== selected) ||
+          previous.result === null ||
+          previous.result.outcome === 'unknown' ||
+          previous.result.outcome === 'succeeded' ||
+          previous.retries >= session.state.limits.actionRetries ||
+          call.retryMode !== previous.retryMode ||
+          previous.retryMode === 'never' ||
+          (call.retryMode === 'reconcile' &&
+            previous.reconciliation !== 'notPerformed')
+        ) {
+          throw new ContractError(
+            validation.code,
+            validation.stage,
+            '/retryOf',
+            'retry_not_allowed',
+          );
+        }
+        retries = previous.retries + 1;
+      }
       if (
         session.state.limits.maxActionAttempts !== null &&
         session.state.actionAttempts >= session.state.limits.maxActionAttempts
@@ -307,19 +314,20 @@ export class ActionCoordinator {
           }),
         ],
       );
-      const result = await this.runAction(attempt, call, dispatchCommit);
-      if (result.outcome !== 'unknown' && session.canDispatch(epoch))
-        await this.refreshObservation(epoch);
-      return { outcome: 'recorded', result };
+      const completion = this.runAction(attempt, call, dispatchCommit);
+      // The caller may attach its completion continuation after dispatch settles.
+      void completion.catch(() => undefined);
+      return {
+        outcome: 'started',
+        executionId: intent.executionId,
+        completion,
+      };
     } finally {
-      if (
-        attempt === null ||
-        !attempt.dispatched ||
-        (attempt.result !== null && attempt.result.outcome !== 'unknown')
-      )
+      if (attempt === null || !attempt.dispatched) {
         release();
-      if (session.failure === null)
-        await this.settleStop(attempt?.result ?? null);
+        if (session.failure === null)
+          await this.settleStop(attempt?.result ?? null);
+      }
     }
   }
 
@@ -765,6 +773,10 @@ export class ActionCoordinator {
           },
         )
         .catch(reject);
+    }).finally(async () => {
+      if (attempt.result !== null && attempt.result.outcome !== 'unknown')
+        attempt.release();
+      if (session.failure === null) await this.settleStop(attempt.result);
     });
   }
 

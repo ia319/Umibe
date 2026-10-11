@@ -6,6 +6,7 @@ import type {
   ActionExecutionContext,
 } from '#internal/contracts/action';
 import type { Environment } from '#internal/contracts/adapters';
+import type { SelectedCandidate } from '#internal/contracts/candidate-processing';
 import type { ActionResult } from '#internal/contracts/record';
 import type { GoalAssessment } from '#internal/contracts/goal';
 import { filterCandidates } from '#internal/candidate/filter';
@@ -52,6 +53,17 @@ function actionResult(
     stopCauseEventId: null,
     ...changes,
   };
+}
+
+async function completeExecution(
+  coordinator: ActionCoordinator,
+  selected: SelectedCandidate,
+  retryOf: string | null = null,
+) {
+  const started = await coordinator.start(selected, retryOf);
+  return started.outcome === 'started'
+    ? { outcome: 'recorded' as const, result: await started.completion }
+    : started;
 }
 
 async function select(registry: ActionRegistry) {
@@ -156,29 +168,38 @@ test('commits intent before executing the selected fixed call and records effect
     context.reportProgress({ collected: 1 });
     return actionResult(context.executionId);
   });
-  await expect(h.coordinator.execute(h.selected)).resolves.toMatchObject({
-    outcome: 'recorded',
-    result: { outcome: 'succeeded' },
+  const started = await h.coordinator.start(h.selected);
+  expect(started).toMatchObject({
+    outcome: 'started',
+    executionId: h.session.state.execution!.intent.executionId,
+  });
+  if (started.outcome !== 'started') throw new Error('Fixture did not start');
+  await expect(started.completion).resolves.toMatchObject({
+    outcome: 'succeeded',
   });
   expect(h.check).toHaveBeenCalledTimes(2);
-  expect(h.observe).toHaveBeenCalledTimes(2);
+  expect(h.observe).toHaveBeenCalledTimes(1);
   expect(
     h.session.state.decision.context.lastActionResult?.confirmedEffects,
   ).toEqual({ samples: 1 });
   expect(h.session.state.control.status).toBe('running');
   expect(h.session.hasExecution).toBe(false);
-  await expect(h.coordinator.execute(h.selected)).rejects.toMatchObject({
+  await expect(
+    completeExecution(h.coordinator, h.selected),
+  ).rejects.toMatchObject({
     reason: 'selection_already_used',
   });
 });
 
 test('rejects an earlier consumed selection after another selection executes', async () => {
   const h = await harness({ retryMode: 'never' }, { actionRetries: 1 });
-  await h.coordinator.execute(h.selected);
+  await completeExecution(h.coordinator, h.selected);
   const next = await select(h.registry);
-  await h.coordinator.execute(next);
+  await completeExecution(h.coordinator, next);
 
-  await expect(h.coordinator.execute(h.selected)).rejects.toMatchObject({
+  await expect(
+    completeExecution(h.coordinator, h.selected),
+  ).rejects.toMatchObject({
     reason: 'selection_already_used',
   });
   expect(h.execute).toHaveBeenCalledTimes(2);
@@ -187,12 +208,12 @@ test('rejects an earlier consumed selection after another selection executes', a
 
 test('rejects a consumed selection across coordinator instances', async () => {
   const h = await harness({ retryMode: 'never' }, { actionRetries: 1 });
-  await h.coordinator.execute(h.selected);
+  await completeExecution(h.coordinator, h.selected);
   const other = new ActionCoordinator(h.session, h.registry, {
     observe: { snapshot: h.observe },
   });
 
-  await expect(other.execute(h.selected)).rejects.toMatchObject({
+  await expect(completeExecution(other, h.selected)).rejects.toMatchObject({
     reason: 'selection_already_used',
   });
   expect(h.execute).toHaveBeenCalledTimes(1);
@@ -205,14 +226,18 @@ test('denies a fresh recheck without consuming the selection or charging an atte
     expect(context.observation.revision).toBe(5);
     return Promise.resolve({ outcome: 'denied', reason: 'target_gone' });
   });
-  await expect(h.coordinator.execute(h.selected)).resolves.toMatchObject({
+  await expect(
+    completeExecution(h.coordinator, h.selected),
+  ).resolves.toMatchObject({
     outcome: 'notExecuted',
     reasonCode: 'denied',
   });
   expect(h.execute).not.toHaveBeenCalled();
   expect(h.session.state.actionAttempts).toBe(0);
   h.check.mockResolvedValue({ outcome: 'allowed' });
-  await expect(h.coordinator.execute(h.selected)).resolves.toMatchObject({
+  await expect(
+    completeExecution(h.coordinator, h.selected),
+  ).resolves.toMatchObject({
     outcome: 'recorded',
   });
   expect(h.execute).toHaveBeenCalledTimes(1);
@@ -233,7 +258,7 @@ test.each(['cancel', 'ancestor'] as const)(
       }
       return original(input);
     });
-    const pending = h.coordinator.execute(h.selected);
+    const pending = completeExecution(h.coordinator, h.selected);
     await entered.promise;
     const changed =
       change === 'cancel'
@@ -258,7 +283,9 @@ test('rechecks cancellation admitted by the committed-intent subscriber', async 
     if (record.kind === 'actionIntent')
       void h.session.transition({ kind: 'cancel', cause: cancelCause });
   });
-  await expect(h.coordinator.execute(h.selected)).resolves.toMatchObject({
+  await expect(
+    completeExecution(h.coordinator, h.selected),
+  ).resolves.toMatchObject({
     outcome: 'notExecuted',
   });
   expect(h.execute).not.toHaveBeenCalled();
@@ -271,11 +298,11 @@ test('claims execution before observation across coordinator instances and cance
   vi.useFakeTimers();
   const h = await harness();
   h.observe.mockImplementation(() => new Promise(() => undefined));
-  const pending = h.coordinator.execute(h.selected);
+  const pending = completeExecution(h.coordinator, h.selected);
   const other = new ActionCoordinator(h.session, h.registry, {
     observe: { snapshot: h.observe },
   });
-  await expect(other.execute(h.selected)).rejects.toMatchObject({
+  await expect(completeExecution(other, h.selected)).rejects.toMatchObject({
     reason: 'execution_busy',
   });
   await h.session.transition({ kind: 'cancel', cause: cancelCause });
@@ -292,7 +319,7 @@ test('retains the barrier after cancel grace and accepts a late result only for 
     { execute: () => returned.promise },
     { stopGraceMs: 5 },
   );
-  const pending = h.coordinator.execute(h.selected);
+  const pending = completeExecution(h.coordinator, h.selected);
   await vi.advanceTimersByTimeAsync(0);
   const executionId = h.session.state.execution!.intent.executionId;
   await h.session.transition({ kind: 'cancel', cause: cancelCause });
@@ -329,7 +356,7 @@ test('times out with a recorded stop cause and forbids resume while the old exec
     { execute: () => new Promise(() => undefined) },
     { actionTimeoutMs: 10, stopGraceMs: 5 },
   );
-  const pending = h.coordinator.execute(h.selected);
+  const pending = completeExecution(h.coordinator, h.selected);
   await vi.advanceTimersByTimeAsync(15);
   await expect(pending).resolves.toMatchObject({
     result: { outcome: 'unknown', reasonCode: 'action_timeout' },
@@ -366,7 +393,7 @@ test('accepts cooperative abort within grace and preserves the first stop reason
     },
     { stopGraceMs: 10 },
   );
-  const pending = h.coordinator.execute(h.selected);
+  const pending = completeExecution(h.coordinator, h.selected);
   await vi.advanceTimersByTimeAsync(0);
   const cause = { eventId: 'pause', reasonCode: 'user_paused' };
   await h.session.transition({ kind: 'pause', cause });
@@ -391,7 +418,9 @@ test('treats an execution exception as unknown effects and never retries implici
     { execute, retryMode: 'idempotent' },
     { actionRetries: 1 },
   );
-  await expect(h.coordinator.execute(h.selected)).resolves.toMatchObject({
+  await expect(
+    completeExecution(h.coordinator, h.selected),
+  ).resolves.toMatchObject({
     result: { outcome: 'unknown', underlyingSettled: false },
   });
   expect(execute).toHaveBeenCalledTimes(1);
@@ -413,7 +442,7 @@ test.each(['throw', 'invalid', 'hang'] as const)(
       },
       { verificationTimeoutMs: 10 },
     );
-    const pending = h.coordinator.execute(h.selected);
+    const pending = completeExecution(h.coordinator, h.selected);
     await vi.advanceTimersByTimeAsync(10);
     await expect(pending).resolves.toMatchObject({
       result: {
@@ -439,7 +468,9 @@ test('retains confirmed partial effects when the action reports an unsettled res
         }),
       ),
   });
-  await expect(h.coordinator.execute(h.selected)).resolves.toMatchObject({
+  await expect(
+    completeExecution(h.coordinator, h.selected),
+  ).resolves.toMatchObject({
     result: { confirmedEffects: { samples: 1 } },
   });
   expect(h.session.hasExecution).toBe(true);
@@ -469,7 +500,7 @@ test('reconciles before one explicitly allowed retry and ignores the old result 
     { execute, reconcile, retryMode: 'reconcile' },
     { actionRetries: 1, actionTimeoutMs: 10, stopGraceMs: 5 },
   );
-  const pending = h.coordinator.execute(h.selected);
+  const pending = completeExecution(h.coordinator, h.selected);
   await vi.advanceTimersByTimeAsync(15);
   await pending;
   const oldId = h.session.state.execution!.intent.executionId;
@@ -483,9 +514,9 @@ test('reconciles before one explicitly allowed retry and ignores the old result 
   expect(h.session.hasExecution).toBe(false);
   expect(h.session.state.control.status).toBe('paused');
   await h.session.transition({ kind: 'resume' });
-  await expect(h.coordinator.execute(h.selected, oldId)).resolves.toMatchObject(
-    { result: { outcome: 'failed' } },
-  );
+  await expect(
+    completeExecution(h.coordinator, h.selected, oldId),
+  ).resolves.toMatchObject({ result: { outcome: 'failed' } });
   const newId = h.session.state.execution!.intent.executionId;
   expect(newId).not.toBe(oldId);
   old.resolve(actionResult(oldId));
@@ -494,7 +525,9 @@ test('reconciles before one explicitly allowed retry and ignores the old result 
   expect(h.session.state.decision.context.lastActionResult?.executionId).toBe(
     newId,
   );
-  await expect(h.coordinator.execute(h.selected, newId)).rejects.toMatchObject({
+  await expect(
+    completeExecution(h.coordinator, h.selected, newId),
+  ).rejects.toMatchObject({
     reason: 'retry_not_allowed',
   });
   expect(execute).toHaveBeenCalledTimes(2);
@@ -515,7 +548,7 @@ test('preserves retry lineage when a reserved retry is cancelled before dispatch
     },
     { actionRetries: 1 },
   );
-  await h.coordinator.execute(h.selected);
+  await completeExecution(h.coordinator, h.selected);
   await h.coordinator.reconcile(callControl());
   await h.session.transition({ kind: 'resume' });
   const commit = h.store.commit.bind(h.store);
@@ -529,9 +562,9 @@ test('preserves retry lineage when a reserved retry is cancelled before dispatch
     return commit(input);
   });
   const oldId = h.session.state.execution!.intent.executionId;
-  await expect(h.coordinator.execute(h.selected, oldId)).resolves.toMatchObject(
-    { outcome: 'notExecuted' },
-  );
+  await expect(
+    completeExecution(h.coordinator, h.selected, oldId),
+  ).resolves.toMatchObject({ outcome: 'notExecuted' });
   await paused;
   writer.mockRestore();
   expect(h.session.state.actionAttempts).toBe(1);
@@ -545,11 +578,11 @@ test('preserves retry lineage when a reserved retry is cancelled before dispatch
     observe: { snapshot: h.observe },
   });
   await h.session.transition({ kind: 'resume' });
-  await h.coordinator.execute(await select(h.registry));
+  await completeExecution(h.coordinator, await select(h.registry));
   await h.coordinator.reconcile(callControl());
   await h.session.transition({ kind: 'resume' });
   await expect(
-    h.coordinator.execute(await select(h.registry)),
+    completeExecution(h.coordinator, await select(h.registry)),
   ).rejects.toMatchObject({ reason: 'retry_not_allowed' });
   expect(h.session.state.actionAttempts).toBe(2);
 });
@@ -567,14 +600,14 @@ test('creates an independent cancellation signal per execution and rejects stale
       );
     },
   });
-  const first = h.coordinator.execute(h.selected);
+  const first = completeExecution(h.coordinator, h.selected);
   await vi.advanceTimersByTimeAsync(0);
   expect(h.coordinator.interrupt(contexts[0]!.executionId, cancelCause)).toBe(
     true,
   );
   await first;
   const next = await select(h.registry);
-  const second = h.coordinator.execute(next);
+  const second = completeExecution(h.coordinator, next);
   await vi.advanceTimersByTimeAsync(0);
   expect(contexts[0]!.signal).not.toBe(contexts[1]!.signal);
   expect(contexts[1]!.signal.aborted).toBe(false);
@@ -589,7 +622,9 @@ test('creates an independent cancellation signal per execution and rejects stale
 
 test('pauses on exhausted action budget before observation or execution', async () => {
   const h = await harness({}, { maxActionAttempts: 0 });
-  await expect(h.coordinator.execute(h.selected)).resolves.toMatchObject({
+  await expect(
+    completeExecution(h.coordinator, h.selected),
+  ).resolves.toMatchObject({
     outcome: 'notExecuted',
     reasonCode: 'action_budget_exhausted',
   });
@@ -615,7 +650,7 @@ test('model budget exhaustion waits for the active execution stop boundary', asy
     },
     { maxModelAttempts: 0 },
   );
-  const pending = h.coordinator.execute(h.selected);
+  const pending = completeExecution(h.coordinator, h.selected);
   await vi.advanceTimersByTimeAsync(0);
   await expect(
     invokeModel(
@@ -641,7 +676,7 @@ test.each(['observe', 'check'] as const)(
     if (callback === 'observe')
       h.observe.mockImplementation(() => new Promise(() => undefined));
     else h.check.mockImplementation(() => new Promise(() => undefined));
-    const pending = h.coordinator.execute(h.selected);
+    const pending = completeExecution(h.coordinator, h.selected);
     await vi.advanceTimersByTimeAsync(10);
     await expect(pending).resolves.toMatchObject({ outcome: 'notExecuted' });
     expect(h.execute).not.toHaveBeenCalled();
@@ -676,7 +711,7 @@ test('aborts execution on storage failure without requiring another writable com
       return Promise.reject(new Error('disk unavailable'));
     return original(input);
   });
-  const pending = h.coordinator.execute(h.selected);
+  const pending = completeExecution(h.coordinator, h.selected);
   const rejected = expect(pending).rejects.toThrow('disk unavailable');
   await vi.advanceTimersByTimeAsync(5);
   await rejected;
@@ -712,7 +747,7 @@ test.each([
         value as Awaited<ReturnType<NonNullable<Definition['reconcile']>>>,
       ),
   });
-  await h.coordinator.execute(h.selected);
+  await completeExecution(h.coordinator, h.selected);
   await expect(h.coordinator.reconcile(callControl())).resolves.toEqual({
     outcome: 'unknown',
     reason: 'invalid_reconciliation',
@@ -729,7 +764,7 @@ test('discards reconciliation when a late execution result wins the race', async
     { execute: () => late.promise, reconcile: () => cleanup.promise },
     { actionTimeoutMs: 10, stopGraceMs: 5 },
   );
-  const pending = h.coordinator.execute(h.selected);
+  const pending = completeExecution(h.coordinator, h.selected);
   await vi.advanceTimersByTimeAsync(15);
   await pending;
   const reconciling = h.coordinator.reconcile(callControl());
@@ -755,7 +790,7 @@ test('keeps partial effects while grace expires during result verification', asy
     { verifyResult: () => verified.promise },
     { actionTimeoutMs: 10, stopGraceMs: 5 },
   );
-  const pending = h.coordinator.execute(h.selected);
+  const pending = completeExecution(h.coordinator, h.selected);
   await vi.advanceTimersByTimeAsync(15);
   await expect(pending).resolves.toMatchObject({
     result: {
@@ -783,9 +818,10 @@ test.each([{}, { actionRetries: 1 }] as const)(
       },
       limits,
     );
-    await h.coordinator.execute(h.selected);
+    await completeExecution(h.coordinator, h.selected);
     await expect(
-      h.coordinator.execute(
+      completeExecution(
+        h.coordinator,
         h.selected,
         h.session.state.execution!.intent.executionId,
       ),
@@ -822,7 +858,7 @@ test('requires a fresh root assessment after execution and rejects success while
     h.session.transition({ kind: 'succeed', assessment, observationRef }),
   ).rejects.toMatchObject({ reason: 'execution_unsettled' });
   release();
-  await h.coordinator.execute(h.selected);
+  await completeExecution(h.coordinator, h.selected);
   await expect(
     h.session.transition({ kind: 'succeed', assessment, observationRef }),
   ).rejects.toMatchObject({ reason: 'stale_assessment' });

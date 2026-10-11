@@ -1629,13 +1629,20 @@ export class RunDriver<TCriteria extends JsonValue> {
             await this.block(`selection_${selected.outcome}`);
           break;
         }
-        const result = await this.execution.execute(selected);
-        if (session.state.control.status !== 'running') break;
-        if (result.outcome !== 'recorded') {
+        const started = await this.execution.start(selected);
+        if (started.outcome === 'notExecuted') {
+          if (session.state.control.status !== 'running') break;
           if (this.#refresh) continue;
-          await this.block(result.reasonCode);
+          await this.block(started.reasonCode);
           break;
         }
+        const result = await started.completion;
+        if (
+          result.outcome !== 'unknown' &&
+          session.canDispatch(input.decisionEpoch)
+        )
+          await this.observe();
+        if (session.state.control.status !== 'running') break;
         await session.commit(
           {
             ...session.state,
