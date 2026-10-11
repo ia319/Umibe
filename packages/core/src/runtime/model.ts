@@ -19,6 +19,10 @@ import {
   captureModelProjectionRecord,
 } from '#internal/model/validation';
 import { captureControl, invokeControlled } from '#internal/candidate/control';
+import type {
+  CapturedControl,
+  InvocationResult,
+} from '#internal/candidate/control';
 import { ContractError } from '#internal/errors';
 import {
   requireObject,
@@ -110,6 +114,33 @@ export type ModelCallResult<T> =
         'cancelled' | 'invalidated' | 'budgetExceeded' | 'deadlineExceeded';
     };
 
+type ModelAttemptDetails = {
+  readonly requestId: string;
+  readonly decisionEpoch: number;
+  readonly purpose: ModelRequestBasis['purpose'];
+  readonly attempt: number;
+  readonly model: Readonly<ModelIdentity> | null;
+};
+
+interface ModelAttemptResult<T> {
+  readonly invoked: boolean;
+  readonly result: InvocationResult<{
+    readonly value: T;
+    readonly usage: JsonObject | null;
+  }>;
+  readonly metadata: ModelResponseMetadata | null;
+  readonly choice: ModelChoiceMetadata | null;
+  readonly reportIssues: Readonly<
+    Partial<Record<'response' | 'choice', ModelResponseIssue>>
+  >;
+  readonly startedAt: number;
+}
+
+const validation = {
+  code: 'INVALID_RUN_CONTROL',
+  stage: 'model_request',
+} as const;
+
 /**
  * Dispatch one logical model request with bounded, charged transport attempts.
  * The caller's deadline covers queueing and all retries. Each sent attempt also
@@ -125,10 +156,6 @@ export async function invokeModel<T>(
     attempt: number,
   ) => Promise<{ readonly value: T; readonly usage: JsonObject | null }>,
 ): Promise<ModelCallResult<T>> {
-  const validation = {
-    code: 'INVALID_RUN_CONTROL',
-    stage: 'model_request',
-  } as const;
   const request = Object.freeze({
     requestId: requireString(basis.requestId, validation, '/requestId'),
     decisionEpoch: requireInteger(
@@ -259,225 +286,14 @@ export async function invokeModel<T>(
         Math.min(captured.deadlineMs, Date.now() + limits.modelTimeoutMs),
       ).toISOString(),
     });
-    let dispatchCommit: Promise<void> | undefined;
-    let invoked = false;
-    let requestOpen = true;
-    let bodySequence = 0;
-    let resultSequence = 0;
-    let projectionSequence = 0;
-    const response: {
-      metadata: ModelResponseMetadata | null;
-      choice: ModelChoiceMetadata | null;
-      reportIssues: Partial<Record<'response' | 'choice', ModelResponseIssue>>;
-      open: boolean;
-    } = { metadata: null, choice: null, reportIssues: {}, open: true };
-    const startedAt = Date.now();
-    const result = await invokeControlled(control, async (attemptControl) => {
-      dispatchCommit = session.commit(
-        {
-          ...session.state,
-          pendingModels: session.state.pendingModels.map((entry) =>
-            entry.requestId === request.requestId && entry.attempt === attempt
-              ? { ...entry, phase: 'dispatched' }
-              : entry,
-          ),
-        },
-        [session.event('model_dispatched', 'request_dispatched', details)],
+    const { invoked, result, metadata, choice, reportIssues, startedAt } =
+      await performModelAttempt(
+        session,
+        details,
+        control,
+        interruption,
+        invoke,
       );
-      await dispatchCommit;
-      if (attemptControl.signal.aborted || interruption() !== null)
-        throw new DOMException('Model request cancelled', 'AbortError');
-      invoked = true;
-      let output: { readonly value: T; readonly usage: JsonObject | null };
-      try {
-        output = await invoke(
-          Object.freeze({
-            ...attemptControl,
-            recordModelProjection: async (input: ModelProjectionRecord) => {
-              const projection = captureModelProjectionRecord(input);
-              if (
-                !response.open ||
-                !requestOpen ||
-                attemptControl.signal.aborted ||
-                interruption() !== null
-              )
-                throw new DOMException('Model request cancelled', 'AbortError');
-              await session.commit(session.state, [
-                session.event('model_projection', 'input_projected', {
-                  ...details,
-                  projectionSequence: ++projectionSequence,
-                  projection: { ...projection },
-                }),
-              ]);
-              // A saved projection cannot authorize a send after this attempt closes.
-              if (
-                !response.open ||
-                !requestOpen ||
-                attemptControl.signal.aborted ||
-                interruption() !== null
-              )
-                throw new DOMException('Model request cancelled', 'AbortError');
-            },
-            recordModelRequest: async (input: ModelRequestRecord) => {
-              const body = captureModelRequestRecord(input);
-              if (
-                !response.open ||
-                !requestOpen ||
-                attemptControl.signal.aborted ||
-                interruption() !== null
-              )
-                throw new DOMException('Model request cancelled', 'AbortError');
-              await session.commit(session.state, [
-                session.event('model_request_body', 'request_prepared', {
-                  ...details,
-                  bodySequence: ++bodySequence,
-                  request: { ...body },
-                }),
-              ]);
-              // Persistence can outlast cancellation or ownership. Never authorize a late send.
-              if (
-                !response.open ||
-                !requestOpen ||
-                attemptControl.signal.aborted ||
-                interruption() !== null
-              )
-                throw new DOMException('Model request cancelled', 'AbortError');
-            },
-            recordModelResult: async (input: ModelResponseRecord) => {
-              try {
-                const body = captureModelResultRecord(input);
-                await session.commit(session.state, [
-                  session.event('model_response_body', 'response_received', {
-                    ...details,
-                    resultSequence: ++resultSequence,
-                    currentAtReceipt:
-                      response.open &&
-                      interruption() === null &&
-                      !attemptControl.signal.aborted,
-                    response: { ...body },
-                  }),
-                ]);
-              } catch (error) {
-                session.report('receipt_failed', null);
-                throw error;
-              }
-            },
-            reportModelResponse: (metadata: ModelResponseMetadata) => {
-              if (
-                !response.open ||
-                !requestOpen ||
-                response.metadata !== null ||
-                attemptControl.signal.aborted ||
-                interruption() !== null
-              )
-                return;
-              try {
-                response.metadata = captureModelResponse(metadata);
-              } catch (error) {
-                response.reportIssues.response ??= captureModelIssue(
-                  'protocol',
-                  error,
-                );
-                throw new ModelRequestError('invalid_response');
-              }
-            },
-            reportModelChoice: (metadata: ModelChoiceMetadata) => {
-              if (
-                !response.open ||
-                !requestOpen ||
-                response.choice !== null ||
-                attemptControl.signal.aborted ||
-                interruption() !== null
-              )
-                return;
-              try {
-                response.choice = captureModelChoice(metadata);
-              } catch (error) {
-                response.reportIssues.choice ??= captureModelIssue(
-                  'protocol',
-                  error,
-                );
-                throw new ModelRequestError('invalid_response');
-              }
-            },
-          }),
-          attempt,
-        );
-        requestOpen = false;
-      } catch (error) {
-        requestOpen = false;
-        try {
-          await session.commit(session.state, [
-            session.event('model_result_received', 'failed', {
-              ...details,
-              currentAtReceipt:
-                response.open &&
-                interruption() === null &&
-                !attemptControl.signal.aborted,
-              reasonCode:
-                error instanceof ModelRequestError
-                  ? error.code
-                  : 'request_failed',
-            }),
-          ]);
-        } catch (receiptError) {
-          session.report('receipt_failed', null);
-          throw receiptError;
-        }
-        throw error;
-      }
-      let value: JsonValue;
-      let usage: JsonObject | null;
-      try {
-        value = parseJsonValue(output.value, 'model_result');
-        usage =
-          output.usage === null
-            ? null
-            : requireObject(
-                parseJsonValue(output.usage, 'model_result'),
-                validation,
-                '/usage',
-              );
-      } catch (error) {
-        const issue = captureModelIssue('protocol', error);
-        try {
-          await session.commit(session.state, [
-            session.event('model_result_received', 'invalid_output', {
-              ...details,
-              issue: { ...issue },
-              currentAtReceipt:
-                response.open &&
-                interruption() === null &&
-                !attemptControl.signal.aborted,
-            }),
-          ]);
-        } catch (receiptError) {
-          session.report('receipt_failed', null);
-          throw receiptError;
-        }
-        throw new ModelRequestError('invalid_response', 0, issue);
-      }
-      try {
-        await session.commit(session.state, [
-          session.event('model_result_received', 'returned', {
-            ...details,
-            currentAtReceipt:
-              response.open &&
-              interruption() === null &&
-              !attemptControl.signal.aborted,
-            value,
-            usage,
-          }),
-        ]);
-        // T describes the adapter's JSON value; capture retains its shape and removes caller ownership.
-        return { value: value as T, usage };
-      } catch (error) {
-        session.report('receipt_failed', null);
-        throw error;
-      }
-    });
-    response.open = false;
-    await dispatchCommit;
     if (!invoked) {
       await session.commit(
         {
@@ -503,9 +319,9 @@ export async function invokeModel<T>(
         ? result.error.issue
         : null;
     let usage: JsonObject | null =
-      response.metadata?.usage == null ? null : { ...response.metadata.usage };
+      metadata?.usage == null ? null : { ...metadata.usage };
     let failure: ModelFailureCode | null = null;
-    if (result.outcome === 'returned' && response.metadata === null) {
+    if (result.outcome === 'returned' && metadata === null) {
       usage = result.value.usage;
     } else if (result.outcome === 'failed') {
       failure =
@@ -535,21 +351,18 @@ export async function invokeModel<T>(
             ...details,
             usage,
             ...(issue === null ? {} : { issue: { ...issue } }),
-            ...(Object.keys(response.reportIssues).length === 0
+            ...(Object.keys(reportIssues).length === 0
               ? {}
               : {
-                  reportIssues: parseJsonValue(
-                    response.reportIssues,
-                    validation.stage,
-                  ),
+                  reportIssues: parseJsonValue(reportIssues, validation.stage),
                 }),
-            ...(response.choice === null
+            ...(choice === null
               ? {}
-              : { choice: parseJsonValue(response.choice, validation.stage) }),
+              : { choice: parseJsonValue(choice, validation.stage) }),
             response:
-              response.metadata === null
+              metadata === null
                 ? null
-                : parseJsonValue(response.metadata, validation.stage),
+                : parseJsonValue(metadata, validation.stage),
             durationMs: Math.max(0, Date.now() - startedAt),
           },
         ),
@@ -607,4 +420,249 @@ export async function invokeModel<T>(
       return { outcome: interruption() ?? 'cancelled' };
   }
   throw new Error('Unreachable model attempt limit');
+}
+
+/**
+ * Dispatch one reserved attempt and close acceptance hooks when bounded waiting ends.
+ * Raw response receipts remain available for late provider output. Await dispatch
+ * persistence before returning so the caller can refund only unsent attempts.
+ */
+async function performModelAttempt<T>(
+  session: RunSession,
+  details: ModelAttemptDetails,
+  control: CapturedControl,
+  interruption: () => 'cancelled' | 'invalidated' | 'deadlineExceeded' | null,
+  invoke: (
+    control: CallControl,
+    attempt: number,
+  ) => Promise<{ readonly value: T; readonly usage: JsonObject | null }>,
+): Promise<ModelAttemptResult<T>> {
+  const { requestId, attempt } = details;
+  let dispatchCommit: Promise<void> | undefined;
+  let invoked = false;
+  let requestOpen = true;
+  let bodySequence = 0;
+  let resultSequence = 0;
+  let projectionSequence = 0;
+  const response: {
+    metadata: ModelResponseMetadata | null;
+    choice: ModelChoiceMetadata | null;
+    reportIssues: Partial<Record<'response' | 'choice', ModelResponseIssue>>;
+    open: boolean;
+  } = { metadata: null, choice: null, reportIssues: {}, open: true };
+  const startedAt = Date.now();
+  const result = await invokeControlled(control, async (attemptControl) => {
+    dispatchCommit = session.commit(
+      {
+        ...session.state,
+        pendingModels: session.state.pendingModels.map((entry) =>
+          entry.requestId === requestId && entry.attempt === attempt
+            ? { ...entry, phase: 'dispatched' }
+            : entry,
+        ),
+      },
+      [session.event('model_dispatched', 'request_dispatched', details)],
+    );
+    await dispatchCommit;
+    if (attemptControl.signal.aborted || interruption() !== null)
+      throw new DOMException('Model request cancelled', 'AbortError');
+    invoked = true;
+    let output: { readonly value: T; readonly usage: JsonObject | null };
+    try {
+      output = await invoke(
+        Object.freeze({
+          ...attemptControl,
+          recordModelProjection: async (input: ModelProjectionRecord) => {
+            const projection = captureModelProjectionRecord(input);
+            if (
+              !response.open ||
+              !requestOpen ||
+              attemptControl.signal.aborted ||
+              interruption() !== null
+            )
+              throw new DOMException('Model request cancelled', 'AbortError');
+            await session.commit(session.state, [
+              session.event('model_projection', 'input_projected', {
+                ...details,
+                projectionSequence: ++projectionSequence,
+                projection: { ...projection },
+              }),
+            ]);
+            // A saved projection cannot authorize a send after this attempt closes.
+            if (
+              !response.open ||
+              !requestOpen ||
+              attemptControl.signal.aborted ||
+              interruption() !== null
+            )
+              throw new DOMException('Model request cancelled', 'AbortError');
+          },
+          recordModelRequest: async (input: ModelRequestRecord) => {
+            const body = captureModelRequestRecord(input);
+            if (
+              !response.open ||
+              !requestOpen ||
+              attemptControl.signal.aborted ||
+              interruption() !== null
+            )
+              throw new DOMException('Model request cancelled', 'AbortError');
+            await session.commit(session.state, [
+              session.event('model_request_body', 'request_prepared', {
+                ...details,
+                bodySequence: ++bodySequence,
+                request: { ...body },
+              }),
+            ]);
+            // Persistence can outlast cancellation or ownership. Never authorize a late send.
+            if (
+              !response.open ||
+              !requestOpen ||
+              attemptControl.signal.aborted ||
+              interruption() !== null
+            )
+              throw new DOMException('Model request cancelled', 'AbortError');
+          },
+          recordModelResult: async (input: ModelResponseRecord) => {
+            try {
+              const body = captureModelResultRecord(input);
+              await session.commit(session.state, [
+                session.event('model_response_body', 'response_received', {
+                  ...details,
+                  resultSequence: ++resultSequence,
+                  currentAtReceipt:
+                    response.open &&
+                    interruption() === null &&
+                    !attemptControl.signal.aborted,
+                  response: { ...body },
+                }),
+              ]);
+            } catch (error) {
+              session.report('receipt_failed', null);
+              throw error;
+            }
+          },
+          reportModelResponse: (metadata: ModelResponseMetadata) => {
+            if (
+              !response.open ||
+              !requestOpen ||
+              response.metadata !== null ||
+              attemptControl.signal.aborted ||
+              interruption() !== null
+            )
+              return;
+            try {
+              response.metadata = captureModelResponse(metadata);
+            } catch (error) {
+              response.reportIssues.response ??= captureModelIssue(
+                'protocol',
+                error,
+              );
+              throw new ModelRequestError('invalid_response');
+            }
+          },
+          reportModelChoice: (metadata: ModelChoiceMetadata) => {
+            if (
+              !response.open ||
+              !requestOpen ||
+              response.choice !== null ||
+              attemptControl.signal.aborted ||
+              interruption() !== null
+            )
+              return;
+            try {
+              response.choice = captureModelChoice(metadata);
+            } catch (error) {
+              response.reportIssues.choice ??= captureModelIssue(
+                'protocol',
+                error,
+              );
+              throw new ModelRequestError('invalid_response');
+            }
+          },
+        }),
+        attempt,
+      );
+      requestOpen = false;
+    } catch (error) {
+      requestOpen = false;
+      try {
+        await session.commit(session.state, [
+          session.event('model_result_received', 'failed', {
+            ...details,
+            currentAtReceipt:
+              response.open &&
+              interruption() === null &&
+              !attemptControl.signal.aborted,
+            reasonCode:
+              error instanceof ModelRequestError
+                ? error.code
+                : 'request_failed',
+          }),
+        ]);
+      } catch (receiptError) {
+        session.report('receipt_failed', null);
+        throw receiptError;
+      }
+      throw error;
+    }
+    let value: JsonValue;
+    let usage: JsonObject | null;
+    try {
+      value = parseJsonValue(output.value, 'model_result');
+      usage =
+        output.usage === null
+          ? null
+          : requireObject(
+              parseJsonValue(output.usage, 'model_result'),
+              validation,
+              '/usage',
+            );
+    } catch (error) {
+      const issue = captureModelIssue('protocol', error);
+      try {
+        await session.commit(session.state, [
+          session.event('model_result_received', 'invalid_output', {
+            ...details,
+            issue: { ...issue },
+            currentAtReceipt:
+              response.open &&
+              interruption() === null &&
+              !attemptControl.signal.aborted,
+          }),
+        ]);
+      } catch (receiptError) {
+        session.report('receipt_failed', null);
+        throw receiptError;
+      }
+      throw new ModelRequestError('invalid_response', 0, issue);
+    }
+    try {
+      await session.commit(session.state, [
+        session.event('model_result_received', 'returned', {
+          ...details,
+          currentAtReceipt:
+            response.open &&
+            interruption() === null &&
+            !attemptControl.signal.aborted,
+          value,
+          usage,
+        }),
+      ]);
+      // T describes the adapter's JSON value; capture retains its shape and removes caller ownership.
+      return { value: value as T, usage };
+    } catch (error) {
+      session.report('receipt_failed', null);
+      throw error;
+    }
+  });
+  response.open = false;
+  await dispatchCommit;
+  return {
+    invoked,
+    result,
+    metadata: response.metadata,
+    choice: response.choice,
+    reportIssues: response.reportIssues,
+    startedAt,
+  };
 }
