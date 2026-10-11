@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { JsonObject } from '#internal/contracts/json';
 import type { CandidateGenerationInput } from '#internal/contracts/candidate-processing';
+import type { DecisionBasis } from '#internal/contracts/decision';
 import type { RunCheckpoint, RunRecord } from '#internal/contracts/record';
 import type {
   ChangeBatch,
@@ -39,6 +40,16 @@ import {
 } from './checkpoint.js';
 import type { RuntimeIdentity, PendingModelAttempt } from './checkpoint.js';
 
+/** Authorizes one live stop boundary; recovery discards it before reviewing the proposal. */
+export interface PendingPlanAdoption {
+  readonly proposalId: string;
+  readonly executionId: string;
+  readonly decisionRequestId: string;
+  readonly decisionEventId: string;
+  readonly basis: DecisionBasis;
+  readonly acceptedAt: string;
+}
+
 export interface SessionState {
   readonly identity: RuntimeIdentity;
   readonly pendingModels: readonly PendingModelAttempt[];
@@ -49,6 +60,7 @@ export interface SessionState {
   readonly actionAttempts: number;
   readonly execution: ExecutionSnapshot | null;
   readonly pendingProposal: PendingPlanProposal | null;
+  readonly pendingAdoption: PendingPlanAdoption | null;
   readonly scheduling: SchedulingState;
   readonly observations: {
     /** False only while the internal initialization marker awaits a source snapshot. */
@@ -157,6 +169,7 @@ export class RunSession {
       actionAttempts: 0,
       execution: null,
       pendingProposal: null,
+      pendingAdoption: null,
       progress: [],
       progressAttempt: null,
       recentResults: [],
@@ -319,6 +332,15 @@ export class RunSession {
           : null;
       const unresolved = unknown !== null || execution?.phase === 'unknown';
       const records: RunRecordDraft[] = [record];
+      if (state.pendingAdoption !== null)
+        records.push(
+          session.event('plan_adoption_discarded', 'process_interrupted', {
+            proposalId: state.pendingAdoption.proposalId,
+            executionId: state.pendingAdoption.executionId,
+            decisionRequestId: state.pendingAdoption.decisionRequestId,
+            decisionEventId: state.pendingAdoption.decisionEventId,
+          }),
+        );
       for (const request of state.pendingModels)
         records.push(
           session.event('model_interrupted', 'process_interrupted', {
@@ -338,6 +360,7 @@ export class RunSession {
         {
           ...state,
           pendingModels: [],
+          pendingAdoption: null,
           control: {
             ...state.control,
             status: ['created', 'running', 'pausing'].includes(
@@ -648,6 +671,22 @@ export class RunSession {
         );
     }
     const control = transitionRun(input.control, command);
+    const pendingAdoption = input.pendingAdoption;
+    if (
+      pendingAdoption !== null &&
+      (command.kind === 'resume' || control.status !== 'running')
+    ) {
+      input = { ...input, pendingAdoption: null };
+      records = [
+        ...records,
+        this.event('plan_adoption_discarded', `run_${command.kind}`, {
+          proposalId: pendingAdoption.proposalId,
+          executionId: pendingAdoption.executionId,
+          decisionRequestId: pendingAdoption.decisionRequestId,
+          decisionEventId: pendingAdoption.decisionEventId,
+        }),
+      ];
+    }
     if (control === input.control) {
       if (records.length > 0 || input !== this.#state)
         await this.commit(input, records);
@@ -799,15 +838,22 @@ export class RunSession {
                   }),
             recentResults: state.recentResults,
             progress: Object.freeze(
-              state.progress.map(
-                ({ goalRef, noProgress, recoveryAttempts, highWater }) =>
+              state.progress
+                .filter(({ goalRef }) =>
+                  state.decision.context.graph.goals.some(
+                    (goal) =>
+                      goal.id === goalRef.id &&
+                      goal.version === goalRef.version,
+                  ),
+                )
+                .map(({ goalRef, noProgress, recoveryAttempts, highWater }) =>
                   Object.freeze({
                     goalRef,
                     noProgress,
                     recoveryAttempts,
                     highWater,
                   }),
-              ),
+                ),
             ),
             blocker: state.control.blocker,
             completedSiblings: Object.freeze(

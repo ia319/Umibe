@@ -20,7 +20,9 @@ import type {
   ControlDecision,
   DecisionRequest,
   DecisionOption,
+  ExecutionDisposition,
 } from '#internal/contracts/decision';
+import type { PlanRef } from '#internal/contracts/references';
 import type { ActionResult } from '#internal/contracts/record';
 import type {
   CandidateSelectionResult,
@@ -108,7 +110,9 @@ interface ReadySelection {
 }
 
 interface PlanAdoption<TCriteria extends JsonValue> {
-  readonly decision: CandidateGenerationInput;
+  readonly graph: GoalGraphSnapshot;
+  readonly planRef: PlanRef;
+  readonly guidance: string | null;
   readonly goals: GoalState;
   readonly criteria: Map<string, TCriteria>;
   readonly before: GoalGraphSnapshot;
@@ -389,6 +393,7 @@ export class RunDriver<TCriteria extends JsonValue> {
         invalidates && event.impact === 'plan'
           ? null
           : session.state.pendingProposal,
+      pendingAdoption: invalidates ? null : session.state.pendingAdoption,
       observations: observationOnly
         ? {
             ...session.state.observations,
@@ -400,6 +405,15 @@ export class RunDriver<TCriteria extends JsonValue> {
           }
         : session.state.observations,
     };
+    if (invalidates && session.state.pendingAdoption !== null)
+      records.push(
+        session.event('plan_adoption_discarded', 'decision_invalidated', {
+          proposalId: session.state.pendingAdoption.proposalId,
+          executionId: session.state.pendingAdoption.executionId,
+          decisionRequestId: session.state.pendingAdoption.decisionRequestId,
+          decisionEventId: session.state.pendingAdoption.decisionEventId,
+        }),
+      );
     if (
       invalidates &&
       event.impact === 'plan' &&
@@ -1173,7 +1187,11 @@ export class RunDriver<TCriteria extends JsonValue> {
               ...item,
               lastAssessment: assessment,
               lifecycle:
-                assessment.outcome === 'passed' ? 'succeeded' : 'inProgress',
+                assessment.outcome === 'passed'
+                  ? 'succeeded'
+                  : context.graph.goalPath.some((ref) => ref.id === goal.id)
+                    ? 'inProgress'
+                    : item.lifecycle,
             }
           : closed.has(item.id) &&
               (item.lifecycle === 'pending' || item.lifecycle === 'inProgress')
@@ -1259,10 +1277,25 @@ export class RunDriver<TCriteria extends JsonValue> {
   private async verify(): Promise<void> {
     const session = this.session;
     const path = [...session.state.decision.context.graph.goalPath].reverse();
-    for (const ref of path) {
+    // Adoption may focus another branch while the retained action finishes.
+    // Assess its surviving original goals before consuming that action's progress.
+    const retained = [...(session.state.progressAttempt?.before.goalPath ?? [])]
+      .reverse()
+      .filter(
+        (ref) =>
+          !path.some((current) => current.id === ref.id) &&
+          session.state.decision.context.graph.goals.some(
+            (goal) =>
+              goal.id === ref.id &&
+              goal.version === ref.version &&
+              (goal.lifecycle === 'pending' || goal.lifecycle === 'inProgress'),
+          ),
+      );
+    for (const ref of [...retained, ...path]) {
       const goal = session.state.decision.context.graph.goals.find(
-        (item) => item.id === ref.id,
-      )!;
+        (item) => item.id === ref.id && item.version === ref.version,
+      );
+      if (goal === undefined) continue;
       await this.verifyGoal(goal);
       if (session.state.control.status !== 'running') return;
     }
@@ -1630,20 +1663,75 @@ export class RunDriver<TCriteria extends JsonValue> {
         });
       }
     }
-    if (pending !== null && execution === null && this.proposalApplies(pending))
-      decisions.push({
-        kind: 'adoptPlan',
-        proposalId: pending.proposalId,
-        execution: { kind: 'none' },
-      });
+    if (pending !== null && this.proposalApplies(pending)) {
+      if (execution === null)
+        decisions.push({
+          kind: 'adoptPlan',
+          proposalId: pending.proposalId,
+          execution: { kind: 'none' },
+        });
+      else if (execution.stopCause === null) {
+        if (this.canKeepPlan(pending))
+          decisions.push({
+            kind: 'adoptPlan',
+            proposalId: pending.proposalId,
+            execution: {
+              kind: 'keep',
+              executionId: execution.intent.executionId,
+            },
+          });
+        decisions.push({
+          kind: 'adoptPlan',
+          proposalId: pending.proposalId,
+          execution: {
+            kind: 'stop',
+            executionId: execution.intent.executionId,
+          },
+        });
+      }
+    }
     return decisions;
+  }
+
+  private canKeepPlan(pending: PendingPlanProposal): boolean {
+    const execution = this.activeExecution();
+    const proposal = pending.proposal;
+    if (
+      execution === null ||
+      proposal.outcome === 'blocked' ||
+      proposal.outcome === 'claimComplete' ||
+      !this.proposalApplies(pending)
+    )
+      return false;
+    if (
+      (proposal.outcome === 'revise' || proposal.outcome === 'reconfirm') &&
+      proposal.revisions.some((revision) =>
+        execution.basis.context.graph.goalPath.some(
+          (ref) => ref.id === revision.goalRef.id,
+        ),
+      )
+    )
+      return false;
+    return (
+      this.execution.continuationInvalidationReason(
+        execution.intent.executionId,
+        this.session.state.decision,
+      ) === null
+    );
   }
 
   private async prepareAdoption(
     pending: PendingPlanProposal,
+    execution: ExecutionDisposition,
   ): Promise<PlanAdoption<TCriteria> | null> {
     const session = this.session;
-    if (!this.proposalApplies(pending) || session.hasExecution)
+    if (
+      !this.proposalApplies(pending) ||
+      (execution.kind === 'keep'
+        ? !this.canKeepPlan(pending) ||
+          this.activeExecution()?.intent.executionId !== execution.executionId
+        : session.hasExecution)
+    )
       throw new CallStopped();
     const current = session.state.decision.context;
     // Revalidate live goal membership while retaining the proposal's original response identity.
@@ -1688,18 +1776,10 @@ export class RunDriver<TCriteria extends JsonValue> {
     const criteria = new Map<string, TCriteria>();
     for (const goal of prepared.changed)
       criteria.set(`${goal.id}:${goal.version}`, await this.support(goal));
-    const decision = captureDecisionRequest({
-      requestId: randomUUID(),
-      decisionEpoch: session.state.decision.decisionEpoch + 1,
-      context: {
-        ...session.state.decision.context,
-        graph: prepared.graph,
-        planRef,
-        planGuidance: proposal.guidance,
-      },
-    });
     return {
-      decision,
+      graph: prepared.graph,
+      planRef,
+      guidance: proposal.guidance,
       goals: prepared.state,
       criteria,
       before: current.graph,
@@ -1953,9 +2033,40 @@ export class RunDriver<TCriteria extends JsonValue> {
     const chosen = option.decision;
     const pending = session.state.pendingProposal;
     let adoption: PlanAdoption<TCriteria> | null = null;
+    let continuationBasis: CandidateGenerationInput | null = null;
     try {
-      if (chosen.kind === 'adoptPlan' && pending !== null)
-        adoption = await this.prepareAdoption(pending);
+      if (chosen.kind === 'adoptPlan') {
+        if (pending === null) throw new CallStopped();
+        if (chosen.execution.kind !== 'stop')
+          adoption = await this.prepareAdoption(pending, chosen.execution);
+        if (chosen.execution.kind === 'keep') {
+          const execution = this.activeExecution();
+          if (adoption === null || execution === null) throw new CallStopped();
+          continuationBasis = {
+            requestId: request.requestId,
+            decisionEpoch: epoch,
+            context: {
+              ...session.state.decision.context,
+              graph: focusGoal(adoption.graph, execution.intent.currentGoalRef),
+              planRef: adoption.planRef,
+              planGuidance: adoption.guidance,
+            },
+          };
+          const continuation = await this.execution.checkContinuation(
+            chosen.execution.executionId,
+            continuationBasis,
+            this.control('checking'),
+          );
+          if (continuation.outcome !== 'allowed') {
+            await this.rejectDecision(
+              request,
+              `continuation_${continuation.outcome}`,
+              option.id,
+            );
+            return;
+          }
+        }
+      }
     } catch (error) {
       await this.rejectDecision(
         request,
@@ -1969,6 +2080,18 @@ export class RunDriver<TCriteria extends JsonValue> {
     }
     if (!this.decisionApplies(request)) {
       await this.rejectDecision(request, 'basis_changed', option.id);
+      return;
+    }
+    if (
+      continuationBasis !== null &&
+      chosen.kind === 'adoptPlan' &&
+      chosen.execution.kind === 'keep' &&
+      this.execution.continuationInvalidationReason(
+        chosen.execution.executionId,
+        continuationBasis,
+      ) !== null
+    ) {
+      await this.rejectDecision(request, 'continuation_stale', option.id);
       return;
     }
     const state = session.state;
@@ -1990,14 +2113,49 @@ export class RunDriver<TCriteria extends JsonValue> {
       decision: parseJsonValue(chosen, 'decision'),
       throughSequence,
     });
+    const stopAdoption =
+      chosen.kind === 'adoptPlan' && chosen.execution.kind === 'stop';
+    const adoptedDecision =
+      adoption === null ? null : this.adoptionDecision(adoption);
+    const continuation =
+      chosen.kind === 'adoptPlan' &&
+      chosen.execution.kind === 'keep' &&
+      adoptedDecision !== null &&
+      adoption !== null
+        ? {
+            executionId: chosen.execution.executionId,
+            decisionRequestId: request.requestId,
+            decisionEventId: accepted.eventId,
+            decisionEpoch: adoptedDecision.decisionEpoch,
+            planRef: adoption.planRef,
+            authorizedAt: new Date().toISOString(),
+          }
+        : null;
     await session.commit(
       {
         ...state,
-        ...(adoption === null
+        ...(adoption === null || adoptedDecision === null
           ? {}
-          : { decision: adoption.decision, goals: adoption.goals }),
+          : { decision: adoptedDecision, goals: adoption.goals }),
+        execution:
+          continuation !== null && state.execution !== null
+            ? { ...state.execution, continuation }
+            : state.execution,
         pendingProposal:
-          chosen.kind === 'adoptPlan' || discard ? null : state.pendingProposal,
+          (chosen.kind === 'adoptPlan' && !stopAdoption) || discard
+            ? null
+            : state.pendingProposal,
+        pendingAdoption:
+          chosen.kind === 'adoptPlan' && chosen.execution.kind === 'stop'
+            ? {
+                proposalId: chosen.proposalId,
+                executionId: chosen.execution.executionId,
+                decisionRequestId: request.requestId,
+                decisionEventId: accepted.eventId,
+                basis: request.basis,
+                acceptedAt: new Date().toISOString(),
+              }
+            : state.pendingAdoption,
         observations: {
           ...state.observations,
           lastReviewedEventSequence: throughSequence,
@@ -2008,6 +2166,14 @@ export class RunDriver<TCriteria extends JsonValue> {
       [
         accepted,
         ...(adoption?.records ?? []),
+        ...(continuation === null
+          ? []
+          : [
+              session.event('execution_continued', 'plan_adopted', {
+                ...continuation,
+                planRef: { ...continuation.planRef },
+              }),
+            ]),
         ...(selection !== null &&
         (chosen.kind === 'adoptPlan' || chosen.kind === 'selectOperation')
           ? [
@@ -2031,32 +2197,16 @@ export class RunDriver<TCriteria extends JsonValue> {
       this.#selection = null;
       this.#readySelection = null;
       this.#selectionAuthorized = false;
-    }
-    if (adoption !== null) {
-      for (const [key, criteria] of adoption.criteria)
-        this.#criteria.set(key, criteria);
-      const live = new Set(
-        adoption.decision.context.graph.goals
-          .filter(
-            (goal) =>
-              goal.lifecycle === 'pending' || goal.lifecycle === 'inProgress',
-          )
-          .map((goal) => `${goal.id}:${goal.version}`),
-      );
-      for (const key of this.#criteria.keys())
-        if (!live.has(key)) this.#criteria.delete(key);
-      this.#verifyPending = adoption.verifyGoals;
-      if (adoption.verifyGoals) {
-        await this.observe();
-        await this.verify();
-        this.#verifyPending = false;
-        if (
-          session.state.control.status === 'running' &&
-          session.state.scheduling.planning !== null &&
-          pending !== null
-        )
-          await this.recordProgress(adoption.before, 'planning', false);
-      }
+      if (pending === null) throw new CallStopped();
+      if (chosen.execution.kind === 'stop')
+        await this.adoptAfterStop(
+          request,
+          pending,
+          chosen.execution.executionId,
+          accepted.eventId,
+        );
+      else if (session.canDispatch(adoptedDecision?.decisionEpoch ?? epoch))
+        await this.completeAdoption(pending, adoption);
       return;
     }
     if (!session.canDispatch(epoch)) return;
@@ -2108,25 +2258,160 @@ export class RunDriver<TCriteria extends JsonValue> {
         if (session.canDispatch(epoch)) this.launchPlanning(trigger);
         return;
       }
-      case 'adoptPlan':
-        if (pending?.proposal.outcome === 'blocked')
-          await this.block(pending.proposal.reason);
-        else if (pending?.proposal.outcome === 'claimComplete') {
-          const claimedGoalId = pending.proposal.goalRef.id;
-          await this.observe();
-          await this.verify();
-          if (
-            session.state.control.status === 'running' &&
-            session.state.decision.context.graph.goals.find(
-              (goal) => goal.id === claimedGoalId,
-            )?.lastAssessment?.outcome !== 'passed'
-          )
-            await this.block('completion_not_verified');
-        }
     }
   }
 
-  private async stopExecution(
+  /** Merge the prepared plan with facts received while support or continuation checks awaited. */
+  private adoptionDecision(
+    adoption: PlanAdoption<TCriteria>,
+  ): CandidateGenerationInput {
+    const current = this.session.state.decision;
+    return captureDecisionRequest({
+      requestId: randomUUID(),
+      decisionEpoch: current.decisionEpoch + 1,
+      context: {
+        ...current.context,
+        graph: adoption.graph,
+        planRef: adoption.planRef,
+        planGuidance: adoption.guidance,
+      },
+    });
+  }
+
+  private async completeAdoption(
+    pending: PendingPlanProposal,
+    adoption: PlanAdoption<TCriteria> | null,
+  ): Promise<void> {
+    const session = this.session;
+    if (adoption === null) {
+      if (pending.proposal.outcome === 'blocked')
+        await this.block(pending.proposal.reason);
+      else if (pending.proposal.outcome === 'claimComplete') {
+        const claimedGoal = pending.proposal.goalRef;
+        await this.observe();
+        await this.verify();
+        this.#verifyPending = false;
+        if (
+          session.state.control.status === 'running' &&
+          session.state.decision.context.graph.goals.find(
+            (goal) =>
+              goal.id === claimedGoal.id &&
+              goal.version === claimedGoal.version,
+          )?.lastAssessment?.outcome !== 'passed'
+        )
+          await this.block('completion_not_verified');
+      }
+      return;
+    }
+    for (const [key, criteria] of adoption.criteria)
+      this.#criteria.set(key, criteria);
+    const live = new Set(
+      adoption.graph.goals
+        .filter(
+          (goal) =>
+            goal.lifecycle === 'pending' || goal.lifecycle === 'inProgress',
+        )
+        .map((goal) => `${goal.id}:${goal.version}`),
+    );
+    for (const key of this.#criteria.keys())
+      if (!live.has(key)) this.#criteria.delete(key);
+    this.#verifyPending ||= adoption.verifyGoals;
+    if (this.#verifyPending && !session.hasExecution) {
+      await this.observe();
+      await this.verify();
+      this.#verifyPending = false;
+      if (
+        adoption.verifyGoals &&
+        session.state.control.status === 'running' &&
+        session.state.scheduling.planning !== null
+      )
+        await this.recordProgress(adoption.before, 'planning', false);
+    }
+  }
+
+  /** A live stop decision authorizes adoption after settlement, without another policy call. */
+  private async adoptAfterStop(
+    request: DecisionRequest,
+    pending: PendingPlanProposal,
+    executionId: string,
+    decisionEventId: string,
+  ): Promise<void> {
+    const session = this.session;
+    const applicable = () =>
+      session.canDispatch(request.basis.decisionEpoch) &&
+      session.state.pendingAdoption?.decisionEventId === decisionEventId &&
+      session.state.pendingProposal?.proposalId === pending.proposalId &&
+      this.proposalApplies(pending);
+    let discardReason = 'basis_changed';
+    try {
+      if (!applicable()) throw new CallStopped();
+      await this.awaitExecutionStop(executionId, decisionEventId);
+      if (!applicable()) throw new CallStopped();
+      // Verify only after applying the plan; old-plan verification could advance
+      // its goal and invalidate an otherwise applicable approved proposal.
+      await this.observe();
+      if (!applicable()) throw new CallStopped();
+      const adoption = await this.prepareAdoption(pending, { kind: 'none' });
+      if (!applicable()) throw new CallStopped();
+      const state = session.state;
+      const decision =
+        adoption === null ? state.decision : this.adoptionDecision(adoption);
+      await session.commit(
+        {
+          ...state,
+          decision,
+          goals: adoption?.goals ?? state.goals,
+          pendingProposal: null,
+          pendingAdoption: null,
+          scheduling: requestReview(state.scheduling),
+        },
+        [
+          ...(adoption?.records ?? []),
+          session.event('plan_adoption_completed', 'execution_stopped', {
+            proposalId: pending.proposalId,
+            executionId,
+            decisionRequestId: request.requestId,
+            decisionEventId,
+          }),
+        ],
+      );
+      if (session.canDispatch(decision.decisionEpoch))
+        await this.completeAdoption(pending, adoption);
+    } catch (error) {
+      discardReason =
+        error instanceof ContractError
+          ? error.reason
+          : error instanceof CallStopped
+            ? applicable()
+              ? 'execution_unsettled'
+              : 'basis_changed'
+            : (session.state.control.stopCause?.reasonCode ??
+              'adoption_failed');
+      throw error;
+    } finally {
+      if (
+        session.failure === null &&
+        session.state.pendingAdoption?.decisionEventId === decisionEventId
+      )
+        await session.commit(
+          {
+            ...session.state,
+            pendingAdoption: null,
+            scheduling: requestReview(session.state.scheduling),
+          },
+          [
+            session.event('plan_adoption_discarded', discardReason, {
+              proposalId: pending.proposalId,
+              executionId,
+              decisionRequestId: request.requestId,
+              decisionEventId,
+            }),
+          ],
+        );
+    }
+  }
+
+  private async awaitExecutionStop(
     executionId: string,
     eventId: string,
   ): Promise<void> {
@@ -2135,7 +2420,22 @@ export class RunDriver<TCriteria extends JsonValue> {
       reasonCode: 'decision_stop',
     });
     await this.#executionTask;
-    if (this.session.hasExecution) throw new CallStopped();
+    const execution = this.session.state.execution;
+    if (
+      this.session.hasExecution ||
+      execution?.intent.executionId !== executionId ||
+      execution.result === null ||
+      execution.result.outcome === 'unknown' ||
+      !execution.result.underlyingSettled
+    )
+      throw new CallStopped();
+  }
+
+  private async stopExecution(
+    executionId: string,
+    eventId: string,
+  ): Promise<void> {
+    await this.awaitExecutionStop(executionId, eventId);
     if (
       this.#verifyPending &&
       this.session.state.control.status === 'running'

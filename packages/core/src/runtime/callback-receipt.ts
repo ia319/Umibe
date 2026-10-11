@@ -10,7 +10,8 @@ import type { RunSession } from './session.js';
 
 interface CallbackReceiptRequest {
   readonly stage: 'observation' | 'support' | 'checking' | 'rechecking';
-  readonly phase: 'initialization' | 'execution' | 'resume' | 'selection';
+  readonly phase:
+    'initialization' | 'execution' | 'resume' | 'selection' | 'continuation';
   readonly decisionEpoch: number;
   readonly input: unknown;
 }

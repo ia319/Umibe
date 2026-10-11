@@ -16,7 +16,7 @@ import type { RunCheckpoint } from '#internal/contracts/record';
 import type { SessionState } from './session.js';
 import { captureLimits } from './limits.js';
 
-export const runtimeStateSchemaVersion = 4;
+export const runtimeStateSchemaVersion = 5;
 const context = {
   code: 'INVALID_RUN_CHECKPOINT',
   stage: 'runtime_checkpoint',
@@ -24,6 +24,11 @@ const context = {
 const text = z.string().min(1);
 const count = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const ref = z.strictObject({ id: text, version: count.min(1) });
+const planRef = z.strictObject({
+  id: text,
+  version: count.min(1),
+  rootGoalVersion: count.min(1),
+});
 const cause = z.strictObject({ eventId: text, reasonCode: text }).nullable();
 const stage = z.enum([
   'decision',
@@ -183,6 +188,29 @@ const pendingProposal = z
       maxDepth: null,
     }),
   }));
+const pendingAdoption = z.strictObject({
+  proposalId: text,
+  executionId: text,
+  decisionRequestId: text,
+  decisionEventId: text,
+  basis: z.strictObject({
+    runId: text,
+    decisionEpoch: count,
+    rootGoalRef: ref,
+    currentGoalRef: ref,
+    goalPath: z.array(ref).min(1),
+    planRef: planRef.nullable(),
+    constraintsVersion: count.min(1),
+    observationRef: z.strictObject({ id: text, revision: count }),
+    reviewVersion: count,
+    throughSequence: count,
+    operationSetId: text,
+    executionId: text.nullable(),
+    selectionId: text.nullable(),
+    proposalId: text.nullable(),
+  }),
+  acceptedAt: timestamp,
+});
 const schema = z.strictObject({
   identity,
   pendingModels: z.array(pendingModel),
@@ -244,9 +272,20 @@ const schema = z.strictObject({
       reconciliation: z.enum(['performed', 'notPerformed']).nullable(),
       progress: jsonObject,
       stopCause: cause,
+      continuation: z
+        .strictObject({
+          executionId: text,
+          decisionRequestId: text,
+          decisionEventId: text,
+          decisionEpoch: count,
+          planRef,
+          authorizedAt: timestamp,
+        })
+        .nullable(),
     })
     .nullable(),
   pendingProposal: pendingProposal.nullable(),
+  pendingAdoption: pendingAdoption.nullable(),
   scheduling: z.strictObject({
     policyVersion: z.literal(2),
     reviewPending: z.boolean(),
@@ -311,6 +350,7 @@ export function parseRuntimeState(input: unknown): SessionState {
         state.pendingModels.length !== 0 ||
         state.execution !== null ||
         state.pendingProposal !== null ||
+        state.pendingAdoption !== null ||
         state.scheduling.lastDecisionStartedAt !== null ||
         state.recentResults.length !== 0 ||
         state.decision.context.lastActionResult !== null ||
@@ -355,6 +395,32 @@ export function parseRuntimeState(input: unknown): SessionState {
         ))
     )
       fail('/pendingProposal/request', 'invalid_planning_basis');
+    if (state.pendingAdoption !== null) {
+      const adoption = state.pendingAdoption;
+      const proposal = state.pendingProposal;
+      const basis = adoption.basis;
+      if (
+        proposal === null ||
+        adoption.proposalId !== proposal.proposalId ||
+        basis.proposalId !== adoption.proposalId ||
+        basis.executionId !== adoption.executionId ||
+        adoption.executionId !== state.execution?.intent.executionId ||
+        basis.runId !== current.runId ||
+        basis.decisionEpoch < proposal.request.decisionEpoch ||
+        basis.decisionEpoch > state.decision.decisionEpoch ||
+        basis.reviewVersion > state.scheduling.reviewVersion ||
+        basis.throughSequence > observations.lastReviewedEventSequence ||
+        !same(basis.rootGoalRef, proposal.request.context.graph.rootGoalRef) ||
+        !same(
+          basis.currentGoalRef,
+          proposal.request.context.graph.currentGoalRef,
+        ) ||
+        !same(basis.goalPath, proposal.request.context.graph.goalPath) ||
+        !same(basis.planRef, proposal.request.context.planRef) ||
+        basis.constraintsVersion !== proposal.request.context.constraintsVersion
+      )
+        fail('/pendingAdoption', 'adoption_basis_mismatch');
+    }
     const children = new Set(
       [
         ...current.goals.filter((goal) => goal.kind === 'child'),
@@ -425,6 +491,16 @@ export function parseRuntimeState(input: unknown): SessionState {
         execution.intent.constraintsVersion !== basis.constraintsVersion
       )
         fail('/execution/basis', 'execution_basis_mismatch');
+      const continuation = execution.continuation;
+      if (
+        continuation !== null &&
+        (continuation.executionId !== execution.intent.executionId ||
+          continuation.decisionEpoch <= execution.decisionEpoch ||
+          continuation.decisionEpoch > state.decision.decisionEpoch ||
+          continuation.planRef.rootGoalVersion !==
+            execution.intent.rootGoalRef.version)
+      )
+        fail('/execution/continuation', 'continuation_basis_mismatch');
       if (
         execution.result === null
           ? !['prepared', 'running'].includes(execution.phase)

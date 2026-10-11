@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { ActionRegistry } from '#internal/action/registry';
 import type {
+  ActionCheck,
   PreparedAction,
   Reconciliation,
 } from '#internal/contracts/action';
@@ -12,6 +13,7 @@ import type { JsonObject, JsonValue } from '#internal/contracts/json';
 import type { CandidateGenerationInput } from '#internal/contracts/candidate-processing';
 import { captureControl, invokeControlled } from '#internal/candidate/control';
 import type { InvocationResult } from '#internal/candidate/control';
+import { captureDecisionRequest } from '#internal/candidate/context';
 import { getSelectedCall } from '#internal/candidate/handles';
 import {
   candidateInvalidationReason,
@@ -22,6 +24,7 @@ import { ContractError } from '#internal/errors';
 import { requireObject, requireString } from '#internal/validation/fields';
 import { isJsonArray, parseJsonValue } from '#internal/validation/json';
 import { parseObservation } from '#internal/validation/observation';
+import { parseActionCheck } from '#internal/validation/action-check';
 import { readActionResult } from '#internal/validation/record';
 import type { RunSession } from './session.js';
 import type { RunCause } from './state.js';
@@ -29,6 +32,17 @@ import { captureObservation } from './observation.js';
 import { captureCallback } from './callback-receipt.js';
 import { ModelRequestError } from './model.js';
 import { requestReview } from './scheduling.js';
+
+/** Records later-plan authorization without rewriting the original intent or launch basis. */
+export interface ExecutionContinuation {
+  readonly executionId: string;
+  readonly decisionRequestId: string;
+  readonly decisionEventId: string;
+  /** Adopted plan epoch; the execution snapshot retains its original launch epoch. */
+  readonly decisionEpoch: number;
+  readonly planRef: ActionIntent['planRef'];
+  readonly authorizedAt: string;
+}
 
 export interface ExecutionSnapshot {
   readonly basis: CandidateGenerationInput;
@@ -41,6 +55,8 @@ export interface ExecutionSnapshot {
   readonly reconciliation: 'performed' | 'notPerformed' | null;
   readonly progress: JsonObject;
   readonly stopCause: RunCause | null;
+  /** Latest later-plan authorization, retained as history after execution or recovery. */
+  readonly continuation: ExecutionContinuation | null;
 }
 
 export type ActionStartResult =
@@ -57,6 +73,8 @@ interface Attempt {
   readonly intent: ActionIntent;
   readonly release: () => void;
   dispatched: boolean;
+  // Raw settlement closes continuation before result persistence and verification finish.
+  responseReceived: boolean;
   result: ActionResult | null;
   stopCause: RunCause | null;
   progress: JsonObject;
@@ -93,6 +111,7 @@ export class ActionCoordinator {
         intent: execution.intent,
         release: session.claimExecution(),
         dispatched: true,
+        responseReceived: true,
         result: execution.result,
         stopCause: execution.stopCause,
         progress: execution.result.progress,
@@ -262,6 +281,7 @@ export class ActionCoordinator {
         intent,
         release,
         dispatched: false,
+        responseReceived: false,
         result: null,
         stopCause: null,
         progress: {},
@@ -285,6 +305,7 @@ export class ActionCoordinator {
             reconciliation: null,
             progress: {},
             stopCause: null,
+            continuation: null,
           }),
         },
         [
@@ -347,6 +368,209 @@ export class ActionCoordinator {
         if (session.failure === null)
           await this.settleStop(attempt?.result ?? null);
       }
+    }
+  }
+
+  /**
+   * Retain only a live call whose original goal path and hard constraints survive.
+   * The proposed graph may focus another goal; plan references and guidance can
+   * change without changing the fixed parameters or original execution ownership.
+   */
+  continuationInvalidationReason(
+    executionId: string,
+    input: CandidateGenerationInput,
+  ): string | null {
+    const attempt = this.#attempt;
+    const execution = this.session.state.execution;
+    if (!this.session.canDispatch(input.decisionEpoch))
+      return 'run_or_decision_inactive';
+    if (
+      attempt === null ||
+      attempt.intent.executionId !== executionId ||
+      attempt.selected === null ||
+      !attempt.dispatched ||
+      attempt.responseReceived ||
+      attempt.reconciled ||
+      attempt.result !== null ||
+      attempt.stopCause !== null ||
+      !this.session.hasExecution ||
+      execution?.intent.executionId !== executionId ||
+      execution.phase !== 'running' ||
+      execution.result !== null ||
+      execution.stopCause !== null
+    )
+      return 'execution_changed';
+    const original = attempt.selected.filtered.checked.prepared.request;
+    const capability = this.registry.capabilities.find(
+      (entry) => entry.id === attempt.intent.actionId,
+    );
+    if (capability === undefined) return 'action_unavailable';
+    if (capability.version !== attempt.intent.actionVersion)
+      return 'action_version_changed';
+    if (
+      capability !==
+      original.capabilities.find((entry) => entry.id === capability.id)
+    )
+      return 'action_registration_changed';
+    const previous = attempt.basis.context;
+    const current = input.context;
+    if (current.graph.runId !== previous.graph.runId) return 'run_changed';
+    if (
+      current.graph.rootGoalRef.id !== previous.graph.rootGoalRef.id ||
+      current.graph.rootGoalRef.version !== previous.graph.rootGoalRef.version
+    )
+      return 'root_goal_changed';
+    const currentGoals = new Map(
+      current.graph.goals.map((goal) => [goal.id, goal]),
+    );
+    const previousGoals = new Map(
+      previous.graph.goals.map((goal) => [goal.id, goal]),
+    );
+    for (const ref of previous.graph.goalPath) {
+      const goal = currentGoals.get(ref.id);
+      const prior = previousGoals.get(ref.id)!;
+      if (goal === undefined || goal.version !== ref.version)
+        return 'goal_path_changed';
+      if (goal.lifecycle !== 'pending' && goal.lifecycle !== 'inProgress')
+        return 'inactive_goal_path';
+      // Plan adoption may update acceptedPlanRef while preserving the goal itself.
+      if (
+        goal.kind !== prior.kind ||
+        goal.description !== prior.description ||
+        canonicalJson(goal.criteria) !== canonicalJson(prior.criteria) ||
+        JSON.stringify(goal.parentGoalRef) !==
+          JSON.stringify(prior.parentGoalRef) ||
+        (goal.kind === 'root' &&
+          prior.kind === 'root' &&
+          canonicalJson([
+            goal.hardConstraints,
+            goal.limits,
+            goal.preferences,
+          ]) !==
+            canonicalJson([
+              prior.hardConstraints,
+              prior.limits,
+              prior.preferences,
+            ]))
+      )
+        return 'goal_definition_changed';
+    }
+    if (current.planRef === null) return 'plan_unavailable';
+    if (
+      current.constraintsVersion !== previous.constraintsVersion ||
+      canonicalJson(current.effectiveConstraints) !==
+        canonicalJson(previous.effectiveConstraints) ||
+      canonicalJson(current.applicationContext ?? {}) !==
+        canonicalJson(previous.applicationContext ?? {})
+    )
+      return 'constraints_changed';
+    if (current.observation.revision < previous.observation.revision)
+      return 'observation_regressed';
+    if (
+      current.observation.revision === previous.observation.revision &&
+      canonicalJson(parseJsonValue(current.observation, validation.stage)) !==
+        canonicalJson(parseJsonValue(previous.observation, validation.stage))
+    )
+      return 'observation_conflict';
+    return null;
+  }
+
+  /**
+   * Check the original fixed call against a proposed context focused on its goal.
+   * Use the current review epoch before adoption. Cancellation bounds acceptance;
+   * late callback receipts remain recorded. Success grants no continuation authority:
+   * the caller must check live state again and commit authorization with the plan.
+   * Invalid arguments and storage failures reject; callback failures return failed.
+   */
+  async checkContinuation(
+    executionId: string,
+    input: CandidateGenerationInput,
+    controlInput: CallControl,
+  ): Promise<
+    | ActionCheck
+    | { readonly outcome: 'stale' | 'failed'; readonly reason: string }
+  > {
+    const session = this.session;
+    if (session.failure !== null) throw session.failure;
+    const request = captureDecisionRequest(input);
+    const supplied = captureControl(controlInput);
+    const control = captureControl({
+      ...supplied,
+      signal: AbortSignal.any([
+        supplied.signal,
+        session.signal,
+        session.ownershipSignal,
+      ]),
+      deadlineAt: new Date(
+        Math.min(
+          supplied.deadlineMs,
+          Date.now() + session.state.limits.callbackTimeoutMs,
+        ),
+      ).toISOString(),
+    });
+    const reason = this.continuationInvalidationReason(executionId, request);
+    if (reason !== null) return { outcome: 'stale', reason };
+    const attempt = this.#attempt!;
+    if (
+      request.context.graph.currentGoalRef.id !==
+        attempt.intent.currentGoalRef.id ||
+      request.context.graph.currentGoalRef.version !==
+        attempt.intent.currentGoalRef.version ||
+      JSON.stringify(request.context.graph.goalPath) !==
+        JSON.stringify(attempt.basis.context.graph.goalPath)
+    )
+      return { outcome: 'stale', reason: 'current_goal_changed' };
+    const selected = attempt.selected!;
+    const call = getSelectedCall(selected);
+    const current = () =>
+      this.#attempt === attempt &&
+      this.continuationInvalidationReason(executionId, request) === null;
+    let answer: InvocationResult<JsonValue>;
+    try {
+      answer = await captureCallback(
+        session,
+        {
+          stage: 'rechecking',
+          phase: 'continuation',
+          decisionEpoch: request.decisionEpoch,
+          input: {
+            executionId,
+            intent: attempt.intent,
+            candidate: selected.candidate,
+            call: call.call,
+            basis: request,
+          },
+        },
+        control,
+        current,
+        (callbackControl) => call.check(request.context, callbackControl),
+      );
+    } catch (error) {
+      if (session.failure !== null) throw error;
+      return { outcome: 'failed', reason: 'invalid_result' };
+    }
+    const stale = this.continuationInvalidationReason(executionId, request);
+    if (this.#attempt !== attempt || stale !== null)
+      return { outcome: 'stale', reason: stale ?? 'execution_changed' };
+    if (answer.outcome !== 'returned')
+      return {
+        outcome: 'failed',
+        reason:
+          answer.outcome === 'failed'
+            ? 'callback_failed'
+            : answer.outcome === 'deadlineExceeded'
+              ? 'deadline_exceeded'
+              : 'cancelled',
+      };
+    if (control.signal.aborted || Date.now() >= control.deadlineMs)
+      return {
+        outcome: 'failed',
+        reason: control.signal.aborted ? 'cancelled' : 'deadline_exceeded',
+      };
+    try {
+      return parseActionCheck(answer.value);
+    } catch {
+      return { outcome: 'failed', reason: 'invalid_result' };
     }
   }
 
@@ -716,6 +940,7 @@ export class ActionCoordinator {
       void Promise.resolve(returned)
         .then(
           async (raw) => {
+            attempt.responseReceived = true;
             const receipt = this.captureActionReceipt(
               attempt,
               'action_execution',
@@ -799,6 +1024,7 @@ export class ActionCoordinator {
             await accept(result);
           },
           async (error: unknown) => {
+            attempt.responseReceived = true;
             const receipt = this.captureActionReceipt(
               attempt,
               'action_execution',
