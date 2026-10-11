@@ -75,7 +75,7 @@ function failure(error: unknown): StoreFailure {
   };
 }
 
-port.on('message', ({ id, command }: StoreRequest) => {
+port.on('message', function handleRequest({ id, command }: StoreRequest) {
   let response: StoreResponse;
   try {
     response = { id, ok: true, value: execute(command) };
@@ -102,5 +102,13 @@ port.on('message', ({ id, command }: StoreRequest) => {
   port.postMessage(response);
   if (process.env.UMIBE_SQLITE_TRACE === '1' && !response.ok && response.fatal)
     writeSync(2, `[sqlite-diag worker ${process.pid}] fatal response posted\n`);
-  if (command.op === 'close') port.close();
+  if (command.op === 'close' || (!response.ok && response.fatal)) {
+    // Stop queued commands and drain native finalizers without releasing a failed owner's claim.
+    port.off('message', handleRequest);
+    try {
+      if (command.op !== 'close') database.dispose();
+    } finally {
+      port.close();
+    }
+  }
 });

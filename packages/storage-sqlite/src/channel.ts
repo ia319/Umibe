@@ -98,6 +98,8 @@ export class WorkerChannel {
         this.worker.postMessage({ id, command });
       } catch {
         this.fail(new StoreError('STORE_WORKER_FAILED', 'worker_send_failed'));
+        // A failed send leaves no reliable route for cooperative shutdown.
+        void this.worker.terminate();
       }
     });
   }
@@ -111,9 +113,8 @@ export class WorkerChannel {
     if (process.env.UMIBE_SQLITE_TRACE === '1')
       writeSync(
         2,
-        `[sqlite-diag main ${process.pid}] terminate worker after ${String(error)}\n`,
+        `[sqlite-diag main ${process.pid}] channel failed after ${String(error)}\n`,
       );
-    void this.worker.terminate();
   }
 
   close(): Promise<void> {

@@ -434,11 +434,19 @@ export class RunDatabase {
           ).run(process.pid, this.processToken);
         }).immediate();
     } finally {
-      db?.close();
+      this.dispose();
+    }
+    return null;
+  }
+
+  /** Close native resources without releasing the persisted process claim. */
+  dispose(): void {
+    try {
+      this.db?.close();
+    } finally {
       this.db = undefined;
       this.leases.clear();
       this.ownsDatabase = false;
     }
-    return null;
   }
 }
