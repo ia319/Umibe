@@ -125,7 +125,7 @@ export class RunDriver<TCriteria extends JsonValue> {
   readonly execution: ActionCoordinator;
   #task: Promise<void> | null = null;
   readonly #criteria = new Map<string, TCriteria>();
-  readonly #events = new Map<
+  readonly #pendingEventReceipts = new Map<
     string,
     { fingerprint: string; committed: Promise<void> }
   >();
@@ -220,7 +220,7 @@ export class RunDriver<TCriteria extends JsonValue> {
     const fingerprint = createHash('sha256')
       .update(canonicalJson(parseJsonValue(event, 'event')), 'utf8')
       .digest('hex');
-    const previous = this.#events.get(event.eventId);
+    const previous = this.#pendingEventReceipts.get(event.eventId);
     if (previous !== undefined) {
       if (previous.fingerprint !== fingerprint)
         throw new ContractError(
@@ -232,16 +232,14 @@ export class RunDriver<TCriteria extends JsonValue> {
       return previous.committed;
     }
     this.#pendingEvents++;
-    const committed = this.acceptEvent(event).finally(() => {
+    const committed = this.acceptEvent(event);
+    this.#pendingEventReceipts.set(event.eventId, { fingerprint, committed });
+    try {
+      await committed;
+    } finally {
       this.#pendingEvents--;
-    });
-    const receipt = { fingerprint, committed };
-    this.#events.set(event.eventId, receipt);
-    void committed.catch(() => {
-      if (this.#events.get(event.eventId) === receipt)
-        this.#events.delete(event.eventId);
-    });
-    return committed;
+      this.#pendingEventReceipts.delete(event.eventId);
+    }
   }
 
   private async acceptEvent(event: ApplicationEvent): Promise<void> {
