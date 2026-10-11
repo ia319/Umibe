@@ -198,80 +198,65 @@ export async function invokeRole<T>(
       : await invokeControlled(captureControl(control), async (roleControl) => {
           if (basis.accounting !== 'perRequest')
             return invokeRecorded(roleControl);
-          let open = true;
           let pending: Promise<unknown> | null = null;
           let sequence = 0;
-          try {
-            return await invokeRecorded({
-              ...roleControl,
-              requestModel: async <R>(
-                identity: ModelIdentity,
-                request: (child: CallControl) => Promise<R>,
-              ): Promise<R> => {
-                if (
-                  !open ||
-                  roleControl.signal.aborted ||
-                  !session.canDispatch(epoch)
-                )
-                  throw new DOMException(
-                    'Model request cancelled',
-                    'AbortError',
-                  );
-                if (pending !== null)
-                  throw new ContractError(
-                    'INVALID_RUN_CONTROL',
-                    'model_request',
-                    '/control/requestModel',
-                    'concurrent_model_request',
-                  );
-                if (retryAttempt !== undefined && sequence !== 0)
-                  throw new ContractError(
-                    'INVALID_RUN_CONTROL',
-                    'model_request',
-                    '/control/requestModel',
-                    'multiple_batch_requests',
-                  );
-                const child = invokeModel(
-                  session,
-                  {
-                    requestId: `${requestId}/model-${++sequence}`,
-                    decisionEpoch: epoch,
-                    purpose: 'selection',
-                    model: identity,
-                    ...(retryAttempt === undefined ? {} : { retryAttempt }),
-                  },
-                  roleControl,
-                  async (childControl) => ({
-                    value: await request(childControl),
-                    usage: null,
-                  }),
+          return await invokeRecorded({
+            ...roleControl,
+            requestModel: async <R>(
+              identity: ModelIdentity,
+              request: (child: CallControl) => Promise<R>,
+            ): Promise<R> => {
+              if (roleControl.signal.aborted || !session.canDispatch(epoch))
+                throw new DOMException('Model request cancelled', 'AbortError');
+              if (pending !== null)
+                throw new ContractError(
+                  'INVALID_RUN_CONTROL',
+                  'model_request',
+                  '/control/requestModel',
+                  'concurrent_model_request',
                 );
-                pending = child;
-                modelRequests.add(child);
-                try {
-                  const answer = await child;
-                  if (answer.outcome === 'returned') return answer.value;
-                  if (answer.outcome === 'failed')
-                    throw new ModelRequestError(
-                      answer.reasonCode,
-                      answer.retryAfterMs ?? 0,
-                      answer.issue,
-                    );
-                  if (answer.outcome === 'deadlineExceeded')
-                    throw new ModelRequestError('deadline_exceeded');
-                  throw new DOMException(
-                    'Model request cancelled',
-                    'AbortError',
+              if (retryAttempt !== undefined && sequence !== 0)
+                throw new ContractError(
+                  'INVALID_RUN_CONTROL',
+                  'model_request',
+                  '/control/requestModel',
+                  'multiple_batch_requests',
+                );
+              const child = invokeModel(
+                session,
+                {
+                  requestId: `${requestId}/model-${++sequence}`,
+                  decisionEpoch: epoch,
+                  purpose: 'selection',
+                  model: identity,
+                  ...(retryAttempt === undefined ? {} : { retryAttempt }),
+                },
+                roleControl,
+                async (childControl) => ({
+                  value: await request(childControl),
+                  usage: null,
+                }),
+              );
+              pending = child;
+              modelRequests.add(child);
+              try {
+                const answer = await child;
+                if (answer.outcome === 'returned') return answer.value;
+                if (answer.outcome === 'failed')
+                  throw new ModelRequestError(
+                    answer.reasonCode,
+                    answer.retryAfterMs ?? 0,
+                    answer.issue,
                   );
-                } finally {
-                  pending = null;
-                  modelRequests.delete(child);
-                }
-              },
-            });
-          } finally {
-            open = false;
-          }
+                if (answer.outcome === 'deadlineExceeded')
+                  throw new ModelRequestError('deadline_exceeded');
+                throw new DOMException('Model request cancelled', 'AbortError');
+              } finally {
+                pending = null;
+                modelRequests.delete(child);
+              }
+            },
+          });
         });
   // The enclosing timeout can settle before a child finishes persisting its usage.
   await Promise.allSettled(modelRequests);
