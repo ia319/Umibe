@@ -10,7 +10,6 @@ import { ModelRequestError, modelRetryDelayMs } from './model.js';
 
 interface ReadySelection {
   readonly selectionId: string;
-  readonly operationSetId: string;
   readonly operationId: string;
   readonly deadlineAt: string;
   readonly round: number;
@@ -115,7 +114,6 @@ export class SelectionLifecycle {
         authorized: state.authorized,
         selection: Object.freeze({
           selectionId: cursor.selectionId,
-          operationSetId: cursor.operationSetId,
           operationId: cursor.operationId,
           deadlineAt: cursor.deadlineAt,
           round: cursor.round,

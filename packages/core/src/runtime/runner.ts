@@ -2001,7 +2001,6 @@ export class RunDriver<TCriteria extends JsonValue> {
         kind: 'ready',
         selection: {
           selectionId: input.requestId,
-          operationSetId: operations.id,
           operationId,
           deadlineAt: selectionControl.deadlineAt,
           round: 0,
