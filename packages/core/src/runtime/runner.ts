@@ -5,12 +5,10 @@ import type { IntervalHistogram } from 'node:perf_hooks';
 import type { ActionRegistry } from '#internal/action/registry';
 import type {
   AgentOptions,
-  ModelStage,
   RunHandle,
   ResumeRun,
 } from '#internal/contracts/runtime';
 import type { CallControl } from '#internal/contracts/control';
-import type { ModelIdentity } from '#internal/model/metadata';
 import type {
   PlannerRequest,
   PlanningTrigger,
@@ -43,7 +41,6 @@ import type {
   RecordedChangeBatch,
 } from '#internal/contracts/changes';
 import type { Observation } from '#internal/contracts/observation';
-import { captureControl, invokeControlled } from '#internal/candidate/control';
 import { prepareCandidates } from '#internal/candidate/prepare';
 import { checkCandidatesWithInvocation } from '#internal/candidate/check';
 import { filterCandidates } from '#internal/candidate/filter';
@@ -73,12 +70,11 @@ import { readGoalAssessment } from '#internal/validation/assessment';
 import { parseApplicationEvent } from '#internal/validation/event';
 import { captureDecisionRequest } from '#internal/candidate/context';
 import { ActionCoordinator } from './execution.js';
-import { invokeModel, ModelRequestError } from './model.js';
+import { ModelRequestError } from './model.js';
 import { captureObservation } from './observation.js';
-import {
-  captureCallback,
-  captureCallbackResponse,
-} from './callback-receipt.js';
+import { captureCallback } from './callback-receipt.js';
+import { invokeRole } from './role-callback.js';
+import type { RoleStage } from './role-callback.js';
 import type { RunSession } from './session.js';
 import type { GoalState } from './goals.js';
 import type { RunRecordDraft } from '#internal/storage/contracts';
@@ -94,13 +90,6 @@ import {
 
 const validation = { code: 'INVALID_RUN_CONTROL', stage: 'run_loop' } as const;
 class CallStopped extends Error {}
-type CallbackStage =
-  | ModelStage
-  | 'support'
-  | 'observation'
-  | 'operations'
-  | 'checking'
-  | 'filtering';
 
 interface ReadySelection {
   readonly selectionId: string;
@@ -137,7 +126,7 @@ export class RunDriver<TCriteria extends JsonValue> {
   #resumeController: AbortController | null = null;
   #pendingEvents = 0;
   #loopDelay: IntervalHistogram | null = null;
-  readonly #callbacks = new Map<Promise<unknown>, CallbackStage>();
+  readonly #callbacks = new Map<Promise<unknown>, RoleStage>();
   #plannerTask: Promise<void> | null = null;
   #executionTask: Promise<void> | null = null;
   #selection: SelectionCursor | null = null;
@@ -660,7 +649,7 @@ export class RunDriver<TCriteria extends JsonValue> {
     }
   }
 
-  private control(stage: CallbackStage): CallControl {
+  private control(stage: RoleStage): CallControl {
     const limits = this.session.state.limits;
     return {
       signal: AbortSignal.any([
@@ -681,49 +670,15 @@ export class RunDriver<TCriteria extends JsonValue> {
   }
 
   private call<T>(
-    stage: CallbackStage,
+    stage: RoleStage,
     input: unknown,
     invoke: (control: CallControl) => Promise<T>,
     requestId: string = randomUUID(),
     control: CallControl = this.control(stage),
     retryAttempt?: number,
   ): Promise<T> {
-    const pending = this.invokeCallback(
-      stage,
-      input,
-      invoke,
-      requestId,
-      control,
-      retryAttempt,
-    );
-    this.#callbacks.set(pending, stage);
-    // Pipeline timeouts may return before callback accounting has committed.
-    // Track the bounded gateway, never the uncooperative underlying adapter.
-    void pending
-      .finally(() => this.#callbacks.delete(pending))
-      .catch(() => undefined);
-    return pending;
-  }
-
-  private async invokeCallback<T>(
-    stage: CallbackStage,
-    input: unknown,
-    invoke: (control: CallControl) => Promise<T>,
-    requestId: string,
-    control: CallControl,
-    retryAttempt?: number,
-  ): Promise<T> {
     const session = this.session;
     const epoch = session.state.decision.decisionEpoch;
-    const startedAt = Date.now();
-    await session.commit(session.state, [
-      session.event('callback_started', stage, {
-        requestId,
-        decisionEpoch: epoch,
-        input: parseJsonValue(input, stage),
-      }),
-    ]);
-    if (!session.canDispatch(epoch)) throw new CallStopped();
     const modelStage =
       stage === 'decision' ||
       stage === 'planning' ||
@@ -747,263 +702,44 @@ export class RunDriver<TCriteria extends JsonValue> {
           : stage === 'selection'
             ? this.options.selector.model
             : undefined;
-    let invocations = 0;
-    const invokeRecorded = async (roleControl: CallControl): Promise<T> => {
-      const invocation = ++invocations;
-      let roleOpen = true;
-      const checkRoleOpen = () => {
-        if (!roleOpen)
-          throw new DOMException('Role invocation settled', 'AbortError');
-      };
-      // Receipt persistence can outlast the role. Retained controls must stop
-      // authorizing model work and metadata as soon as that role settles.
-      const bindRoleLifetime = (control: CallControl): CallControl => {
-        const requestModel = control.requestModel;
-        const recordModelProjection = control.recordModelProjection;
-        const recordModelRequest = control.recordModelRequest;
-        return Object.freeze<CallControl>({
-          ...control,
-          ...(requestModel === undefined
-            ? {}
-            : {
-                requestModel: async <R>(
-                  identity: ModelIdentity,
-                  request: (child: CallControl) => Promise<R>,
-                ): Promise<R> => {
-                  checkRoleOpen();
-                  const result = await requestModel(identity, (child) => {
-                    checkRoleOpen();
-                    return request(bindRoleLifetime(child));
-                  });
-                  checkRoleOpen();
-                  return result;
-                },
-              }),
-          ...(recordModelProjection === undefined
-            ? {}
-            : {
-                recordModelProjection: async (projection) => {
-                  checkRoleOpen();
-                  await recordModelProjection(projection);
-                  checkRoleOpen();
-                },
-              }),
-          ...(recordModelRequest === undefined
-            ? {}
-            : {
-                recordModelRequest: async (request) => {
-                  checkRoleOpen();
-                  await recordModelRequest(request);
-                  checkRoleOpen();
-                },
-              }),
-          ...(control.reportModelResponse === undefined
-            ? {}
-            : {
-                reportModelResponse: (metadata) => {
-                  if (roleOpen) control.reportModelResponse?.(metadata);
-                },
-              }),
-          ...(control.reportModelChoice === undefined
-            ? {}
-            : {
-                reportModelChoice: (metadata) => {
-                  if (roleOpen) control.reportModelChoice?.(metadata);
-                },
-              }),
-        });
-      };
-      let result:
-        | { outcome: 'returned'; value: T }
-        | { outcome: 'failed'; error: unknown };
-      try {
-        result = {
-          outcome: 'returned',
-          value: await invoke(bindRoleLifetime(roleControl)),
-        };
-      } catch (error) {
-        result = { outcome: 'failed', error };
-      } finally {
-        roleOpen = false;
-      }
-      const receivedAt = Date.now();
-      const { response, details } = captureCallbackResponse(result, stage);
-      let invalidResponse: Error | undefined;
-      if (response.outcome === 'invalid')
-        invalidResponse =
-          response.error instanceof Error
-            ? response.error
-            : new Error('Callback response capture failed', {
-                cause: response.error,
-              });
-      const receipt = session.event('callback_received', stage, {
-        requestId,
-        invocation,
-        decisionEpoch: epoch,
-        receivedAt: new Date(receivedAt).toISOString(),
-        currentAtReceipt: session.canDispatch(epoch),
-        cancelledAtReceipt: roleControl.signal.aborted,
-        deadlineExceededAtReceipt:
-          receivedAt >= Date.parse(roleControl.deadlineAt),
-        ...details,
-      });
-      try {
-        await session.commit(session.state, [receipt]);
-      } catch (error) {
-        session.report('receipt_failed', receipt.eventId);
-        throw error;
-      }
-      if (response.outcome !== 'returned')
-        throw invalidResponse ?? response.error;
-      // All callback contracts return JSON; retain the captured value for downstream validation.
-      return response.value as T;
+    const request = {
+      requestId,
+      decisionEpoch: epoch,
+      input,
+      ...(retryAttempt === undefined ? {} : { retryAttempt }),
     };
-    const modelRequests = new Set<Promise<unknown>>();
-    const result = model
-      ? await invokeModel(
-          session,
-          {
-            requestId,
-            decisionEpoch: epoch,
-            purpose: modelStage,
-            ...(modelIdentity === undefined ? {} : { model: modelIdentity }),
-            ...(retryAttempt === undefined ? {} : { retryAttempt }),
-          },
-          control,
-          async (control) => ({
-            value: await invokeRecorded(control),
-            usage: null,
-          }),
-        )
-      : await invokeControlled(captureControl(control), async (roleControl) => {
-          if (!perRequest || modelStage === null)
-            return invokeRecorded(roleControl);
-          let open = true;
-          let pending: Promise<unknown> | null = null;
-          let sequence = 0;
-          try {
-            return await invokeRecorded({
-              ...roleControl,
-              requestModel: async <R>(
-                identity: ModelIdentity,
-                request: (child: CallControl) => Promise<R>,
-              ): Promise<R> => {
-                if (
-                  !open ||
-                  roleControl.signal.aborted ||
-                  !session.canDispatch(epoch)
-                )
-                  throw new DOMException(
-                    'Model request cancelled',
-                    'AbortError',
-                  );
-                if (pending !== null)
-                  throw new ContractError(
-                    'INVALID_RUN_CONTROL',
-                    'model_request',
-                    '/control/requestModel',
-                    'concurrent_model_request',
-                  );
-                if (retryAttempt !== undefined && sequence !== 0)
-                  throw new ContractError(
-                    'INVALID_RUN_CONTROL',
-                    'model_request',
-                    '/control/requestModel',
-                    'multiple_batch_requests',
-                  );
-                const child = invokeModel(
-                  session,
-                  {
-                    requestId: `${requestId}/model-${++sequence}`,
-                    decisionEpoch: epoch,
-                    purpose: modelStage,
-                    model: identity,
-                    ...(retryAttempt === undefined ? {} : { retryAttempt }),
-                  },
-                  roleControl,
-                  async (childControl) => ({
-                    value: await request(childControl),
-                    usage: null,
-                  }),
-                );
-                pending = child;
-                modelRequests.add(child);
-                try {
-                  const answer = await child;
-                  if (answer.outcome === 'returned') return answer.value;
-                  if (answer.outcome === 'failed')
-                    throw new ModelRequestError(
-                      answer.reasonCode,
-                      answer.retryAfterMs ?? 0,
-                      answer.issue,
-                    );
-                  if (answer.outcome === 'deadlineExceeded')
-                    throw new ModelRequestError('deadline_exceeded');
-                  throw new DOMException(
-                    'Model request cancelled',
-                    'AbortError',
-                  );
-                } finally {
-                  pending = null;
-                  modelRequests.delete(child);
-                }
-              },
-            });
-          } finally {
-            open = false;
-          }
-        });
-    // The enclosing timeout can settle before a child finishes persisting its usage.
-    await Promise.allSettled(modelRequests);
-    if (session.failure !== null) throw new CallStopped();
-    const accepted = session.canDispatch(epoch);
-    const reasonCode =
-      session.state.control.stopCause?.reasonCode ??
-      (result.outcome === 'failed' && 'reasonCode' in result
-        ? result.reasonCode
-        : result.outcome === 'failed' &&
-            'error' in result &&
-            result.error instanceof ModelRequestError
-          ? result.error.code
-          : model && result.outcome === 'deadlineExceeded'
-            ? 'deadline_exceeded'
-            : `${stage}_${result.outcome}`);
-    const delay = this.#loopDelay;
-    const sampled = delay !== null && delay.count > 0;
-    await session.commit(session.state, [
-      session.event('callback_finished', stage, {
-        requestId,
-        decisionEpoch: epoch,
-        outcome: result.outcome,
-        ...(result.outcome !== 'returned' ? { reasonCode } : {}),
-        ...('issue' in result && result.issue !== undefined
-          ? { issue: { ...result.issue } }
-          : {}),
-        currentAtReceipt: accepted,
-        durationMs: Math.max(0, Date.now() - startedAt),
-        eventLoopDelay: {
-          samples: delay?.count ?? 0,
-          meanMs: sampled ? delay.mean / 1_000_000 : null,
-          maxMs: sampled ? delay.max / 1_000_000 : null,
-        },
-      }),
-    ]);
-    if (!session.canDispatch(epoch)) throw new CallStopped();
-    if (result.outcome !== 'returned') {
-      if (retryAttempt !== undefined && result.outcome === 'failed') {
-        if ('error' in result && result.error instanceof ModelRequestError)
-          throw result.error;
-        if ('reasonCode' in result)
-          throw new ModelRequestError(
-            result.reasonCode,
-            result.retryAfterMs ?? 0,
-            result.issue,
-          );
+    const pending = invokeRole(
+      session,
+      perRequest
+        ? { ...request, stage: 'selection', accounting: 'perRequest' }
+        : model
+          ? {
+              ...request,
+              stage: modelStage,
+              accounting: 'model',
+              ...(modelIdentity === undefined ? {} : { model: modelIdentity }),
+            }
+          : { ...request, stage, accounting: 'local' },
+      control,
+      this.#loopDelay,
+      invoke,
+    ).then(async (result) => {
+      if (!session.canDispatch(epoch) || result.outcome === 'interrupted')
+        throw new CallStopped();
+      if (result.outcome === 'failed') {
+        if (result.retryError !== null) throw result.retryError;
+        await this.block(result.reasonCode);
+        throw new CallStopped();
       }
-      await this.block(reasonCode);
-      throw new CallStopped();
-    }
-    return result.value;
+      return result.value;
+    });
+    this.#callbacks.set(pending, stage);
+    // Pipeline timeouts may return before callback accounting has committed.
+    // Track the bounded gateway, never the uncooperative underlying adapter.
+    void pending
+      .finally(() => this.#callbacks.delete(pending))
+      .catch(() => undefined);
+    return pending;
   }
 
   private async support(goal: GoalRecord): Promise<TCriteria> {
