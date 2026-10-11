@@ -588,8 +588,8 @@ export class RunSession {
   }
 
   /** Persist a flow or timer trigger before waking the decision scheduler. */
-  markReview(reasonCode: string): Promise<void> {
-    return this.commit(
+  async markReview(reasonCode: string): Promise<void> {
+    await this.commit(
       { ...this.#state, scheduling: requestReview(this.#state.scheduling) },
       [
         this.event(
