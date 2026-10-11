@@ -47,10 +47,8 @@ import { filterCandidates } from '#internal/candidate/filter';
 import { selectCandidates } from '#internal/selector/select';
 import {
   beginSelection,
-  nextSelectionBatch,
   acceptSelectionBatch,
 } from '#internal/selector/cursor';
-import type { SelectionCursor } from '#internal/selector/cursor';
 import { createDecisionRequest } from '#internal/decision/request';
 import { selectDecision } from '#internal/decision/validation';
 import {
@@ -75,6 +73,8 @@ import { captureObservation } from './observation.js';
 import { captureCallback } from './callback-receipt.js';
 import { invokeRole } from './role-callback.js';
 import type { RoleStage } from './role-callback.js';
+import { SelectionLifecycle } from './selection-lifecycle.js';
+import type { SelectionBatch } from './selection-lifecycle.js';
 import type { RunSession } from './session.js';
 import type { GoalState } from './goals.js';
 import type { RunRecordDraft } from '#internal/storage/contracts';
@@ -90,16 +90,6 @@ import {
 
 const validation = { code: 'INVALID_RUN_CONTROL', stage: 'run_loop' } as const;
 class CallStopped extends Error {}
-
-interface ReadySelection {
-  readonly selectionId: string;
-  readonly operationSetId: string;
-  readonly operationId: string;
-  readonly deadlineAt: string;
-  readonly round: number;
-  readonly completedBatches: number;
-  readonly result: SelectedCandidate;
-}
 
 interface PlanAdoption<TCriteria extends JsonValue> {
   readonly graph: GoalGraphSnapshot;
@@ -129,11 +119,7 @@ export class RunDriver<TCriteria extends JsonValue> {
   readonly #callbacks = new Map<Promise<unknown>, RoleStage>();
   #plannerTask: Promise<void> | null = null;
   #executionTask: Promise<void> | null = null;
-  #selection: SelectionCursor | null = null;
-  #readySelection: ReadySelection | null = null;
-  #selectionAuthorized = false;
-  #selectionAttempt = 1;
-  #selectionRetryAt = 0;
+  readonly #selection = new SelectionLifecycle();
   #verifyPending = false;
   #wake: (() => void) | null = null;
   #reviewTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1125,26 +1111,6 @@ export class RunDriver<TCriteria extends JsonValue> {
       : null;
   }
 
-  /** Completed parameter choices retain their identity until review permits dispatch. */
-  private selectionSnapshot() {
-    const selection = this.#readySelection ?? this.#selection;
-    if (selection === null) return null;
-    return {
-      selectionId: selection.selectionId,
-      operationId: selection.operationId,
-      round: selection.round,
-      deadlineAt: selection.deadlineAt,
-      candidateCount:
-        'result' in selection
-          ? selection.result.filtered.set.candidates.length
-          : selection.request.candidates.candidates.length,
-      completedBatches:
-        'result' in selection
-          ? selection.completedBatches
-          : selection.batches.length,
-    };
-  }
-
   private clearReviewTimer(): void {
     if (this.#reviewTimer !== null) clearTimeout(this.#reviewTimer);
     this.#reviewTimer = null;
@@ -1233,7 +1199,8 @@ export class RunDriver<TCriteria extends JsonValue> {
       basis.executionId ===
         (this.activeExecution()?.intent.executionId ?? null) &&
       this.activeExecution()?.stopCause == null &&
-      basis.selectionId === (this.selectionSnapshot()?.selectionId ?? null) &&
+      basis.selectionId ===
+        (this.#selection.snapshot()?.summary.selectionId ?? null) &&
       basis.proposalId === (state.pendingProposal?.proposalId ?? null) &&
       basis.constraintsVersion === context.constraintsVersion &&
       canonicalJson(
@@ -1285,7 +1252,7 @@ export class RunDriver<TCriteria extends JsonValue> {
     const state = this.session.state;
     const execution = this.activeExecution();
     const pending = state.pendingProposal;
-    const selection = this.selectionSnapshot();
+    const selection = this.#selection.snapshot()?.summary ?? null;
     type Undisposed =
       | { kind: 'continueAction' | 'stopAction'; executionId: string }
       | { kind: 'continueSelection'; selectionId: string }
@@ -1635,7 +1602,8 @@ export class RunDriver<TCriteria extends JsonValue> {
       return;
     const execution = this.activeExecution();
     if (execution?.stopCause != null) return;
-    const selection = this.selectionSnapshot();
+    const selectionState = this.#selection.snapshot();
+    const selection = selectionState?.summary ?? null;
     const request = createDecisionRequest({
       requestId: randomUUID(),
       decisionEpoch: epoch,
@@ -1661,7 +1629,7 @@ export class RunDriver<TCriteria extends JsonValue> {
       },
       decisions: this.decisionOptions(operations),
     });
-    this.#selectionAuthorized = false;
+    this.#selection.suspend();
     this.clearReviewTimer();
     await session.commit(
       {
@@ -1681,14 +1649,9 @@ export class RunDriver<TCriteria extends JsonValue> {
               changes,
               operations,
               execution,
-              selectionCursor: this.#selection,
+              selectionCursor: selectionState?.source.selectionCursor ?? null,
               completedSelection:
-                this.#readySelection === null
-                  ? null
-                  : {
-                      ...selection,
-                      selection: this.#readySelection.result.selection,
-                    },
+                selectionState?.source.completedSelection ?? null,
               pendingProposal: session.state.pendingProposal,
             },
             'decision',
@@ -1888,9 +1851,7 @@ export class RunDriver<TCriteria extends JsonValue> {
       ],
     );
     if (chosen.kind === 'adoptPlan') {
-      this.#selection = null;
-      this.#readySelection = null;
-      this.#selectionAuthorized = false;
+      this.#selection.discard();
       if (pending === null) throw new CallStopped();
       if (chosen.execution.kind === 'stop')
         await this.adoptAfterStop(
@@ -1909,7 +1870,8 @@ export class RunDriver<TCriteria extends JsonValue> {
       case 'wait':
         return;
       case 'continueSelection':
-        this.#selectionAuthorized = true;
+        if (!this.#selection.authorize(chosen.selectionId))
+          throw new CallStopped();
         return;
       case 'abstain':
         await this.block('decision_abstained');
@@ -1918,9 +1880,7 @@ export class RunDriver<TCriteria extends JsonValue> {
         await this.stopExecution(chosen.executionId, accepted.eventId);
         return;
       case 'selectOperation':
-        this.#selection = null;
-        this.#readySelection = null;
-        this.#selectionAuthorized = false;
+        this.#selection.discard();
         if (execution !== null)
           await this.stopExecution(
             execution.intent.executionId,
@@ -2250,10 +2210,7 @@ export class RunDriver<TCriteria extends JsonValue> {
         capacity,
       );
       if (started.outcome === 'pending') {
-        this.#selection = started.cursor;
-        this.#selectionAuthorized = true;
-        this.#selectionAttempt = 1;
-        this.#selectionRetryAt = 0;
+        this.#selection.start({ kind: 'comparing', cursor: started.cursor });
       } else await this.finishSelection(started);
       return;
     }
@@ -2280,24 +2237,25 @@ export class RunDriver<TCriteria extends JsonValue> {
     await this.drainLightCallbacks();
     if (!session.canDispatch(input.decisionEpoch)) throw new CallStopped();
     if (selected.outcome === 'selected') {
-      this.#readySelection = {
-        selectionId: input.requestId,
-        operationSetId: operations.id,
-        operationId,
-        deadlineAt: selectionControl.deadlineAt,
-        round: 0,
-        completedBatches: 1,
-        result: selected,
-      };
-      this.#selectionAuthorized = true;
+      this.#selection.start({
+        kind: 'ready',
+        selection: {
+          selectionId: input.requestId,
+          operationSetId: operations.id,
+          operationId,
+          deadlineAt: selectionControl.deadlineAt,
+          round: 0,
+          completedBatches: 1,
+          result: selected,
+        },
+      });
     } else await this.finishSelection(selected);
   }
 
-  private async advanceSelection(): Promise<void> {
-    const cursor = this.#selection;
+  private async advanceSelection(batch: SelectionBatch): Promise<void> {
+    const { cursor, request, attempt } = batch;
     const selector = this.options.selector;
-    if (cursor === null || selector.kind !== 'resumable') return;
-    const request = nextSelectionBatch(cursor);
+    if (selector.kind !== 'resumable') return;
     const control = {
       ...this.control('selection'),
       deadlineAt: cursor.deadlineAt,
@@ -2309,16 +2267,14 @@ export class RunDriver<TCriteria extends JsonValue> {
         (control) => selector.advance(request, control),
         request.requestId,
         control,
-        this.#selectionAttempt,
+        attempt,
       );
       if (
-        this.#selection !== cursor ||
+        this.#selection.snapshot()?.source.selectionCursor !== cursor ||
         !this.session.canDispatch(request.decisionEpoch)
       )
         throw new CallStopped();
       const result = acceptSelectionBatch(cursor, raw);
-      this.#selectionAttempt = 1;
-      this.#selectionRetryAt = 0;
       await this.session.commit(this.session.state, [
         this.session.event('selection_batch_finished', result.outcome, {
           selectionId: cursor.selectionId,
@@ -2326,37 +2282,18 @@ export class RunDriver<TCriteria extends JsonValue> {
           response: parseJsonValue(raw, 'selection'),
         }),
       ]);
-      if (result.outcome === 'pending') this.#selection = result.cursor;
-      else {
-        this.#selection = null;
-        if (result.outcome === 'selected') {
-          this.#readySelection = {
-            selectionId: cursor.selectionId,
-            operationSetId: cursor.operationSetId,
-            operationId: cursor.operationId,
-            deadlineAt: cursor.deadlineAt,
-            round: cursor.round,
-            completedBatches: cursor.batches.length + 1,
-            result,
-          };
-        } else {
-          this.#selectionAuthorized = false;
-          await this.finishSelection(result);
-        }
-      }
+      if (!this.#selection.advance(cursor, result)) throw new CallStopped();
+      if (result.outcome !== 'pending' && result.outcome !== 'selected')
+        await this.finishSelection(result);
     } catch (error) {
       if (
-        error instanceof ModelRequestError &&
-        ['rate_limited', 'unavailable', 'deadline_exceeded'].includes(
-          error.code,
-        ) &&
-        this.#selectionAttempt <= this.session.state.limits.modelRetries
-      ) {
-        this.#selectionRetryAt =
-          Date.now() +
-          Math.max(250 * 2 ** (this.#selectionAttempt - 1), error.retryAfterMs);
-        this.#selectionAttempt++;
-      } else throw error;
+        !this.#selection.retry(
+          cursor,
+          error,
+          this.session.state.limits.modelRetries,
+        )
+      )
+        throw error;
     }
     // Let queued source and timer callbacks run between finite synchronous batches.
     await scheduler.yield();
@@ -2426,9 +2363,7 @@ export class RunDriver<TCriteria extends JsonValue> {
         try {
           if (this.#refresh) {
             this.#refresh = false;
-            this.#selection = null;
-            this.#readySelection = null;
-            this.#selectionAuthorized = false;
+            this.#selection.discard();
           }
           if (
             session.hasExecution &&
@@ -2469,13 +2404,12 @@ export class RunDriver<TCriteria extends JsonValue> {
             );
             continue;
           }
-          const selection = this.selectionSnapshot();
+          const selection = this.#selection.snapshot()?.summary ?? null;
           if (
             selection !== null &&
             Date.now() >= Date.parse(selection.deadlineAt)
           ) {
-            this.#selection = null;
-            this.#readySelection = null;
+            this.#selection.discard();
             await this.block('selection_deadlineExceeded');
             break;
           }
@@ -2483,22 +2417,15 @@ export class RunDriver<TCriteria extends JsonValue> {
             await this.review();
             continue;
           }
-          if (this.#readySelection !== null && this.#selectionAuthorized) {
-            const ready = this.#readySelection;
-            this.#readySelection = null;
-            this.#selectionAuthorized = false;
-            await this.finishSelection(ready.result);
+          const ready = this.#selection.takeReady();
+          if (ready !== null) {
+            await this.finishSelection(ready);
             continue;
           }
-          if (this.#selection !== null && this.#selectionAuthorized) {
-            if (Date.now() < this.#selectionRetryAt)
-              await this.waitForWake(
-                Math.min(
-                  this.#selectionRetryAt,
-                  Date.parse(this.#selection.deadlineAt),
-                ),
-              );
-            else await this.advanceSelection();
+          const batch = this.#selection.nextBatch();
+          if (batch !== null) {
+            if (batch.kind === 'wait') await this.waitForWake(batch.until);
+            else await this.advanceSelection(batch);
             continue;
           }
           await this.waitForWake(
@@ -2523,9 +2450,7 @@ export class RunDriver<TCriteria extends JsonValue> {
         );
     } finally {
       this.clearReviewTimer();
-      this.#selection = null;
-      this.#readySelection = null;
-      this.#selectionAuthorized = false;
+      this.#selection.discard();
       await Promise.allSettled([
         ...this.#callbacks.keys(),
         this.#plannerTask,
