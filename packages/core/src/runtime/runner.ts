@@ -14,7 +14,7 @@ import type {
   PlannerRequest,
   PlanningTrigger,
 } from '#internal/planner/contracts';
-import type { JsonValue } from '#internal/contracts/json';
+import type { JsonObject, JsonValue } from '#internal/contracts/json';
 import type {
   GoalAssessment,
   GoalGraphSnapshot,
@@ -40,6 +40,7 @@ import { parseApplicationEvent } from '#internal/validation/event';
 import { captureDecisionRequest } from '#internal/candidate/context';
 import { ActionCoordinator } from './execution.js';
 import { invokeModel, ModelRequestError } from './model.js';
+import { captureObservation } from './observation.js';
 import type { RunSession } from './session.js';
 import type { RunRecordDraft } from '#internal/storage/contracts';
 import { selectionBasis } from './scheduling.js';
@@ -380,15 +381,17 @@ export class RunDriver<TCriteria extends JsonValue> {
         );
       let initialObservation: Observation | undefined;
       if (!session.state.observations.initialized) {
-        const observed = await invokeControlled(
-          captureControl({
+        const observed = await captureObservation(
+          session,
+          this.options.environment.observe,
+          null,
+          {
             ...control,
             signal: AbortSignal.any([
               controller.signal,
               session.ownershipSignal,
             ]),
-          }),
-          (control) => this.options.environment.observe.snapshot(null, control),
+          },
         );
         if (observed.outcome !== 'returned')
           throw new ContractError(
@@ -549,6 +552,150 @@ export class RunDriver<TCriteria extends JsonValue> {
         : stage === 'selection'
           ? this.options.selector.model
           : undefined;
+    let invocations = 0;
+    const invokeRecorded = async (roleControl: CallControl): Promise<T> => {
+      const invocation = ++invocations;
+      let roleOpen = true;
+      const checkRoleOpen = () => {
+        if (!roleOpen)
+          throw new DOMException('Role invocation settled', 'AbortError');
+      };
+      // Receipt persistence can outlast the role. Retained controls must stop
+      // authorizing model work and metadata as soon as that role settles.
+      const bindRoleLifetime = (control: CallControl): CallControl => {
+        const requestModel = control.requestModel;
+        const recordModelRequest = control.recordModelRequest;
+        return Object.freeze<CallControl>({
+          ...control,
+          ...(requestModel === undefined
+            ? {}
+            : {
+                requestModel: async <R>(
+                  identity: ModelIdentity,
+                  request: (child: CallControl) => Promise<R>,
+                ): Promise<R> => {
+                  checkRoleOpen();
+                  const result = await requestModel(identity, (child) => {
+                    checkRoleOpen();
+                    return request(bindRoleLifetime(child));
+                  });
+                  checkRoleOpen();
+                  return result;
+                },
+              }),
+          ...(recordModelRequest === undefined
+            ? {}
+            : {
+                recordModelRequest: async (request) => {
+                  checkRoleOpen();
+                  await recordModelRequest(request);
+                  checkRoleOpen();
+                },
+              }),
+          ...(control.reportModelResponse === undefined
+            ? {}
+            : {
+                reportModelResponse: (metadata) => {
+                  if (roleOpen) control.reportModelResponse?.(metadata);
+                },
+              }),
+          ...(control.reportModelChoice === undefined
+            ? {}
+            : {
+                reportModelChoice: (metadata) => {
+                  if (roleOpen) control.reportModelChoice?.(metadata);
+                },
+              }),
+        });
+      };
+      let result:
+        | { outcome: 'returned'; value: T }
+        | { outcome: 'failed'; error: unknown };
+      try {
+        result = {
+          outcome: 'returned',
+          value: await invoke(bindRoleLifetime(roleControl)),
+        };
+      } catch (error) {
+        result = { outcome: 'failed', error };
+      } finally {
+        roleOpen = false;
+      }
+      const receivedAt = Date.now();
+      let response: JsonValue | undefined;
+      let invalidResponse: Error | undefined;
+      let details: JsonObject;
+      if (result.outcome === 'returned') {
+        try {
+          // Copy at settlement, before receipt persistence or later adapter mutation.
+          response = parseJsonValue(result.value, stage);
+          details = { outcome: 'returned', response };
+        } catch (error) {
+          invalidResponse =
+            error instanceof Error
+              ? error
+              : new Error('Callback response capture failed', { cause: error });
+          details = {
+            outcome: 'returned',
+            capture: 'invalid_json',
+            ...(error instanceof ContractError
+              ? {
+                  issue: {
+                    code: error.code,
+                    stage: error.stage,
+                    path: error.path,
+                    reason: error.reason,
+                  },
+                }
+              : {}),
+          };
+        }
+      } else {
+        const error = result.error;
+        details = {
+          outcome: 'failed',
+          reasonCode:
+            error instanceof ModelRequestError
+              ? error.code
+              : error instanceof ContractError
+                ? error.reason
+                : 'callback_rejected',
+          ...(error instanceof ModelRequestError && error.issue !== null
+            ? { issue: { ...error.issue } }
+            : error instanceof ContractError
+              ? {
+                  issue: {
+                    code: error.code,
+                    stage: error.stage,
+                    path: error.path,
+                    reason: error.reason,
+                  },
+                }
+              : {}),
+        };
+      }
+      const receipt = session.event('callback_received', stage, {
+        requestId,
+        invocation,
+        decisionEpoch: epoch,
+        receivedAt: new Date(receivedAt).toISOString(),
+        currentAtReceipt: session.canDispatch(epoch),
+        cancelledAtReceipt: roleControl.signal.aborted,
+        deadlineExceededAtReceipt:
+          receivedAt >= Date.parse(roleControl.deadlineAt),
+        ...details,
+      });
+      try {
+        await session.commit(session.state, [receipt]);
+      } catch (error) {
+        session.report('receipt_failed', receipt.eventId);
+        throw error;
+      }
+      if (result.outcome === 'failed') throw result.error;
+      if (invalidResponse !== undefined) throw invalidResponse;
+      // All callback contracts return JSON; retain the captured value for downstream validation.
+      return response as T;
+    };
     const modelRequests = new Set<Promise<unknown>>();
     const result = model
       ? await invokeModel(
@@ -560,15 +707,19 @@ export class RunDriver<TCriteria extends JsonValue> {
             ...(modelIdentity === undefined ? {} : { model: modelIdentity }),
           },
           control,
-          async (control) => ({ value: await invoke(control), usage: null }),
+          async (control) => ({
+            value: await invokeRecorded(control),
+            usage: null,
+          }),
         )
       : await invokeControlled(captureControl(control), async (roleControl) => {
-          if (!perRequest || modelStage === null) return invoke(roleControl);
+          if (!perRequest || modelStage === null)
+            return invokeRecorded(roleControl);
           let open = true;
           let pending: Promise<unknown> | null = null;
           let sequence = 0;
           try {
-            return await invoke({
+            return await invokeRecorded({
               ...roleControl,
               requestModel: async <R>(
                 identity: ModelIdentity,
@@ -664,9 +815,6 @@ export class RunDriver<TCriteria extends JsonValue> {
           meanMs: sampled ? delay.mean / 1_000_000 : null,
           maxMs: sampled ? delay.max / 1_000_000 : null,
         },
-        ...(accepted && result.outcome === 'returned'
-          ? { response: parseJsonValue(result.value, stage) }
-          : {}),
       }),
     ]);
     if (!session.canDispatch(epoch)) throw new CallStopped();

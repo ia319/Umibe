@@ -65,6 +65,7 @@ export interface RuntimeDiagnostic {
     | 'store_failed'
     | 'store_conflict'
     | 'subscriber_failed'
+    | 'receipt_failed'
     | 'environment_event_failed'
     | 'environment_subscription_failed';
   readonly runId: string;

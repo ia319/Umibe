@@ -4,6 +4,27 @@ export interface ModelIdentity {
   readonly model: string;
 }
 
+/** The serialized JSON sent to a provider, excluding authentication and headers. */
+export interface ModelRequestRecord {
+  readonly protocol: 'http' | 'jsonRpc';
+  /** HTTP method or JSON-RPC method, as sent. */
+  readonly method: string;
+  readonly body: string;
+}
+
+/** Raw provider bytes, recorded independently from decoding and acceptance. */
+export interface ModelResponseRecord {
+  readonly protocol: 'http' | 'jsonRpc';
+  readonly method: string;
+  readonly body: string;
+  /** Base64 preserves arbitrary bytes; UTF-8 is valid only after strict decoding. */
+  readonly encoding: 'utf8' | 'base64';
+  /** False retains the received prefix when transport or a response limit ends reading. */
+  readonly complete: boolean;
+  /** HTTP status, or null for JSON-RPC. */
+  readonly status: number | null;
+}
+
 /** Token counts are nonnegative safe integers; null means unknown, not zero. */
 export interface ModelUsage {
   readonly inputTokens: number | null;

@@ -220,9 +220,16 @@ test.each([
         },
       },
     });
-    expect(JSON.stringify(records)).not.toMatch(
-      /test-only-key|private-error|Bearer/,
-    );
+    expect(JSON.stringify(records)).not.toMatch(/test-only-key|Bearer/);
+    expect(
+      JSON.stringify(
+        records.filter(
+          (record) =>
+            record.kind !== 'coreEvent' ||
+            record.data.type !== 'model_response_body',
+        ),
+      ),
+    ).not.toContain('private-error');
     await agent.close();
   },
 );

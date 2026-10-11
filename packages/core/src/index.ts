@@ -41,6 +41,8 @@ export type { RegisteredAction } from '#internal/action/registry';
 export type { CallControl } from '#internal/contracts/control';
 export type {
   ModelIdentity,
+  ModelRequestRecord,
+  ModelResponseRecord,
   ModelResponseMetadata,
   ModelUsage,
   ModelResponseIssue,

@@ -109,8 +109,10 @@ export async function runTurn(
       reject(error: Error): void;
     }
   >();
+  const responseMethods = new Map<number, string>();
   let nextId = 1;
-  let buffer = '';
+  let buffer: Buffer = Buffer.alloc(0);
+  let modelPhase: 'thread/start' | 'turn/start' | null = null;
   let threadId: string | null = null;
   let turnId: string | null = null;
   let turnRequested = false;
@@ -149,12 +151,29 @@ export async function runTurn(
     checkActive();
     child.stdin.write(JSON.stringify(message) + '\n');
   };
-  const rpc = (method: string, params: JsonObject): Promise<JsonObject> =>
-    new Promise((resolve, reject) => {
-      const id = nextId++;
+  const rpc = async (
+    method: string,
+    params: JsonObject,
+  ): Promise<JsonObject> => {
+    checkActive();
+    const id = nextId++;
+    const body = JSON.stringify({ id, method, params });
+    const modelRequest = method === 'thread/start' || method === 'turn/start';
+    if (modelRequest)
+      await control.recordModelRequest?.({
+        protocol: 'jsonRpc',
+        method,
+        body,
+      });
+    checkActive();
+    return new Promise((resolve, reject) => {
       pending.set(id, { resolve, reject });
+      if (method === 'thread/start' || method === 'turn/start') {
+        responseMethods.set(id, method);
+        modelPhase = method;
+      }
       try {
-        send({ id, method, params });
+        child.stdin.write(body + '\n');
       } catch (error) {
         pending.delete(id);
         reject(
@@ -164,6 +183,7 @@ export async function runTurn(
         );
       }
     });
+  };
   const abort = () =>
     fail(new DOMException('Model request cancelled', 'AbortError'));
   const timer = setTimeout(
@@ -172,111 +192,180 @@ export async function runTurn(
   );
   control.signal.addEventListener('abort', abort, { once: true });
   child.on('error', () => fail(new ModelRequestError('request_failed')));
-  child.on('close', () => fail(new ModelRequestError('request_failed')));
   child.stdin.on('error', () => fail(new ModelRequestError('request_failed')));
-  child.stdout.on('error', () => fail(new ModelRequestError('request_failed')));
   child.stderr.on('error', () => fail(new ModelRequestError('request_failed')));
   child.stderr.resume();
-  child.stdout.setEncoding('utf8');
-  child.stdout.on('data', (chunk: string) => {
-    if (settled || failure !== null) return;
+  // Read in order so persistence completes before a response can resolve its RPC
+  // or publish a completed turn. Stream backpressure bounds unread output.
+  const readMessages = async () => {
     try {
-      buffer += chunk;
-      if (Buffer.byteLength(buffer, 'utf8') > 8_388_608)
-        throw new ModelRequestError('invalid_response');
-      let end;
-      while ((end = buffer.indexOf('\n')) >= 0) {
-        const line = buffer.slice(0, end);
-        buffer = buffer.slice(end + 1);
-        if (!line.trim()) continue;
-        const message = object(
-          parseJsonValue(JSON.parse(line), 'codex_protocol'),
-        );
-        if (message.method === undefined && typeof message.id === 'number') {
-          const waiter = pending.get(message.id);
-          if (waiter === undefined) continue;
-          pending.delete(message.id);
-          if (message.error !== undefined) {
-            waiter.reject(
-              new ModelRequestError(
-                object(message.error).code === -32602
-                  ? 'invalid_request'
-                  : 'request_failed',
-              ),
-            );
-          } else waiter.resolve(object(message.result));
-          continue;
-        }
-        if (message.id !== undefined) {
-          // No client tools or interactive approvals exist in this adapter.
-          send({
-            id: message.id,
-            error: { code: -32601, message: 'Unsupported client request' },
-          });
+      for await (const chunk of child.stdout) {
+        if (!Buffer.isBuffer(chunk))
           throw new ModelRequestError('invalid_response');
-        }
-        if (typeof message.method !== 'string' || !isJsonObject(message.params))
-          continue;
-        if (turnFinished) continue;
-        const params = message.params;
-        if (!turnRequested || params.threadId !== threadId) continue;
-        if (message.method === 'turn/started') {
-          const id = object(params.turn).id;
-          if (typeof id !== 'string')
-            throw new ModelRequestError('invalid_response');
-          if (turnId !== null && turnId !== id)
-            throw new ModelRequestError('invalid_response');
-          turnId = id;
-        }
-        const eventTurnId =
-          message.method === 'turn/completed'
-            ? object(params.turn).id
-            : params.turnId;
-        if (eventTurnId !== turnId || turnId === null) continue;
-        if (message.method === 'model/rerouted') {
-          actualModel =
-            typeof params.toModel === 'string' ? params.toModel : null;
-        } else if (message.method === 'thread/tokenUsage/updated') {
-          const total = object(object(params.tokenUsage).total);
-          const tokens = (value: JsonValue | undefined): number | null => {
-            if (value === null || value === undefined) return null;
-            if (
-              typeof value === 'number' &&
-              Number.isSafeInteger(value) &&
-              value >= 0
-            )
-              return value;
-            invalidUsage = true;
-            return null;
-          };
-          // A fresh thread contains only this turn. Totals are cumulative;
-          // adding notifications would double-count internal model calls.
-          usage = {
-            inputTokens: tokens(total.inputTokens),
-            outputTokens: tokens(total.outputTokens),
-            totalTokens: tokens(total.totalTokens),
-          };
-        } else if (message.method === 'item/completed') {
-          const item = object(params.item);
+        buffer = Buffer.concat([buffer, chunk]);
+        if (buffer.byteLength > 8_388_608)
+          throw new ModelRequestError('invalid_response');
+        let end;
+        while ((end = buffer.indexOf(10)) >= 0) {
+          const line = buffer.subarray(0, end);
+          buffer = buffer.subarray(end + 1);
+          let message: JsonObject;
+          try {
+            const text = new TextDecoder('utf8', { fatal: true }).decode(line);
+            if (!text.trim()) continue;
+            message = object(
+              parseJsonValue(JSON.parse(text), 'codex_protocol'),
+            );
+          } catch (error) {
+            if (modelPhase !== null)
+              await control.recordModelResult?.({
+                protocol: 'jsonRpc',
+                method: 'protocol/invalid',
+                body: line.toString('base64'),
+                encoding: 'base64',
+                complete: true,
+                status: null,
+              });
+            throw error;
+          }
+          if (message.method === undefined && typeof message.id === 'number') {
+            const method = responseMethods.get(message.id);
+            if (method !== undefined)
+              await control.recordModelResult?.({
+                protocol: 'jsonRpc',
+                method,
+                body: line.toString('base64'),
+                encoding: 'base64',
+                complete: true,
+                status: null,
+              });
+            if (settled || failure !== null) continue;
+            const waiter = pending.get(message.id);
+            if (waiter === undefined) continue;
+            pending.delete(message.id);
+            if (message.error !== undefined) {
+              waiter.reject(
+                new ModelRequestError(
+                  object(message.error).code === -32602
+                    ? 'invalid_request'
+                    : 'request_failed',
+                ),
+              );
+            } else waiter.resolve(object(message.result));
+            continue;
+          }
+          const method =
+            typeof message.method === 'string'
+              ? message.method
+              : 'protocol/invalid';
           if (
-            item.type === 'agentMessage' &&
-            item.phase === 'final_answer' &&
-            typeof item.text === 'string'
+            modelPhase !== null &&
+            !method.startsWith('account/') &&
+            !method.startsWith('auth/')
           )
-            finalText = item.text;
-        } else if (message.method === 'turn/completed') {
-          turnFinished = true;
-          finishTurn(object(params.turn));
+            await control.recordModelResult?.({
+              protocol: 'jsonRpc',
+              method,
+              body: line.toString('base64'),
+              encoding: 'base64',
+              complete: true,
+              status: null,
+            });
+          if (message.id !== undefined) {
+            if (settled || failure !== null) continue;
+            // No client tools or interactive approvals exist in this adapter.
+            send({
+              id: message.id,
+              error: { code: -32601, message: 'Unsupported client request' },
+            });
+            throw new ModelRequestError('invalid_response');
+          }
+          if (
+            typeof message.method !== 'string' ||
+            !isJsonObject(message.params)
+          ) {
+            throw new ModelRequestError('invalid_response');
+          }
+          const params = message.params;
+          if (!turnRequested || params.threadId !== threadId) continue;
+          if (settled || failure !== null || turnFinished) continue;
+          if (message.method === 'turn/started') {
+            const id = object(params.turn).id;
+            if (typeof id !== 'string')
+              throw new ModelRequestError('invalid_response');
+            if (turnId !== null && turnId !== id)
+              throw new ModelRequestError('invalid_response');
+            turnId = id;
+          }
+          const eventTurnId =
+            message.method === 'turn/completed'
+              ? object(params.turn).id
+              : params.turnId;
+          if (eventTurnId !== turnId || turnId === null) continue;
+          if (message.method === 'model/rerouted') {
+            actualModel =
+              typeof params.toModel === 'string' ? params.toModel : null;
+          } else if (message.method === 'thread/tokenUsage/updated') {
+            const total = object(object(params.tokenUsage).total);
+            const tokens = (value: JsonValue | undefined): number | null => {
+              if (value === null || value === undefined) return null;
+              if (
+                typeof value === 'number' &&
+                Number.isSafeInteger(value) &&
+                value >= 0
+              )
+                return value;
+              invalidUsage = true;
+              return null;
+            };
+            // A fresh thread contains only this turn. Totals are cumulative;
+            // adding notifications would double-count internal model calls.
+            usage = {
+              inputTokens: tokens(total.inputTokens),
+              outputTokens: tokens(total.outputTokens),
+              totalTokens: tokens(total.totalTokens),
+            };
+          } else if (message.method === 'item/completed') {
+            const item = object(params.item);
+            if (
+              item.type === 'agentMessage' &&
+              item.phase === 'final_answer' &&
+              typeof item.text === 'string'
+            )
+              finalText = item.text;
+          } else if (message.method === 'turn/completed') {
+            turnFinished = true;
+            finishTurn(object(params.turn));
+          }
         }
       }
-    } catch (error) {
-      fail(
-        error instanceof ModelRequestError
-          ? error
-          : new ModelRequestError('invalid_response'),
-      );
+    } finally {
+      if (buffer.byteLength > 0 && modelPhase !== null)
+        await control.recordModelResult?.({
+          protocol: 'jsonRpc',
+          method: modelPhase,
+          body: buffer.toString('base64'),
+          encoding: 'base64',
+          complete: false,
+          status: null,
+        });
     }
-  });
+  };
+  void readMessages().then(
+    () => {
+      // Process exit may precede persistence of its final stdout frames.
+      if (!turnFinished || pending.size > 0)
+        fail(new ModelRequestError('request_failed'));
+    },
+    (error: unknown) => {
+      if (!turnFinished || pending.size > 0)
+        fail(
+          error instanceof ModelRequestError
+            ? error
+            : new ModelRequestError('invalid_response'),
+        );
+    },
+  );
 
   try {
     if (control.signal.aborted) abort();

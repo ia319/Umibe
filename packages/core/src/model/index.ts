@@ -8,6 +8,8 @@ export type {
 } from './contracts.js';
 export type {
   ModelIdentity,
+  ModelRequestRecord,
+  ModelResponseRecord,
   ModelResponseMetadata,
   ModelUsage,
   ModelResponseIssue,

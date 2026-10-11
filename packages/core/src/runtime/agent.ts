@@ -8,7 +8,6 @@ import type {
 } from '#internal/contracts/runtime';
 import type { JsonValue } from '#internal/contracts/json';
 import type { ChangeBatch } from '#internal/contracts/changes';
-import { captureControl, invokeControlled } from '#internal/candidate/control';
 import { ContractError } from '#internal/errors';
 import {
   requireKeys,
@@ -23,6 +22,7 @@ import { captureLimits } from './limits.js';
 import { captureModelIdentity } from '#internal/model/validation';
 import { RunSession } from './session.js';
 import { RunDriver } from './runner.js';
+import { captureObservation } from './observation.js';
 
 const validation = { code: 'INVALID_RUN_CONTROL', stage: 'agent' } as const;
 
@@ -394,14 +394,16 @@ export function createAgent<TCriteria extends JsonValue>(
           (batch) =>
             runs.get(runId)?.publish(batch) ?? created.publishChanges(batch),
         );
-        const observed = await invokeControlled(
-          captureControl({
+        const observed = await captureObservation(
+          session,
+          options.environment.observe,
+          null,
+          {
             signal: session.ownershipSignal,
             deadlineAt: new Date(
               Date.now() + limits.callbackTimeoutMs,
             ).toISOString(),
-          }),
-          (control) => options.environment.observe.snapshot(null, control),
+          },
         );
         if (observed.outcome !== 'returned')
           throw new ContractError(

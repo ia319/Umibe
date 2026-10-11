@@ -3,6 +3,8 @@ import type {
   ModelResponseMetadata,
   ModelChoiceMetadata,
   ModelResponseIssue,
+  ModelRequestRecord,
+  ModelResponseRecord,
 } from './metadata.js';
 import type { JsonValue } from '#internal/contracts/json';
 import { ContractError } from '#internal/errors';
@@ -50,6 +52,82 @@ export function captureModelIdentity(input: ModelIdentity): ModelIdentity {
   return Object.freeze({
     provider: requireString(value.provider, context, '/provider'),
     model: requireString(value.model, context, '/model'),
+  });
+}
+
+/** Capture an exact transport body without parsing, normalizing, or truncating it. */
+export function captureModelRequestRecord(input: unknown): ModelRequestRecord {
+  const value = requireObject(
+    parseJsonValue(input, context.stage),
+    context,
+    '',
+  );
+  requireKeys(value, ['protocol', 'method', 'body'], context, '');
+  if (value.protocol !== 'http' && value.protocol !== 'jsonRpc')
+    throw new ContractError(
+      context.code,
+      context.stage,
+      '/protocol',
+      'invalid_protocol',
+    );
+  if (typeof value.body !== 'string')
+    throw new ContractError(
+      context.code,
+      context.stage,
+      '/body',
+      'expected_string',
+    );
+  return Object.freeze({
+    protocol: value.protocol,
+    method: requireString(value.method, context, '/method'),
+    body: value.body,
+  });
+}
+
+export function captureModelResultRecord(input: unknown): ModelResponseRecord {
+  const value = requireObject(
+    parseJsonValue(input, context.stage),
+    context,
+    '',
+  );
+  requireKeys(
+    value,
+    ['protocol', 'method', 'body', 'status', 'encoding', 'complete'],
+    context,
+    '',
+  );
+  const { status, encoding, complete, ...body } = value;
+  const request = captureModelRequestRecord(body);
+  if (encoding !== 'utf8' && encoding !== 'base64')
+    throw new ContractError(
+      context.code,
+      context.stage,
+      '/encoding',
+      'invalid_encoding',
+    );
+  if (
+    encoding === 'base64' &&
+    Buffer.from(request.body, 'base64').toString('base64') !== request.body
+  )
+    throw new ContractError(
+      context.code,
+      context.stage,
+      '/body',
+      'invalid_base64',
+    );
+  if (typeof complete !== 'boolean')
+    throw new ContractError(
+      context.code,
+      context.stage,
+      '/complete',
+      'expected_boolean',
+    );
+  return Object.freeze({
+    ...request,
+    encoding,
+    complete,
+    status:
+      status === null ? null : requireInteger(status, 0, context, '/status'),
   });
 }
 

@@ -24,6 +24,7 @@ import { parseObservation } from '#internal/validation/observation';
 import { readActionResult } from '#internal/validation/record';
 import type { RunSession } from './session.js';
 import type { RunCause } from './state.js';
+import { captureObservation } from './observation.js';
 
 export interface ExecutionSnapshot {
   readonly basis: CandidateGenerationInput;
@@ -461,21 +462,23 @@ export class ActionCoordinator {
     const session = this.session;
     const context = session.state.decision.context;
     const startedAt = Date.now();
-    const result = await invokeControlled(
-      captureControl({
-        signal: session.signal,
-        deadlineAt: new Date(
-          Date.now() + session.state.limits.callbackTimeoutMs,
-        ).toISOString(),
-      }),
-      (control) => this.environment.observe.snapshot(context, control),
-    );
-    if (!session.canDispatch(epoch)) return 'run_or_decision_inactive';
-    if (result.outcome !== 'returned') {
-      await this.block(`observation_${result.outcome}`);
-      return `observation_${result.outcome}`;
-    }
     try {
+      const result = await captureObservation(
+        session,
+        this.environment.observe,
+        context,
+        {
+          signal: session.signal,
+          deadlineAt: new Date(
+            Date.now() + session.state.limits.callbackTimeoutMs,
+          ).toISOString(),
+        },
+      );
+      if (!session.canDispatch(epoch)) return 'run_or_decision_inactive';
+      if (result.outcome !== 'returned') {
+        await this.block(`observation_${result.outcome}`);
+        return `observation_${result.outcome}`;
+      }
       const observation = parseObservation(result.value);
       const latest = session.state.decision.context.observation;
       if (
