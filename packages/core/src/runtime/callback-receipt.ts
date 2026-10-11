@@ -8,12 +8,84 @@ import { parseJsonValue } from '#internal/validation/json';
 import { ModelRequestError } from './model.js';
 import type { RunSession } from './session.js';
 
+export type CapturedCallbackResponse =
+  | { readonly outcome: 'returned'; readonly value: JsonValue }
+  | { readonly outcome: 'invalid'; readonly error: unknown }
+  | { readonly outcome: 'failed'; readonly error: unknown };
+
 interface CallbackReceiptRequest {
   readonly stage: 'observation' | 'support' | 'checking' | 'rechecking';
   readonly phase:
     'initialization' | 'execution' | 'resume' | 'selection' | 'continuation';
   readonly decisionEpoch: number;
   readonly input: unknown;
+}
+
+/**
+ * Capture at settlement, before any await or acceptance check.
+ * Return detached JSON or the original error; receipt details omit exception text.
+ */
+export function captureCallbackResponse(
+  received:
+    | { readonly outcome: 'returned'; readonly value: unknown }
+    | { readonly outcome: 'failed'; readonly error: unknown },
+  stage: string,
+): {
+  readonly response: CapturedCallbackResponse;
+  readonly details: JsonObject;
+} {
+  if (received.outcome === 'failed') {
+    const error = received.error;
+    return {
+      response: received,
+      details: {
+        outcome: 'failed',
+        reasonCode:
+          error instanceof ModelRequestError
+            ? error.code
+            : error instanceof ContractError
+              ? error.reason
+              : 'callback_rejected',
+        ...(error instanceof ModelRequestError && error.issue !== null
+          ? { issue: { ...error.issue } }
+          : error instanceof ContractError
+            ? {
+                issue: {
+                  code: error.code,
+                  stage: error.stage,
+                  path: error.path,
+                  reason: error.reason,
+                },
+              }
+            : {}),
+      },
+    };
+  }
+  try {
+    const value = parseJsonValue(received.value, stage);
+    return {
+      response: { outcome: 'returned', value },
+      details: { outcome: 'returned', response: value },
+    };
+  } catch (error) {
+    return {
+      response: { outcome: 'invalid', error },
+      details: {
+        outcome: 'returned',
+        capture: 'invalid_json',
+        ...(error instanceof ContractError
+          ? {
+              issue: {
+                code: error.code,
+                stage: error.stage,
+                path: error.path,
+                reason: error.reason,
+              },
+            }
+          : {}),
+      },
+    };
+  }
 }
 
 /**
@@ -55,58 +127,14 @@ export async function captureCallback(
           received = { outcome: 'failed', error };
         }
         const receivedAt = Date.now();
-        let response: JsonValue | undefined;
-        let details: JsonObject;
-        if (received.outcome === 'returned') {
-          try {
-            response = parseJsonValue(received.value, stage);
-            details = { outcome: 'returned', response };
-          } catch (error) {
-            captureFailure =
-              error instanceof Error
-                ? error
-                : new Error('Callback response capture failed', {
-                    cause: error,
-                  });
-            details = {
-              outcome: 'returned',
-              capture: 'invalid_json',
-              ...(error instanceof ContractError
-                ? {
-                    issue: {
-                      code: error.code,
-                      stage: error.stage,
-                      path: error.path,
-                      reason: error.reason,
-                    },
-                  }
-                : {}),
-            };
-          }
-        } else {
-          const error = received.error;
-          details = {
-            outcome: 'failed',
-            reasonCode:
-              error instanceof ModelRequestError
-                ? error.code
-                : error instanceof ContractError
-                  ? error.reason
-                  : 'callback_rejected',
-            ...(error instanceof ModelRequestError && error.issue !== null
-              ? { issue: { ...error.issue } }
-              : error instanceof ContractError
-                ? {
-                    issue: {
-                      code: error.code,
-                      stage: error.stage,
-                      path: error.path,
-                      reason: error.reason,
-                    },
-                  }
-                : {}),
-          };
-        }
+        const { response, details } = captureCallbackResponse(received, stage);
+        if (response.outcome === 'invalid')
+          captureFailure =
+            response.error instanceof Error
+              ? response.error
+              : new Error('Callback response capture failed', {
+                  cause: response.error,
+                });
         const receipt = session.event('callback_received', stage, {
           ...identity,
           invocation: 1,
@@ -122,12 +150,9 @@ export async function captureCallback(
           session.report('receipt_failed', receipt.eventId);
           throw error;
         }
-        if (received.outcome === 'failed') throw received.error;
-        if (response === undefined)
-          throw (
-            captureFailure ?? new Error('Callback response was not captured')
-          );
-        return response;
+        if (response.outcome !== 'returned')
+          throw captureFailure ?? response.error;
+        return response.value;
       });
   await session.commit(session.state, [
     session.event('callback_finished', stage, {

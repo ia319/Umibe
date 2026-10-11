@@ -30,7 +30,7 @@ import type {
   SelectedCandidate,
 } from '#internal/contracts/candidate-processing';
 import type { OperationSet } from '#internal/contracts/operation';
-import type { JsonObject, JsonValue } from '#internal/contracts/json';
+import type { JsonValue } from '#internal/contracts/json';
 import type {
   GoalAssessment,
   GoalGraphSnapshot,
@@ -75,7 +75,10 @@ import { captureDecisionRequest } from '#internal/candidate/context';
 import { ActionCoordinator } from './execution.js';
 import { invokeModel, ModelRequestError } from './model.js';
 import { captureObservation } from './observation.js';
-import { captureCallback } from './callback-receipt.js';
+import {
+  captureCallback,
+  captureCallbackResponse,
+} from './callback-receipt.js';
 import type { RunSession } from './session.js';
 import type { GoalState } from './goals.js';
 import type { RunRecordDraft } from '#internal/storage/contracts';
@@ -824,58 +827,15 @@ export class RunDriver<TCriteria extends JsonValue> {
         roleOpen = false;
       }
       const receivedAt = Date.now();
-      let response: JsonValue | undefined;
+      const { response, details } = captureCallbackResponse(result, stage);
       let invalidResponse: Error | undefined;
-      let details: JsonObject;
-      if (result.outcome === 'returned') {
-        try {
-          // Copy at settlement, before receipt persistence or later adapter mutation.
-          response = parseJsonValue(result.value, stage);
-          details = { outcome: 'returned', response };
-        } catch (error) {
-          invalidResponse =
-            error instanceof Error
-              ? error
-              : new Error('Callback response capture failed', { cause: error });
-          details = {
-            outcome: 'returned',
-            capture: 'invalid_json',
-            ...(error instanceof ContractError
-              ? {
-                  issue: {
-                    code: error.code,
-                    stage: error.stage,
-                    path: error.path,
-                    reason: error.reason,
-                  },
-                }
-              : {}),
-          };
-        }
-      } else {
-        const error = result.error;
-        details = {
-          outcome: 'failed',
-          reasonCode:
-            error instanceof ModelRequestError
-              ? error.code
-              : error instanceof ContractError
-                ? error.reason
-                : 'callback_rejected',
-          ...(error instanceof ModelRequestError && error.issue !== null
-            ? { issue: { ...error.issue } }
-            : error instanceof ContractError
-              ? {
-                  issue: {
-                    code: error.code,
-                    stage: error.stage,
-                    path: error.path,
-                    reason: error.reason,
-                  },
-                }
-              : {}),
-        };
-      }
+      if (response.outcome === 'invalid')
+        invalidResponse =
+          response.error instanceof Error
+            ? response.error
+            : new Error('Callback response capture failed', {
+                cause: response.error,
+              });
       const receipt = session.event('callback_received', stage, {
         requestId,
         invocation,
@@ -893,10 +853,10 @@ export class RunDriver<TCriteria extends JsonValue> {
         session.report('receipt_failed', receipt.eventId);
         throw error;
       }
-      if (result.outcome === 'failed') throw result.error;
-      if (invalidResponse !== undefined) throw invalidResponse;
+      if (response.outcome !== 'returned')
+        throw invalidResponse ?? response.error;
       // All callback contracts return JSON; retain the captured value for downstream validation.
-      return response as T;
+      return response.value as T;
     };
     const modelRequests = new Set<Promise<unknown>>();
     const result = model

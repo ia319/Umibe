@@ -29,8 +29,11 @@ import { readActionResult } from '#internal/validation/record';
 import type { RunSession } from './session.js';
 import type { RunCause } from './state.js';
 import { captureObservation } from './observation.js';
-import { captureCallback } from './callback-receipt.js';
-import { ModelRequestError } from './model.js';
+import {
+  captureCallback,
+  captureCallbackResponse,
+} from './callback-receipt.js';
+import type { CapturedCallbackResponse } from './callback-receipt.js';
 import { requestReview } from './scheduling.js';
 
 /** Records later-plan authorization without rewriting the original intent or launch basis. */
@@ -81,11 +84,6 @@ interface Attempt {
   reconciled: boolean;
   stop: ((cause: RunCause) => void) | null;
 }
-
-type ActionResponse =
-  | { readonly outcome: 'returned'; readonly value: JsonValue }
-  | { readonly outcome: 'invalid'; readonly error: unknown }
-  | { readonly outcome: 'failed'; readonly error: unknown };
 
 const validation = {
   code: 'INVALID_RUN_CONTROL',
@@ -1060,7 +1058,7 @@ export class ActionCoordinator {
     controlInput: CallControl,
     current: () => boolean,
     invoke: (control: CallControl) => Promise<unknown>,
-  ): Promise<InvocationResult<ActionResponse>> {
+  ): Promise<InvocationResult<CapturedCallbackResponse>> {
     const session = this.session;
     const control = captureControl(controlInput);
     const requestId = randomUUID();
@@ -1076,7 +1074,7 @@ export class ActionCoordinator {
         input: parseJsonValue(input, validation.stage),
       }),
     ]);
-    const result: InvocationResult<ActionResponse> =
+    const result: InvocationResult<CapturedCallbackResponse> =
       session.failure !== null || session.ownershipSignal.aborted || !current()
         ? { outcome: 'cancelled' }
         : await invokeControlled(control, async (callbackControl) => {
@@ -1140,60 +1138,16 @@ export class ActionCoordinator {
     received:
       | { readonly outcome: 'returned'; readonly value: unknown }
       | { readonly outcome: 'failed'; readonly error: unknown },
-  ): { readonly response: ActionResponse; readonly committed: Promise<void> } {
+  ): {
+    readonly response: CapturedCallbackResponse;
+    readonly committed: Promise<void>;
+  } {
     const session = this.session;
     const receivedAt = Date.now();
-    let response: ActionResponse;
-    let details: JsonObject;
-    if (received.outcome === 'returned') {
-      try {
-        // Capture adapter-owned values before an await, applicability check,
-        // or schema normalization can hide or change the received payload.
-        const value = parseJsonValue(received.value, validation.stage);
-        response = { outcome: 'returned', value };
-        details = { outcome: 'returned', response: value };
-      } catch (error) {
-        response = { outcome: 'invalid', error };
-        details = {
-          outcome: 'returned',
-          capture: 'invalid_json',
-          ...(error instanceof ContractError
-            ? {
-                issue: {
-                  code: error.code,
-                  stage: error.stage,
-                  path: error.path,
-                  reason: error.reason,
-                },
-              }
-            : {}),
-        };
-      }
-    } else {
-      const error = received.error;
-      response = received;
-      details = {
-        outcome: 'failed',
-        reasonCode:
-          error instanceof ModelRequestError
-            ? error.code
-            : error instanceof ContractError
-              ? error.reason
-              : 'callback_rejected',
-        ...(error instanceof ModelRequestError && error.issue !== null
-          ? { issue: { ...error.issue } }
-          : error instanceof ContractError
-            ? {
-                issue: {
-                  code: error.code,
-                  stage: error.stage,
-                  path: error.path,
-                  reason: error.reason,
-                },
-              }
-            : {}),
-      };
-    }
+    const { response, details } = captureCallbackResponse(
+      received,
+      validation.stage,
+    );
     const receipt = session.event('callback_received', phase, {
       requestId,
       executionId: attempt.intent.executionId,
@@ -1218,7 +1172,7 @@ export class ActionCoordinator {
   private releaseConfirmedReceipt(
     attempt: Attempt,
     phase: 'action_execution' | 'action_verification' | 'action_reconciliation',
-    response: ActionResponse,
+    response: CapturedCallbackResponse,
   ): void {
     if (attempt.reconciled || response.outcome !== 'returned') return;
     // Failed storage cannot accept new state, but a confirmed late boundary
