@@ -11,6 +11,7 @@ import type {
 import { ContractError } from '#internal/errors';
 import { parseActionCheck } from '#internal/validation/action-check';
 import { captureDecisionRequest } from './context.js';
+import type { CandidateCheckInvoker } from './check.js';
 import { captureControl, invokeControlled } from './control.js';
 import { candidateContractIssue, invocationFailure } from './diagnostics.js';
 import { getSelectedCall } from './handles.js';
@@ -139,6 +140,23 @@ export async function recheckCandidate(
   registry: ActionRegistry,
   controlInput: CallControl,
 ): Promise<CandidateRecheckResult> {
+  return recheckCandidateWithInvocation(
+    selected,
+    input,
+    registry,
+    controlInput,
+    (_input, control, check) => invokeControlled(control, check),
+  );
+}
+
+/** Preserve the standalone API while allowing the runtime to record its final check. */
+export async function recheckCandidateWithInvocation(
+  selected: SelectedCandidate,
+  input: CandidateRecheckInput,
+  registry: ActionRegistry,
+  controlInput: CallControl,
+  invokeCheck: CandidateCheckInvoker,
+): Promise<CandidateRecheckResult> {
   const call = getSelectedCall(selected);
   const captured = captureDecisionRequest(input);
   if (!(registry instanceof ActionRegistry)) {
@@ -184,8 +202,10 @@ export async function recheckCandidate(
         selected.filtered.checked.prepared.request.context.effectiveConstraints,
     }),
   });
-  const result = await invokeControlled<unknown>(control, (control) =>
-    call.check(request.context, control),
+  const result = await invokeCheck(
+    { candidate: selected.candidate, call: call.call, basis: request },
+    control,
+    (control) => call.check(request.context, control),
   );
   if (result.outcome !== 'returned') {
     return Object.freeze({

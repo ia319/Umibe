@@ -1,4 +1,4 @@
-import type { ActionCheck } from '#internal/contracts/action';
+import type { ActionCheck, PreparedAction } from '#internal/contracts/action';
 import type { CallControl } from '#internal/contracts/control';
 import type {
   Candidate,
@@ -8,12 +8,25 @@ import type {
   CandidateCheckEntry,
   CandidateCheckingReport,
   CandidateCheckingResult,
+  CandidateRecheckInput,
   PreparedCandidates,
 } from '#internal/contracts/candidate-processing';
 import { parseActionCheck } from '#internal/validation/action-check';
 import { captureControl, invokeControlled } from './control.js';
+import type { CapturedControl, InvocationResult } from './control.js';
 import { candidateContractIssue, invocationFailure } from './diagnostics.js';
 import { getPreparedCalls, registerCheckedCandidates } from './handles.js';
+
+/** Internal boundary for bounded checks whose caller owns durable receipts. */
+export type CandidateCheckInvoker = (
+  input: {
+    readonly candidate: Candidate;
+    readonly call: PreparedAction['call'];
+    readonly basis: CandidateRecheckInput;
+  },
+  control: CapturedControl,
+  check: (control: CallControl) => Promise<unknown>,
+) => Promise<InvocationResult<unknown>>;
 
 /**
  * Check each distinct prepared call sequentially against its captured context.
@@ -24,6 +37,19 @@ import { getPreparedCalls, registerCheckedCandidates } from './handles.js';
 export async function checkCandidates(
   prepared: PreparedCandidates,
   controlInput: CallControl,
+): Promise<CandidateCheckingResult> {
+  return checkCandidatesWithInvocation(
+    prepared,
+    controlInput,
+    (_input, control, check) => invokeControlled(control, check),
+  );
+}
+
+/** Preserve the standalone API while allowing the runtime to persist each check boundary. */
+export async function checkCandidatesWithInvocation(
+  prepared: PreparedCandidates,
+  controlInput: CallControl,
+  invokeCheck: CandidateCheckInvoker,
 ): Promise<CandidateCheckingResult> {
   const calls = getPreparedCalls(prepared);
   const control = captureControl(controlInput);
@@ -90,8 +116,11 @@ export async function checkCandidates(
   };
 
   for (const candidate of prepared.set.candidates) {
-    const result = await invokeControlled<unknown>(control, (control) =>
-      calls.get(candidate.id)!.check(prepared.request.context, control),
+    const call = calls.get(candidate.id)!;
+    const result = await invokeCheck(
+      { candidate, call: call.call, basis: prepared.request },
+      control,
+      (control) => call.check(prepared.request.context, control),
     );
     if (result.outcome !== 'returned') {
       return Object.freeze({

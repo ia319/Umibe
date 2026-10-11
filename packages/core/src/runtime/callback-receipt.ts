@@ -9,16 +9,17 @@ import { ModelRequestError } from './model.js';
 import type { RunSession } from './session.js';
 
 interface CallbackReceiptRequest {
-  readonly stage: 'observation' | 'support';
-  readonly phase: 'initialization' | 'execution' | 'resume';
+  readonly stage: 'observation' | 'support' | 'checking' | 'rechecking';
+  readonly phase: 'initialization' | 'execution' | 'resume' | 'selection';
   readonly decisionEpoch: number;
   readonly input: unknown;
 }
 
 /**
  * Persist input before invocation and detached output before caller validation.
- * Cancellation bounds acceptance, while late fulfillment and rejection still
- * produce receipts. The caller owns lifecycle checks before accepting the result.
+ * Cancellation bounds acceptance; late fulfillment and rejection stay observed.
+ * Receipt persistence requires an open, owned session; failed late writes report
+ * receipt_failed. The caller owns lifecycle checks before accepting the result.
  */
 export async function captureCallback(
   session: RunSession,

@@ -43,7 +43,7 @@ import type {
 import type { Observation } from '#internal/contracts/observation';
 import { captureControl, invokeControlled } from '#internal/candidate/control';
 import { prepareCandidates } from '#internal/candidate/prepare';
-import { checkCandidates } from '#internal/candidate/check';
+import { checkCandidatesWithInvocation } from '#internal/candidate/check';
 import { filterCandidates } from '#internal/candidate/filter';
 import { selectCandidates } from '#internal/selector/select';
 import {
@@ -2171,9 +2171,22 @@ export class RunDriver<TCriteria extends JsonValue> {
       return;
     }
     const checkingStartedAt = Date.now();
-    const checked = await checkCandidates(
+    const checked = await checkCandidatesWithInvocation(
       prepared.prepared,
       this.control('checking'),
+      (input, control, check) =>
+        captureCallback(
+          session,
+          {
+            stage: 'checking',
+            phase: 'selection',
+            decisionEpoch: input.basis.decisionEpoch,
+            input,
+          },
+          control,
+          () => session.canDispatch(input.basis.decisionEpoch),
+          check,
+        ),
     );
     if (!session.canDispatch(input.decisionEpoch)) throw new CallStopped();
     if (checked.outcome !== 'checked') {

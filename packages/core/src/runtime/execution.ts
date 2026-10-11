@@ -15,7 +15,7 @@ import type { InvocationResult } from '#internal/candidate/control';
 import { getSelectedCall } from '#internal/candidate/handles';
 import {
   candidateInvalidationReason,
-  recheckCandidate,
+  recheckCandidateWithInvocation,
 } from '#internal/candidate/recheck';
 import { canonicalJson } from '#internal/candidate/identity';
 import { ContractError } from '#internal/errors';
@@ -26,6 +26,7 @@ import { readActionResult } from '#internal/validation/record';
 import type { RunSession } from './session.js';
 import type { RunCause } from './state.js';
 import { captureObservation } from './observation.js';
+import { captureCallback } from './callback-receipt.js';
 import { ModelRequestError } from './model.js';
 import { requestReview } from './scheduling.js';
 
@@ -180,7 +181,7 @@ export class ActionCoordinator {
       const observationFailure = await this.refreshObservation(epoch);
       if (observationFailure !== null)
         return { outcome: 'notExecuted', reasonCode: observationFailure };
-      const recheck = await recheckCandidate(
+      const recheck = await recheckCandidateWithInvocation(
         selected,
         session.state.decision,
         this.registry,
@@ -190,6 +191,19 @@ export class ActionCoordinator {
             Date.now() + session.state.limits.callbackTimeoutMs,
           ).toISOString(),
         },
+        (input, control, check) =>
+          captureCallback(
+            session,
+            {
+              stage: 'rechecking',
+              phase: 'execution',
+              decisionEpoch: epoch,
+              input,
+            },
+            control,
+            () => session.canDispatch(epoch),
+            check,
+          ),
       );
       if (
         recheck.outcome !== 'rechecked' ||
