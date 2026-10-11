@@ -24,6 +24,8 @@ export type {
 export { parseGoalGraph } from '#internal/validation/goal';
 export type {
   PlanProposal,
+  PlanProposalContent,
+  PendingPlanProposal,
   PlanningTrigger,
   GoalRevision,
   ProposedGoal,
@@ -50,7 +52,9 @@ export type {
 } from '#internal/model/metadata';
 export type {
   CandidateProvider,
+  CandidateGenerator,
   CandidateRequest,
+  OperationBindingRequest,
   CriteriaSupport,
   Environment,
   ObservationSource,
@@ -61,7 +65,12 @@ export type {
 } from '#internal/contracts/adapters';
 export type {
   Selector,
+  SingleCallSelector,
+  ResumableSelector,
   SelectorRequest,
+  SelectorBatchRequest,
+  SelectionCursor,
+  SelectionBatchMapping,
   SelectionResult,
 } from '#internal/selector/contracts';
 export { createSelector } from '#internal/selector/model';
@@ -70,6 +79,24 @@ export type {
   DecisionContext,
   RuntimeContext,
 } from '#internal/contracts/context';
+export type {
+  ControlDecision,
+  DecisionBasis,
+  DecisionChoice,
+  DecisionGoal,
+  DecisionInput,
+  DecisionOption,
+  DecisionPolicy,
+  DecisionRequest,
+  DecisionResult,
+  ExecutionDisposition,
+  ProposalDisposition,
+} from '#internal/contracts/decision';
+export type {
+  OperationAvailability,
+  OperationOffer,
+  OperationSet,
+} from '#internal/contracts/operation';
 export type {
   ActionCapability,
   ActionCheck,

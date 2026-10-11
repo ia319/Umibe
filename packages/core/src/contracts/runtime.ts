@@ -21,9 +21,10 @@ import type { JsonObject, JsonValue } from './json.js';
 import type { RunCheckpoint, RunRecord, RunSummary } from './record.js';
 import type { ApplicationEvent } from './event.js';
 import type { Reconciliation } from './action.js';
+import type { DecisionPolicy } from './decision.js';
 
 export type ModelStage =
-  'planning' | 'selection' | 'candidates' | 'verification';
+  'decision' | 'planning' | 'selection' | 'candidates' | 'verification';
 
 export type GoalDefinition = Omit<
   RootGoalRecord,
@@ -67,6 +68,7 @@ export interface AgentOptions<TCriteria extends JsonValue = JsonValue> {
   /** Stable application identity; required by durable stores. Never use credentials here. */
   readonly applicationId?: string;
   readonly actions: readonly RegisteredAction[];
+  readonly decisionPolicy: DecisionPolicy;
   readonly planner: Planner;
   readonly selector: Selector;
   readonly candidateProvider: CandidateProvider;
@@ -78,7 +80,19 @@ export interface AgentOptions<TCriteria extends JsonValue = JsonValue> {
   readonly selectorCapacity?: number;
   readonly limits?: Partial<RuntimeLimits>;
   /**
-   * Mark custom callbacks backed by model requests. Planner and Selector model
+   * Start a one-shot review timer after each DecisionPolicy call finishes.
+   * Positive integer milliseconds, at most 2,147,483,647; omission disables the timer.
+   * Resume preserves the saved interval and never replays offline timer ticks.
+   */
+  readonly reviewIntervalMs?: number;
+  /**
+   * Throttle only DecisionPolicy call starts, measured from the previous start.
+   * Nonnegative integer milliseconds, at most 2,147,483,647; omission uses zero.
+   * Resume preserves the saved interval.
+   */
+  readonly minDecisionIntervalMs?: number;
+  /**
+   * Mark custom callbacks backed by model requests. DecisionPolicy, Planner and Selector model
    * identities always enable their stages, including when this array is empty.
    */
   readonly modelStages?: readonly ModelStage[];
@@ -108,7 +122,7 @@ export interface Agent {
   /**
    * Acquire a stored run when necessary and continue from its committed checkpoint.
    * Requires matching application, action versions and model stages. Preserves
-   * stored limits and usage; uncertain executions must reconcile before dispatch.
+   * stored limits, scheduling and usage; uncertain executions must reconcile before dispatch.
    * After notPerformed, the next call must match the saved action ID, version and
    * normalized parameters, and remains subject to the saved retry policy and count.
    * A changed call pauses with retry_call_changed; a forbidden or exhausted retry

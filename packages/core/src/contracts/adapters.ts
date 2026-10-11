@@ -8,6 +8,7 @@ import type { CandidateFilterResult } from './candidate-filter.js';
 import type { ActionCapability } from './action.js';
 import type { DecisionContext } from './context.js';
 import type { CallControl } from './control.js';
+import type { OperationOffer, OperationSet } from './operation.js';
 
 export interface CandidateRequest {
   readonly requestId: string;
@@ -17,9 +18,27 @@ export interface CandidateRequest {
 }
 
 /** Returns complete action calls and explicit coverage, including when no calls were found. */
-export interface CandidateProvider {
+export interface CandidateGenerator {
   generate(
     request: CandidateRequest,
+    control: CallControl,
+  ): Promise<CandidateSet>;
+}
+
+export interface OperationBindingRequest extends CandidateRequest {
+  readonly operationSetId: string;
+  readonly operation: OperationOffer;
+}
+
+/** List operation availability before choosing one; bind complete calls against a fresh snapshot. */
+export interface CandidateProvider {
+  listOperations(
+    request: CandidateRequest,
+    control: CallControl,
+  ): Promise<OperationSet>;
+  /** Every returned candidate must use the selected operation's registered action and version. */
+  bind(
+    request: OperationBindingRequest,
     control: CallControl,
   ): Promise<CandidateSet>;
 }

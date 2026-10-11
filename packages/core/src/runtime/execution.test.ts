@@ -76,6 +76,7 @@ async function select(registry: ActionRegistry) {
   const selected = await selectCandidates(
     filtering.filtered,
     {
+      kind: 'single',
       select: (request) =>
         Promise.resolve({
           outcome: 'selected',

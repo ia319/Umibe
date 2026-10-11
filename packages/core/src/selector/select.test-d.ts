@@ -1,6 +1,6 @@
 import { assertType } from 'vitest';
 import type { CallControl } from '#internal/contracts/control';
-import type { Selector } from '#internal/selector/contracts';
+import type { SingleCallSelector } from '#internal/selector/contracts';
 import type {
   CandidateSelectionResult,
   FilteredCandidates,
@@ -8,7 +8,7 @@ import type {
 import { selectCandidates } from './select.js';
 
 declare const filtered: FilteredCandidates;
-declare const selector: Selector;
+declare const selector: SingleCallSelector;
 declare const control: CallControl;
 assertType<Promise<CandidateSelectionResult>>(
   selectCandidates(filtered, selector, control, 10),

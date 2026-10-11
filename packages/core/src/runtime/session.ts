@@ -15,7 +15,7 @@ import type {
   RunStore,
   RunLease,
 } from '#internal/storage/contracts';
-import { requireObject } from '#internal/validation/fields';
+import { requireObject, requireString } from '#internal/validation/fields';
 import { parseJsonValue } from '#internal/validation/json';
 import { parseGoalGraph } from '#internal/validation/goal';
 import {
@@ -27,7 +27,9 @@ import type { RunCommand, RunControlState } from './state.js';
 import { captureLimits } from './limits.js';
 import type { RuntimeLimits } from './limits.js';
 import type { ExecutionSnapshot } from './execution.js';
-import type { SchedulingState } from './scheduling.js';
+import { captureScheduling, requestReview } from './scheduling.js';
+import type { SchedulingConfiguration, SchedulingState } from './scheduling.js';
+import type { PendingPlanProposal } from '#internal/planner/contracts';
 import type { GoalState } from './goals.js';
 import type { GoalProgress, ProgressAttempt } from './progress.js';
 import type { ActionResult } from '#internal/contracts/record';
@@ -46,6 +48,7 @@ export interface SessionState {
   readonly modelAttempts: number;
   readonly actionAttempts: number;
   readonly execution: ExecutionSnapshot | null;
+  readonly pendingProposal: PendingPlanProposal | null;
   readonly scheduling: SchedulingState;
   readonly observations: {
     /** False only while the internal initialization marker awaits a source snapshot. */
@@ -132,6 +135,7 @@ export class RunSession {
       modelStages: [],
     },
     initialObservationPending = false,
+    scheduling: SchedulingConfiguration = captureScheduling({}),
   ): Promise<RunSession> {
     const decision = captureDecisionRequest(input);
     const capturedLimits = captureLimits(limits);
@@ -152,6 +156,7 @@ export class RunSession {
       modelAttempts: 0,
       actionAttempts: 0,
       execution: null,
+      pendingProposal: null,
       progress: [],
       progressAttempt: null,
       recentResults: [],
@@ -167,13 +172,13 @@ export class RunSession {
         order: [],
       },
       scheduling: {
-        policyVersion: 1,
+        ...scheduling,
+        policyVersion: 2,
         reviewPending: true,
         reviewVersion: 1,
+        lastDecisionStartedAt: null,
         planning: { kind: 'initial', assessment: 'notYet' },
-        recoveryAttempts: 0,
-        lastSelectionBasis: null,
-        selectionCause: 'initial',
+        planningVersion: 1,
       } satisfies SchedulingState,
     });
     const lease = await store.acquireRun(runId);
@@ -308,8 +313,8 @@ export class RunSession {
               underlyingSettled: false,
               confirmedEffects: {},
               unresolvedEffects: { execution: 'dispatch_unconfirmed' },
-              progress: {},
-              stopCauseEventId: cause.eventId,
+              progress: execution.progress,
+              stopCauseEventId: execution.stopCause?.eventId ?? cause.eventId,
             })
           : null;
       const unresolved = unknown !== null || execution?.phase === 'unknown';
@@ -347,7 +352,12 @@ export class RunSession {
           },
           execution:
             unknown !== null && execution !== null
-              ? { ...execution, result: unknown, phase: 'unknown' }
+              ? {
+                  ...execution,
+                  result: unknown,
+                  phase: 'unknown',
+                  stopCause: execution.stopCause ?? cause,
+                }
               : execution,
           decision:
             unknown === null
@@ -503,11 +513,8 @@ export class RunSession {
       const current = this.#state;
       const eventSequence =
         current.observations.eventSequence + batch.changes.length;
-      const reviewVersion = current.scheduling.reviewVersion + 1;
-      if (
-        !Number.isSafeInteger(eventSequence) ||
-        !Number.isSafeInteger(reviewVersion)
-      )
+      const scheduling = requestReview(current.scheduling);
+      if (!Number.isSafeInteger(eventSequence))
         throw new ContractError(
           validation.code,
           'change_batch',
@@ -541,11 +548,7 @@ export class RunSession {
             eventSequence,
             unreadChanges: [...current.observations.unreadChanges, ...changes],
           },
-          scheduling: {
-            ...current.scheduling,
-            reviewPending: true,
-            reviewVersion,
-          },
+          scheduling,
         },
         [{ ...event, eventId }],
       );
@@ -556,6 +559,20 @@ export class RunSession {
     } finally {
       this.#changePublications.delete(eventId);
     }
+  }
+
+  /** Persist a flow or timer trigger before waking the decision scheduler. */
+  markReview(reasonCode: string): Promise<void> {
+    return this.commit(
+      { ...this.#state, scheduling: requestReview(this.#state.scheduling) },
+      [
+        this.event(
+          'review_requested',
+          requireString(reasonCode, validation, '/reasonCode'),
+          {},
+        ),
+      ],
+    );
   }
 
   /** Holds the run across preparation, dispatch and uncertain external effects. */
@@ -776,6 +793,9 @@ export class RunSession {
                 : Object.freeze({
                     executionId: state.execution.intent.executionId,
                     phase: state.execution.phase,
+                    intent: state.execution.intent,
+                    progress: state.execution.progress,
+                    stopCause: state.execution.stopCause,
                   }),
             recentResults: state.recentResults,
             progress: Object.freeze(

@@ -337,6 +337,7 @@ assert.equal(filtering.filtered.report.kept, 1);
 assert.notEqual(filtering.filtered.set.id, checking.checked.set.id);
 assert.equal(filtering.filtered.set.candidates[0].params, checking.checked.set.candidates[0].params);
 const selection = await selectCandidates(filtering.filtered, {
+  kind: 'single',
   select: (request) => Promise.resolve({ outcome: 'selected', decisionId: 'consumer-decision', candidateSetId: request.candidates.id, candidateId: request.candidates.candidates[0].id }),
 }, { signal: new AbortController().signal, deadlineAt: new Date(Date.now() + 30_000).toISOString() }, 1);
 assert.equal(selection.outcome, 'selected');
@@ -362,8 +363,12 @@ const agent = createAgent({
   actions: [action], store: agentStore,
   environment: { observe: { snapshot: () => Promise.resolve({ ...context.observation, runId: 'agent-consumer', data: { ready: { status: 'known', value: true } } }) } },
   planner: { plan: () => { throw new Error('Already satisfied goal must not plan'); } },
-  selector: { select: () => { throw new Error('Already satisfied goal must not select'); } },
-  candidateProvider: { generate: () => { throw new Error('Already satisfied goal must not generate'); } },
+  decisionPolicy: { decide: () => { throw new Error('Already satisfied goal must not decide'); } },
+  selector: { kind: 'single', select: () => { throw new Error('Already satisfied goal must not select'); } },
+  candidateProvider: {
+    listOperations: () => { throw new Error('Already satisfied goal must not list operations'); },
+    bind: () => { throw new Error('Already satisfied goal must not bind'); },
+  },
   verifier: {
     support: (criteria) => Promise.resolve({ outcome: 'supported', criteria, requiredEvidence: [] }),
     verify: ({ goal, context }) => Promise.resolve({
@@ -391,6 +396,19 @@ let plans = 0;
 const executionDepths = [];
 const taskOptions = {
   applicationId: 'packed-sdk', limits: { maxActionAttempts: 1 }, modelStages: ['planning', 'selection'],
+  decisionPolicy: { decide(request) {
+    const option = request.options.find(({ decision }) => decision.kind === 'adoptPlan') ??
+      ((request.input.acceptedPlan === null || request.input.planning.need !== null) && !request.input.planning.inFlight
+        ? request.options.find(({ decision }) => decision.kind === 'replan') : undefined) ??
+      (request.input.execution === null && request.input.selection === null
+        ? request.options.find(({ decision }) => decision.kind === 'selectOperation') : undefined) ??
+      request.options.find(({ decision }) => decision.kind === 'continueAction') ??
+      request.options.find(({ decision }) => decision.kind === 'continueSelection') ??
+      request.options.find(({ decision }) => decision.kind === 'wait') ??
+      request.options.find(({ decision }) => decision.kind === 'abstain');
+    if (option === undefined) throw new Error('Consumer has no applicable decision option');
+    return Promise.resolve({ optionId: option.id });
+  } },
   actions: [defineAction({
     id: 'sample', version: 1, description: 'Take one sample', tags: [], expectedEffects: { count: 1 }, parameters: z.strictObject({}),
     check: () => Promise.resolve({ outcome: 'allowed' }),
@@ -411,7 +429,10 @@ const taskOptions = {
       { tempId: 'third', parent: { kind: 'accepted', goalRef: current.graph.rootGoalRef }, description: 'Third sample', criteria: { count: 3 } },
     ] });
   } },
-  candidateProvider: { generate(request) {
+  candidateProvider: {
+    listOperations(request) { return Promise.resolve({ id: request.requestId + ':operations', requestId: request.requestId,
+      operations: request.capabilities.map((capability) => ({ operationId: capability.id, actionVersion: capability.version, availability: { status: 'available' }, parameterSources: {}, informationGaps: [] })), informationGaps: [], capabilityGaps: [] }); },
+    bind(request) {
     const current = request.context;
     const observationRef = { id: current.observation.id, revision: current.observation.revision };
     return Promise.resolve({ id: request.requestId, runId: current.graph.runId, rootGoalRef: current.graph.rootGoalRef, currentGoalRef: current.graph.currentGoalRef, goalPathRef: 'samples', goalPath: current.graph.goalPath, planRef: current.planRef, observationRef, constraintsVersion: current.constraintsVersion,
@@ -419,7 +440,7 @@ const taskOptions = {
       candidates: [{ id: 'next', candidateSetId: request.requestId, actionId: 'sample', actionVersion: 1, params: {}, paramSources: {}, description: 'Take a sample', expectedEffects: { count: 1 }, cost: null, risk: null, source: 'consumer', goalRef: current.graph.currentGoalRef, goalPathRef: 'samples', planRef: current.planRef, observationRef, constraintsVersion: current.constraintsVersion }],
     });
   } },
-  selector: { select: (request) => Promise.resolve({ outcome: 'selected', decisionId: request.requestId, candidateSetId: request.candidates.id, candidateId: request.candidates.candidates[0].id }) },
+  selector: { kind: 'single', select: (request) => Promise.resolve({ outcome: 'selected', decisionId: request.requestId, candidateSetId: request.candidates.id, candidateId: request.candidates.candidates[0].id }) },
   verifier: {
     support: (criteria) => Promise.resolve({ outcome: 'supported', criteria: z.strictObject({ count: z.number() }).parse(criteria), requiredEvidence: ['/count'] }),
     verify: ({ goal, criteria, context }) => Promise.resolve({ goalRef: { id: goal.id, version: goal.version }, observationRef: { id: context.observation.id, revision: context.observation.revision }, outcome: collected >= criteria.count ? 'passed' : 'notYet', reason: collected >= criteria.count ? null : 'more_samples', progress: collected, evidence: { source: 'application', observationPaths: ['/count'], executionIds: [], details: {} } }),
@@ -501,7 +522,7 @@ await reopened.close();
 
   writeFileSync(
     join(consumerRoot, 'consumer.mts'),
-    `import { createAgent, ActionRegistry, defineAction, MemoryRunStore, prepareCandidates, checkCandidates, filterCandidates, selectCandidates, recheckCandidate, type CandidateProvider, type CandidateGenerationInput, type CandidatePreparationResult, type CandidateCheckingResult, type CandidateFilteringResult, type CandidateSelectionResult, type CandidateRecheckInput, type CandidateRecheckResult, type SelectedCandidate, type Selector, type PreparedAction, type RecordPage, type RunCommit, type AgentOptions, type RunHandle, type ResumeRun, type Reconciliation, type PlanProposal, type GoalRevision, type RuntimeContext } from '@umibe/core';
+    `import { createAgent, ActionRegistry, defineAction, MemoryRunStore, prepareCandidates, checkCandidates, filterCandidates, selectCandidates, recheckCandidate, type CandidateGenerator, type CandidateGenerationInput, type CandidatePreparationResult, type CandidateCheckingResult, type CandidateFilteringResult, type CandidateSelectionResult, type CandidateRecheckInput, type CandidateRecheckResult, type SelectedCandidate, type SingleCallSelector, type PreparedAction, type RecordPage, type RunCommit, type AgentOptions, type RunHandle, type ResumeRun, type Reconciliation, type PlanProposal, type GoalRevision, type RuntimeContext } from '@umibe/core';
 import { z } from 'zod';
 
 import { SqliteRunStore, type SqliteInspection } from '@umibe/storage-sqlite';
@@ -547,8 +568,8 @@ const prepared: Promise<PreparedAction> = registry.prepare({ actionId: 'collect'
 void prepared;
 
 declare const candidateInput: CandidateGenerationInput;
-declare const candidateProvider: CandidateProvider;
-const preparation: Promise<CandidatePreparationResult> = prepareCandidates(candidateInput, registry, candidateProvider, { signal: new AbortController().signal, deadlineAt: new Date().toISOString() });
+declare const candidateGenerator: CandidateGenerator;
+const preparation: Promise<CandidatePreparationResult> = prepareCandidates(candidateInput, registry, candidateGenerator, { signal: new AbortController().signal, deadlineAt: new Date().toISOString() });
 void preparation;
 declare const candidateResult: CandidatePreparationResult;
 if (candidateResult.outcome === 'prepared') {
@@ -569,7 +590,7 @@ if (checkingResult.outcome !== 'checked') {
   void filtering;
 }
 declare const filteringResult: CandidateFilteringResult;
-declare const selector: Selector;
+declare const selector: SingleCallSelector;
 if (filteringResult.outcome === 'filtered') {
   const selection: Promise<CandidateSelectionResult> = selectCandidates(filteringResult.filtered, selector, { signal: new AbortController().signal, deadlineAt: new Date().toISOString() }, 5);
   void selection;

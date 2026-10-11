@@ -31,6 +31,7 @@ function fixture() {
       projectRoot,
       actions: h.options.actions,
       planner: h.options.planner,
+      decisionPolicy: h.options.decisionPolicy,
       environment: h.options.environment,
       candidateProvider: h.options.candidateProvider,
       selector: h.options.selector,
@@ -63,7 +64,7 @@ test('imports without creating files and runs memory mode without constructing a
     assert.deepEqual(readdirSync('.'), []);
     const unused = async () => { throw new Error('Must not be invoked'); };
     const agent = createAgent({ persistence: { mode: 'memory' }, actions: [],
-      planner: { plan: unused }, selector: { select: unused }, candidateProvider: { generate: unused },
+      decisionPolicy: { decide: unused }, planner: { plan: unused }, selector: { kind: 'single', select: unused }, candidateProvider: { listOperations: unused, bind: unused },
       environment: { observe: { snapshot: unused } }, verifier: { support: unused, verify: unused } });
     assert.equal((await agent.inspect()).kind, 'memory');
     assert.equal(await agent.inspect('absent'), null);

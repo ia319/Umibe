@@ -11,6 +11,7 @@ test('executes a valid selection when its adapter catches a rejected metadata re
   const agent = createAgent({
     ...h.options,
     selector: {
+      kind: 'single',
       model: { provider: 'fixture', model: 'selection-model' },
       select(request: SelectorRequest, control: CallControl) {
         expect(() =>
@@ -72,6 +73,7 @@ test('meters declared roles even with empty modelStages and captures identities 
     },
   };
   const selector = {
+    kind: 'single' as const,
     model: { provider: 'other', model: 'selection-model' },
     calls: 0,
     select(request: SelectorRequest, control: CallControl) {
@@ -210,7 +212,7 @@ test('validates declared model identities during construction without invoking c
   expect(() =>
     createAgent({
       ...h.options,
-      selector: { model: identity, select: h.select },
+      selector: { kind: 'single', model: identity, select: h.select },
     }),
   ).toThrow(expect.objectContaining({ reason: 'unknown_field' }));
   expect(h.plan).not.toHaveBeenCalled();

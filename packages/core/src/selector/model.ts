@@ -1,5 +1,5 @@
 import type {
-  Selector,
+  SingleCallSelector,
   SelectorRequest,
   SelectionResult,
 } from './contracts.js';
@@ -46,7 +46,7 @@ export interface SelectorOptions {
  * Direct empty calls return abstain/no_candidates. Excess capacity rejects with
  * ContractError reason candidate_limit before model access. No candidate is truncated.
  */
-export function createSelector(options: SelectorOptions): Selector {
+export function createSelector(options: SelectorOptions): SingleCallSelector {
   const configured = options.model;
   if (!(
     (configured?.kind === 'structuredOutput' &&
@@ -116,7 +116,8 @@ export function createSelector(options: SelectorOptions): Selector {
   const single = compareBatches
     ? createSelector({ model: configured })
     : undefined;
-  return Object.freeze<Selector>({
+  return Object.freeze<SingleCallSelector>({
+    kind: 'single',
     model: identity,
     ...(compareBatches ? { modelAccounting: 'perRequest' } : {}),
     ...(capacity === undefined ? {} : { capacity }),

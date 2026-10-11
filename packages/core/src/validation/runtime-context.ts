@@ -8,7 +8,7 @@ import {
   requireString,
 } from './fields.js';
 import type { FieldContext } from './fields.js';
-import { readActionResult } from './record.js';
+import { readActionIntent, readActionResult } from './record.js';
 import { readGoalRef } from './references.js';
 import { readGoalAssessment } from './assessment.js';
 import { isJsonArray } from './json.js';
@@ -28,7 +28,12 @@ export function readRuntimeContext(
   let execution: RuntimeContext['execution'] = null;
   if (raw.execution !== null) {
     const item = requireObject(raw.execution, context, `${path}/execution`);
-    requireKeys(item, ['executionId', 'phase'], context, `${path}/execution`);
+    requireKeys(
+      item,
+      ['executionId', 'phase', 'intent', 'progress', 'stopCause'],
+      context,
+      `${path}/execution`,
+    );
     const phase = item.phase;
     if (
       phase !== 'prepared' &&
@@ -44,13 +49,54 @@ export function readRuntimeContext(
         `${path}/execution/phase`,
         'invalid_execution_phase',
       );
-    execution = Object.freeze({
-      executionId: requireString(
-        item.executionId,
+    const executionId = requireString(
+      item.executionId,
+      context,
+      `${path}/execution/executionId`,
+    );
+    const intent = readActionIntent(item.intent);
+    if (intent.executionId !== executionId)
+      throw new ContractError(
+        context.code,
+        context.stage,
+        `${path}/execution/intent`,
+        'execution_identity_mismatch',
+      );
+    const stop =
+      item.stopCause === null
+        ? null
+        : requireObject(item.stopCause, context, `${path}/execution/stopCause`);
+    if (stop !== null)
+      requireKeys(
+        stop,
+        ['eventId', 'reasonCode'],
         context,
-        `${path}/execution/executionId`,
-      ),
+        `${path}/execution/stopCause`,
+      );
+    execution = Object.freeze({
+      executionId,
       phase,
+      intent,
+      progress: requireObject(
+        item.progress,
+        context,
+        `${path}/execution/progress`,
+      ),
+      stopCause:
+        stop === null
+          ? null
+          : Object.freeze({
+              eventId: requireString(
+                stop.eventId,
+                context,
+                `${path}/execution/stopCause/eventId`,
+              ),
+              reasonCode: requireString(
+                stop.reasonCode,
+                context,
+                `${path}/execution/stopCause/reasonCode`,
+              ),
+            }),
     });
   }
   let blocker: RuntimeContext['blocker'] = null;

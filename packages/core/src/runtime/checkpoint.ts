@@ -5,6 +5,8 @@ import { canonicalJson } from '#internal/candidate/identity';
 import { parseJsonValue } from '#internal/validation/json';
 import { parseGoalGraph, readGoalRecord } from '#internal/validation/goal';
 import { parseRecordedChange } from '#internal/validation/changes';
+import { requireObject, requireTimestamp } from '#internal/validation/fields';
+import { parsePlanProposal } from '#internal/planner/validation';
 import {
   parseRunCheckpoint,
   readActionIntent,
@@ -14,7 +16,7 @@ import type { RunCheckpoint } from '#internal/contracts/record';
 import type { SessionState } from './session.js';
 import { captureLimits } from './limits.js';
 
-export const runtimeStateSchemaVersion = 3;
+export const runtimeStateSchemaVersion = 4;
 const context = {
   code: 'INVALID_RUN_CHECKPOINT',
   stage: 'runtime_checkpoint',
@@ -23,7 +25,23 @@ const text = z.string().min(1);
 const count = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const ref = z.strictObject({ id: text, version: count.min(1) });
 const cause = z.strictObject({ eventId: text, reasonCode: text }).nullable();
-const stage = z.enum(['planning', 'selection', 'candidates', 'verification']);
+const stage = z.enum([
+  'decision',
+  'planning',
+  'selection',
+  'candidates',
+  'verification',
+]);
+const timestamp = z
+  .unknown()
+  .transform((value) =>
+    requireTimestamp(parseJsonValue(value, context.stage), context, ''),
+  );
+const jsonObject = z
+  .unknown()
+  .transform((value) =>
+    requireObject(parseJsonValue(value, context.stage), context, ''),
+  );
 const identity = z
   .strictObject({
     applicationId: text.nullable(),
@@ -79,6 +97,11 @@ const result = z
   );
 const trigger = z.discriminatedUnion('kind', [
   z.strictObject({
+    kind: z.literal('decision'),
+    requestId: text,
+    goalRef: ref,
+  }),
+  z.strictObject({
     kind: z.literal('initial'),
     assessment: z.literal('notYet'),
   }),
@@ -96,6 +119,70 @@ const trigger = z.discriminatedUnion('kind', [
     failures: count,
   }),
 ]);
+const childGoal = z.unknown().transform((value) => {
+  const goal = readGoalRecord(
+    parseJsonValue(value, context.stage),
+    '/goals/pending',
+  );
+  if (goal.kind !== 'child')
+    throw new ContractError(
+      context.code,
+      context.stage,
+      '/goals/pending',
+      'expected_child',
+    );
+  return goal;
+});
+const plannerRequest = z
+  .strictObject({
+    requestId: text,
+    decisionEpoch: count,
+    context: z.unknown(),
+    capabilities: z.array(
+      z.strictObject({
+        id: text,
+        version: count.min(1),
+        description: text,
+        parameters: jsonObject,
+        expectedEffects: jsonObject,
+        tags: z.array(text),
+      }),
+    ),
+    trigger,
+    pendingGoals: z.array(childGoal).optional(),
+  })
+  .transform(
+    ({
+      requestId,
+      decisionEpoch,
+      context: requestContext,
+      pendingGoals,
+      ...remaining
+    }) => ({
+      ...captureDecisionRequest({
+        requestId,
+        decisionEpoch,
+        context: requestContext,
+      }),
+      ...remaining,
+      ...(pendingGoals === undefined ? {} : { pendingGoals }),
+    }),
+  );
+const pendingProposal = z
+  .strictObject({
+    proposalId: text,
+    request: plannerRequest,
+    proposal: z.unknown(),
+    receivedAt: timestamp,
+  })
+  .transform((value) => ({
+    ...value,
+    proposal: parsePlanProposal(value.proposal, value.request, {
+      maxNewGoals: null,
+      maxTotalGoals: null,
+      maxDepth: null,
+    }),
+  }));
 const schema = z.strictObject({
   identity,
   pendingModels: z.array(pendingModel),
@@ -155,22 +242,20 @@ const schema = z.strictObject({
       result: result.nullable(),
       retries: count,
       reconciliation: z.enum(['performed', 'notPerformed']).nullable(),
+      progress: jsonObject,
+      stopCause: cause,
     })
     .nullable(),
+  pendingProposal: pendingProposal.nullable(),
   scheduling: z.strictObject({
-    policyVersion: z.literal(1),
+    policyVersion: z.literal(2),
     reviewPending: z.boolean(),
     reviewVersion: count.min(1),
+    reviewIntervalMs: count.min(1).max(2_147_483_647).nullable(),
+    minDecisionIntervalMs: count.max(2_147_483_647),
+    lastDecisionStartedAt: timestamp.nullable(),
     planning: trigger.nullable(),
-    recoveryAttempts: count,
-    lastSelectionBasis: text.nullable(),
-    selectionCause: z.enum([
-      'initial',
-      'action_completed',
-      'candidates_changed',
-      'resumed',
-      'remedy',
-    ]),
+    planningVersion: count.min(1),
   }),
   observations: z.strictObject({
     initialized: z.boolean(),
@@ -181,22 +266,7 @@ const schema = z.strictObject({
   goals: z.strictObject({
     created: count,
     order: z.array(ref),
-    pending: z.array(
-      z.unknown().transform((value) => {
-        const goal = readGoalRecord(
-          parseJsonValue(value, context.stage),
-          '/goals/pending',
-        );
-        if (goal.kind !== 'child')
-          throw new ContractError(
-            context.code,
-            context.stage,
-            '/goals/pending',
-            'expected_child',
-          );
-        return goal;
-      }),
-    ),
+    pending: z.array(childGoal),
   }),
   progress: z.array(
     z.strictObject({
@@ -240,6 +310,8 @@ export function parseRuntimeState(input: unknown): SessionState {
         state.actionAttempts !== 0 ||
         state.pendingModels.length !== 0 ||
         state.execution !== null ||
+        state.pendingProposal !== null ||
+        state.scheduling.lastDecisionStartedAt !== null ||
         state.recentResults.length !== 0 ||
         state.decision.context.lastActionResult !== null ||
         observations.lastReviewedEventSequence !== 0
@@ -273,6 +345,16 @@ export function parseRuntimeState(input: unknown): SessionState {
       fail('/scheduling/reviewPending', 'unread_changes_without_review');
     if (!same(state.control.rootGoalRef, current.rootGoalRef))
       fail('/control/rootGoalRef', 'root_mismatch');
+    if (
+      state.pendingProposal !== null &&
+      (state.pendingProposal.request.context.graph.runId !== current.runId ||
+        state.pendingProposal.request.decisionEpoch >
+          state.decision.decisionEpoch ||
+        state.pendingProposal.request.pendingGoals?.some(
+          (goal) => goal.runId !== current.runId,
+        ))
+    )
+      fail('/pendingProposal/request', 'invalid_planning_basis');
     const children = new Set(
       [
         ...current.goals.filter((goal) => goal.kind === 'child'),

@@ -58,7 +58,9 @@ export class ModelRequestError extends Error {
     this.name = 'ModelRequestError';
     if (
       issue !== undefined &&
-      (!['protocol', 'planning', 'selection'].includes(issue.phase) ||
+      (!['protocol', 'decision', 'planning', 'selection'].includes(
+        issue.phase,
+      ) ||
         typeof issue.path !== 'string' ||
         issue.path.length > 256 ||
         !/^(?:\/[A-Za-z0-9_-]+)*$/.test(issue.path) ||
@@ -82,8 +84,11 @@ export class ModelRequestError extends Error {
 export interface ModelRequestBasis {
   readonly requestId: string;
   readonly decisionEpoch: number;
-  readonly purpose: 'planning' | 'selection' | 'candidates' | 'verification';
+  readonly purpose:
+    'decision' | 'planning' | 'selection' | 'candidates' | 'verification';
   readonly model?: ModelIdentity;
+  /** Execute only this physical attempt; the selection scheduler owns retry delays. */
+  readonly retryAttempt?: number;
 }
 
 export type ModelCallResult<T> =
@@ -95,6 +100,7 @@ export type ModelCallResult<T> =
   | {
       readonly outcome: 'failed';
       readonly reasonCode: ModelFailureCode;
+      readonly retryAfterMs?: number;
       readonly issue?: ModelResponseIssue;
     }
   | {
@@ -132,9 +138,13 @@ export async function invokeModel<T>(
     purpose: basis.purpose,
   });
   if (
-    !['planning', 'selection', 'candidates', 'verification'].includes(
-      request.purpose,
-    )
+    ![
+      'decision',
+      'planning',
+      'selection',
+      'candidates',
+      'verification',
+    ].includes(request.purpose)
   )
     throw new ContractError(
       validation.code,
@@ -147,6 +157,18 @@ export async function invokeModel<T>(
     basis.model === undefined ? null : captureModelIdentity(basis.model);
   const signal = AbortSignal.any([captured.signal, session.signal]);
   const limits = session.state.limits;
+  const firstAttempt = basis.retryAttempt ?? 1;
+  if (
+    !Number.isSafeInteger(firstAttempt) ||
+    firstAttempt < 1 ||
+    firstAttempt > limits.modelRetries + 1
+  )
+    throw new ContractError(
+      validation.code,
+      validation.stage,
+      '/retryAttempt',
+      'invalid_retry_attempt',
+    );
   const interruption = ():
     'cancelled' | 'invalidated' | 'deadlineExceeded' | null => {
     if (session.signal.aborted) return 'cancelled';
@@ -156,7 +178,11 @@ export async function invokeModel<T>(
     return null;
   };
 
-  for (let attempt = 1; attempt <= limits.modelRetries + 1; attempt++) {
+  for (
+    let attempt = firstAttempt;
+    attempt <= limits.modelRetries + 1;
+    attempt++
+  ) {
     const stopped = interruption();
     if (stopped !== null) return { outcome: stopped };
     if (
@@ -530,6 +556,13 @@ export async function invokeModel<T>(
         delayMs,
       }),
     ]);
+    if (basis.retryAttempt !== undefined)
+      return {
+        outcome: 'failed',
+        reasonCode,
+        retryAfterMs: delayMs,
+        ...(issue === null ? {} : { issue }),
+      };
     // A retry delay owns no external work; its deadline simply ends the wait.
     const waited = await invokeControlled(
       captureControl({

@@ -11,6 +11,7 @@ import type { ChangeBatch } from '#internal/contracts/changes';
 import { ContractError } from '#internal/errors';
 import {
   requireKeys,
+  requireInteger,
   requireObject,
   requireString,
 } from '#internal/validation/fields';
@@ -23,6 +24,8 @@ import { captureModelIdentity } from '#internal/model/validation';
 import { RunSession } from './session.js';
 import { RunDriver } from './runner.js';
 import { captureObservation } from './observation.js';
+import { captureScheduling } from './scheduling.js';
+import type { Selector } from '#internal/selector/contracts';
 
 const validation = { code: 'INVALID_RUN_CONTROL', stage: 'agent' } as const;
 
@@ -37,10 +40,27 @@ export function createAgent<TCriteria extends JsonValue>(
 ): Agent {
   const registry = new ActionRegistry(input.actions);
   const limits = captureLimits(input.limits ?? {});
+  const scheduling = captureScheduling({
+    ...(input.reviewIntervalMs === undefined
+      ? {}
+      : { reviewIntervalMs: input.reviewIntervalMs }),
+    ...(input.minDecisionIntervalMs === undefined
+      ? {}
+      : { minDecisionIntervalMs: input.minDecisionIntervalMs }),
+  });
+  if (input.selector?.kind !== 'single' && input.selector?.kind !== 'resumable')
+    throw new ContractError(
+      validation.code,
+      validation.stage,
+      '/selector/kind',
+      'invalid_selector_kind',
+    );
   for (const [adapter, callback] of [
+    [input.decisionPolicy, 'decide'],
     [input.planner, 'plan'],
-    [input.selector, 'select'],
-    [input.candidateProvider, 'generate'],
+    [input.selector, input.selector.kind === 'single' ? 'select' : 'advance'],
+    [input.candidateProvider, 'listOperations'],
+    [input.candidateProvider, 'bind'],
     [input.environment?.observe, 'snapshot'],
     [input.verifier, 'support'],
     [input.verifier, 'verify'],
@@ -61,9 +81,13 @@ export function createAgent<TCriteria extends JsonValue>(
   if (
     input.modelStages?.some(
       (stage) =>
-        !['planning', 'selection', 'candidates', 'verification'].includes(
-          stage,
-        ),
+        ![
+          'decision',
+          'planning',
+          'selection',
+          'candidates',
+          'verification',
+        ].includes(stage),
     )
   )
     throw new ContractError(
@@ -76,6 +100,10 @@ export function createAgent<TCriteria extends JsonValue>(
     input.planner.model === undefined
       ? undefined
       : captureModelIdentity(input.planner.model);
+  const decisionModel =
+    input.decisionPolicy.model === undefined
+      ? undefined
+      : captureModelIdentity(input.decisionPolicy.model);
   const selectorModel =
     input.selector.model === undefined
       ? undefined
@@ -91,9 +119,58 @@ export function createAgent<TCriteria extends JsonValue>(
       '/selector/modelAccounting',
       'invalid_model_accounting',
     );
+  if (input.selector.kind === 'resumable') {
+    requireInteger(
+      input.selector.batchCapacity,
+      1,
+      validation,
+      '/selector/batchCapacity',
+    );
+    if (input.selector.batchCapacity < 2)
+      throw new ContractError(
+        validation.code,
+        validation.stage,
+        '/selector/batchCapacity',
+        'invalid_batch_capacity',
+      );
+  } else if (input.selector.capacity !== undefined)
+    requireInteger(
+      input.selector.capacity,
+      1,
+      validation,
+      '/selector/capacity',
+    );
+  if (input.selectorCapacity !== undefined)
+    requireInteger(input.selectorCapacity, 1, validation, '/selectorCapacity');
+  const selector: Selector = Object.freeze({
+    ...(selectorModel === undefined ? {} : { model: selectorModel }),
+    ...(input.selector.modelAccounting === undefined
+      ? {}
+      : { modelAccounting: input.selector.modelAccounting }),
+    ...(input.selector.kind === 'single'
+      ? {
+          kind: 'single' as const,
+          ...(input.selector.capacity === undefined
+            ? {}
+            : { capacity: input.selector.capacity }),
+          select: input.selector.select.bind(input.selector),
+        }
+      : {
+          kind: 'resumable' as const,
+          batchCapacity: input.selector.batchCapacity,
+          advance: input.selector.advance.bind(input.selector),
+        }),
+  });
   const options = Object.freeze({
     ...input,
     limits,
+    decisionPolicy:
+      decisionModel === undefined
+        ? input.decisionPolicy
+        : Object.freeze({
+            model: decisionModel,
+            decide: input.decisionPolicy.decide.bind(input.decisionPolicy),
+          }),
     // Capture identity once while preserving class adapter method receivers.
     planner:
       plannerModel === undefined
@@ -102,23 +179,12 @@ export function createAgent<TCriteria extends JsonValue>(
             model: plannerModel,
             plan: input.planner.plan.bind(input.planner),
           }),
-    selector:
-      selectorModel === undefined
-        ? input.selector
-        : Object.freeze({
-            model: selectorModel,
-            ...(input.selector.modelAccounting === undefined
-              ? {}
-              : { modelAccounting: input.selector.modelAccounting }),
-            ...(input.selector.capacity === undefined
-              ? {}
-              : { capacity: input.selector.capacity }),
-            select: input.selector.select.bind(input.selector),
-          }),
+    selector,
     modelStages: Object.freeze(
       [
         ...new Set([
           ...(input.modelStages ?? []),
+          ...(decisionModel === undefined ? [] : ['decision' as const]),
           ...(plannerModel === undefined ? [] : ['planning' as const]),
           ...(selectorModel === undefined ? [] : ['selection' as const]),
         ]),
@@ -387,6 +453,7 @@ export function createAgent<TCriteria extends JsonValue>(
           limits,
           identity,
           true,
+          scheduling,
         );
         const created = session;
         subscribeEnvironment(

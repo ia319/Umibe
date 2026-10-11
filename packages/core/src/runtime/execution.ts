@@ -27,6 +27,7 @@ import type { RunSession } from './session.js';
 import type { RunCause } from './state.js';
 import { captureObservation } from './observation.js';
 import { ModelRequestError } from './model.js';
+import { requestReview } from './scheduling.js';
 
 export interface ExecutionSnapshot {
   readonly basis: CandidateGenerationInput;
@@ -37,6 +38,8 @@ export interface ExecutionSnapshot {
   readonly result: ActionResult | null;
   readonly retries: number;
   readonly reconciliation: 'performed' | 'notPerformed' | null;
+  readonly progress: JsonObject;
+  readonly stopCause: RunCause | null;
 }
 
 export type ActionStartResult =
@@ -90,7 +93,7 @@ export class ActionCoordinator {
         release: session.claimExecution(),
         dispatched: true,
         result: execution.result,
-        stopCause: session.state.control.stopCause,
+        stopCause: execution.stopCause,
         progress: execution.result.progress,
         reconciled: false,
         stop: null,
@@ -266,6 +269,8 @@ export class ActionCoordinator {
             result: null,
             retries,
             reconciliation: null,
+            progress: {},
+            stopCause: null,
           }),
         },
         [
@@ -582,12 +587,26 @@ export class ActionCoordinator {
         });
         if (session.failure === null)
           void session
-            .commit(session.state, [
-              session.event('action_stop_requested', cause.reasonCode, {
-                executionId: attempt.intent.executionId,
-                stopCauseEventId: cause.eventId,
-              }),
-            ])
+            .commit(
+              {
+                ...session.state,
+                execution:
+                  session.state.execution?.intent.executionId ===
+                  attempt.intent.executionId
+                    ? {
+                        ...session.state.execution,
+                        stopCause: attempt.stopCause,
+                      }
+                    : session.state.execution,
+                scheduling: requestReview(session.state.scheduling),
+              },
+              [
+                session.event('action_stop_requested', cause.reasonCode, {
+                  executionId: attempt.intent.executionId,
+                  stopCauseEventId: cause.eventId,
+                }),
+              ],
+            )
             .catch(() => undefined);
         controller.abort();
         grace = setTimeout(() => {
@@ -651,12 +670,26 @@ export class ActionCoordinator {
                   stopWithReason('invalid_action_progress');
                   return;
                 }
-                await session.commit(session.state, [
-                  session.event('action_progress', 'progress_reported', {
-                    executionId: attempt.intent.executionId,
-                    progress: attempt.progress,
-                  }),
-                ]);
+                await session.commit(
+                  {
+                    ...session.state,
+                    execution:
+                      session.state.execution?.intent.executionId ===
+                      attempt.intent.executionId
+                        ? {
+                            ...session.state.execution,
+                            progress: attempt.progress,
+                          }
+                        : session.state.execution,
+                    scheduling: requestReview(session.state.scheduling),
+                  },
+                  [
+                    session.event('action_progress', 'progress_reported', {
+                      executionId: attempt.intent.executionId,
+                      progress: attempt.progress,
+                    }),
+                  ],
+                );
               })
               .catch(() => undefined);
           },
@@ -1037,6 +1070,7 @@ export class ActionCoordinator {
       {
         ...session.state,
         actionAttempts: session.state.actionAttempts - (unsent ? 1 : 0),
+        scheduling: requestReview(session.state.scheduling),
         // Persist the attempt before observation or verification can pause the run.
         progressAttempt:
           matches &&
@@ -1064,6 +1098,8 @@ export class ActionCoordinator {
               ...current,
               phase: result.outcome,
               result,
+              progress: result.progress,
+              stopCause: attempt.stopCause,
               // A confirmed unsent reservation refunds this retry, not the
               // ancestry of the original uncertain execution.
               retries:

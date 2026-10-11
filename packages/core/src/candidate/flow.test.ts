@@ -2,10 +2,10 @@ import { expect, test, vi } from 'vitest';
 import { z } from 'zod';
 import { ActionRegistry, defineAction } from '#internal/action/registry';
 import type {
-  CandidateProvider,
+  CandidateGenerator,
   CandidateRequest,
 } from '#internal/contracts/adapters';
-import type { Selector } from '#internal/selector/contracts';
+import type { SingleCallSelector } from '#internal/selector/contracts';
 import type { DecisionContext } from '#internal/contracts/context';
 import type { CandidateSet } from '#internal/contracts/candidate';
 import type {
@@ -105,8 +105,8 @@ function proposalSet(
 async function selectForScenario(
   input: CandidateGenerationInput,
   registry: ActionRegistry,
-  provider: CandidateProvider,
-  selector: Selector,
+  provider: CandidateGenerator,
+  selector: SingleCallSelector,
 ) {
   const control = callControl();
   const preparation = await prepareCandidates(
@@ -289,7 +289,7 @@ test('passes the same file call through selection, fresh checks, intent and test
       },
     },
   };
-  const provider: CandidateProvider = {
+  const provider: CandidateGenerator = {
     generate: (request) =>
       Promise.resolve(
         proposalSet(request, [
@@ -318,7 +318,8 @@ test('passes the same file call through selection, fresh checks, intent and test
         ]),
       ),
   };
-  const selector: Selector = {
+  const selector: SingleCallSelector = {
+    kind: 'single',
     select: (request) => {
       const candidate = request.candidates.candidates.find(
         (entry) => entry.actionId === 'file.summarize',
@@ -440,6 +441,7 @@ test('passes the same file call through selection, fresh checks, intent and test
         ),
     },
     {
+      kind: 'single',
       select: (request) =>
         Promise.resolve({
           outcome: 'selected',
@@ -524,7 +526,7 @@ test.each(['direct', 'recorded'] as const)(
         },
       }),
     ]);
-    const provider: CandidateProvider = {
+    const provider: CandidateGenerator = {
       generate: (request) => {
         const current = request.context.graph.goals.find(
           (goal) => goal.id === request.context.graph.currentGoalRef.id,
@@ -547,7 +549,8 @@ test.each(['direct', 'recorded'] as const)(
         );
       },
     };
-    const selector: Selector = {
+    const selector: SingleCallSelector = {
+      kind: 'single',
       select: (request) => {
         const candidate = request.candidates.candidates[0]!;
         expect(request.context.graph.goalPath).toHaveLength(3);
@@ -723,7 +726,7 @@ test.each(['absent', 'unobserved'] as const)(
         },
       },
     };
-    const generate = vi.fn<CandidateProvider['generate']>((request) =>
+    const generate = vi.fn<CandidateGenerator['generate']>((request) =>
       Promise.resolve(
         proposalSet(request, [
           {
@@ -741,7 +744,7 @@ test.each(['absent', 'unobserved'] as const)(
         ]),
       ),
     );
-    const select = vi.fn<Selector['select']>((request) =>
+    const select = vi.fn<SingleCallSelector['select']>((request) =>
       Promise.resolve({
         outcome: 'selected',
         decisionId: 'north',
@@ -755,7 +758,7 @@ test.each(['absent', 'unobserved'] as const)(
       input,
       registry,
       { generate },
-      { select },
+      { kind: 'single', select },
     );
     const recheck = await recheckCandidate(
       selected,

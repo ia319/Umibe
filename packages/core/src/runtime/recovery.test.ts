@@ -101,6 +101,8 @@ async function storedExecution(
         result,
         retries: 0,
         reconciliation: null,
+        progress: result?.progress ?? {},
+        stopCause: status === 'running' ? null : cause,
       },
       progressAttempt:
         result === null

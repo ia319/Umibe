@@ -301,7 +301,7 @@ test.each(['empty', 'application_limit', 'selector_limit'] as const)(
       blocker: {
         reasonCode:
           kind === 'empty'
-            ? 'decision_basis_unchanged'
+            ? 'selection_no_candidates'
             : 'selection_candidate_limit',
       },
     });

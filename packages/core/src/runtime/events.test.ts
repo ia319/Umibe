@@ -135,7 +135,7 @@ test.each(['pausing', 'paused'] as const)(
   },
 );
 
-test('bounds abstention recovery when refreshed candidate IDs and observation revisions change', async () => {
+test('reports selector abstention without automatically requesting another plan', async () => {
   const h = runnerFixture();
   h.select.mockImplementation((request) =>
     Promise.resolve({
@@ -148,22 +148,26 @@ test('bounds abstention recovery when refreshed candidate IDs and observation re
   const run = await h.create().start(h.input);
   await expect(run.result).resolves.toMatchObject({
     status: 'paused',
-    blocker: { reasonCode: 'decision_basis_unchanged' },
+    blocker: { reasonCode: 'selection_abstain' },
   });
   expect(h.select).toHaveBeenCalledTimes(1);
-  expect(h.generate).toHaveBeenCalledTimes(2);
-  expect(h.plan).toHaveBeenCalledTimes(2);
+  expect(h.generate).toHaveBeenCalledTimes(1);
+  expect(h.plan).toHaveBeenCalledTimes(1);
   expect(h.execute).not.toHaveBeenCalled();
 });
 
-test('bounds an empty candidate source without invoking the selector', async () => {
+test('reports empty candidates without invoking the selector or replanning', async () => {
   const h = runnerFixture();
   h.generate.mockImplementation((request) =>
     Promise.resolve(candidateSet(request, [])),
   );
   const run = await h.create().start(h.input);
-  await expect(run.result).resolves.toMatchObject({ status: 'paused' });
-  expect(h.generate).toHaveBeenCalledTimes(2);
+  await expect(run.result).resolves.toMatchObject({
+    status: 'paused',
+    blocker: { reasonCode: 'selection_no_candidates' },
+  });
+  expect(h.generate).toHaveBeenCalledTimes(1);
+  expect(h.plan).toHaveBeenCalledTimes(1);
   expect(h.select).not.toHaveBeenCalled();
   expect(h.execute).not.toHaveBeenCalled();
 });

@@ -10,7 +10,8 @@ import type {
   Environment,
   Verifier,
 } from '#internal/contracts/adapters';
-import type { Selector } from '#internal/selector/contracts';
+import type { SingleCallSelector } from '#internal/selector/contracts';
+import type { DecisionPolicy } from '#internal/contracts/decision';
 import type { Planner, PlannerRequest } from '#internal/planner/contracts';
 import {
   candidateSet,
@@ -18,6 +19,29 @@ import {
 } from '#internal/candidate/__tests__/fixtures';
 import { MemoryRunStore } from '#internal/storage/memory';
 import { createAgent } from '../agent.js';
+
+export const fixtureDecisionPolicy: DecisionPolicy = {
+  decide(request) {
+    const options = request.options;
+    const option =
+      options.find(({ decision }) => decision.kind === 'adoptPlan') ??
+      ((request.input.acceptedPlan === null ||
+        request.input.planning.need !== null) &&
+      !request.input.planning.inFlight
+        ? options.find(({ decision }) => decision.kind === 'replan')
+        : undefined) ??
+      (request.input.execution === null && request.input.selection === null
+        ? options.find(({ decision }) => decision.kind === 'selectOperation')
+        : undefined) ??
+      options.find(({ decision }) => decision.kind === 'continueAction') ??
+      options.find(({ decision }) => decision.kind === 'continueSelection') ??
+      options.find(({ decision }) => decision.kind === 'wait') ??
+      options.find(({ decision }) => decision.kind === 'abstain');
+    if (option === undefined)
+      throw new Error('Fixture has no applicable decision option');
+    return Promise.resolve({ optionId: option.id });
+  },
+};
 
 export function applicationEvent(
   overrides: Partial<ApplicationEvent> = {},
@@ -116,12 +140,27 @@ export function runnerFixture(initial = 0, target = 2) {
       guidance: 'Collect samples until the count is met',
     }),
   );
-  const generate = vi.fn<CandidateProvider['generate']>((request) =>
+  const generate = vi.fn<CandidateProvider['bind']>((request) =>
     Promise.resolve(
       candidateSet(request, [{ id: 'collect', params: { target: 'north' } }]),
     ),
   );
-  const select = vi.fn<Selector['select']>((request) =>
+  const listOperations = vi.fn<CandidateProvider['listOperations']>((request) =>
+    Promise.resolve({
+      id: `${request.requestId}:operations`,
+      requestId: request.requestId,
+      operations: request.capabilities.map((capability) => ({
+        operationId: capability.id,
+        actionVersion: capability.version,
+        availability: { status: 'available' as const },
+        parameterSources: {},
+        informationGaps: [],
+      })),
+      informationGaps: [],
+      capabilityGaps: [],
+    }),
+  );
+  const select = vi.fn<SingleCallSelector['select']>((request) =>
     Promise.resolve({
       outcome: 'selected',
       decisionId: request.requestId,
@@ -180,8 +219,9 @@ export function runnerFixture(initial = 0, target = 2) {
     actions: [action],
     environment: { observe: { snapshot: observe } },
     planner: { plan },
-    candidateProvider: { generate },
-    selector: { select },
+    decisionPolicy: fixtureDecisionPolicy,
+    candidateProvider: { listOperations, bind: generate },
+    selector: { kind: 'single', select },
     verifier: { support, verify },
   };
   const input: StartRun = {
@@ -206,6 +246,7 @@ export function runnerFixture(initial = 0, target = 2) {
     execute,
     plan,
     generate,
+    listOperations,
     select,
     support,
     verify,

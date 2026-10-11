@@ -1,6 +1,6 @@
 import type { CallControl } from '#internal/contracts/control';
 import type {
-  Selector,
+  SingleCallSelector,
   SelectorRequest,
   SelectionResult,
 } from '#internal/selector/contracts';
@@ -31,7 +31,7 @@ import {
  */
 export async function selectCandidates(
   filtered: FilteredCandidates,
-  selector: Selector,
+  selector: SingleCallSelector,
   controlInput: CallControl,
   capacity?: number,
 ): Promise<CandidateSelectionResult> {
@@ -39,6 +39,7 @@ export async function selectCandidates(
   if (
     typeof selector !== 'object' ||
     selector === null ||
+    selector.kind !== 'single' ||
     typeof selector.select !== 'function'
   ) {
     throw new ContractError(
@@ -123,17 +124,6 @@ export async function selectCandidates(
       filtered,
     });
   }
-  const accepted: CandidateSelectionResult =
-    selection.outcome === 'selected'
-      ? Object.freeze({
-          outcome: 'selected',
-          filtered,
-          selection,
-          candidate: filtered.set.candidates.find(
-            (candidate) => candidate.id === selection.candidateId,
-          )!,
-        })
-      : Object.freeze({ outcome: 'abstain', filtered, selection });
   const late = control.signal.aborted
     ? 'cancelled'
     : Date.now() >= control.deadlineMs
@@ -144,7 +134,24 @@ export async function selectCandidates(
       ...invocationFailure({ outcome: late }, 'selection', null),
       filtered,
     });
-  return accepted.outcome === 'selected'
-    ? registerSelectedCandidate(accepted)
-    : accepted;
+  return acceptSelection(filtered, selection);
+}
+
+/** Bind an accepted selection to the original filtered token and its prepared call. */
+export function acceptSelection(
+  filtered: FilteredCandidates,
+  output: unknown,
+): CandidateSelectionResult {
+  assertFilteredCandidates(filtered);
+  const selection = parseSelection(output, filtered.set);
+  return selection.outcome === 'selected'
+    ? registerSelectedCandidate({
+        outcome: 'selected',
+        filtered,
+        selection,
+        candidate: filtered.set.candidates.find(
+          (candidate) => candidate.id === selection.candidateId,
+        )!,
+      })
+    : Object.freeze({ outcome: 'abstain', filtered, selection });
 }

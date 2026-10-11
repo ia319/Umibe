@@ -1,7 +1,7 @@
 import { expect, test } from 'vitest';
 import { z } from 'zod';
-import type { CandidateProvider, Environment, Verifier } from './adapters.js';
-import type { Selector } from '#internal/selector/contracts';
+import type { CandidateGenerator, Environment, Verifier } from './adapters.js';
+import type { SingleCallSelector } from '#internal/selector/contracts';
 import type { Planner } from '#internal/planner/contracts';
 import type { DecisionContext } from '#internal/contracts/context';
 import type { ActionDefinition } from './action.js';
@@ -152,7 +152,7 @@ test('manually wires planning, full candidate calls, selection, action and verif
   );
   expect(proposal.outcome).toBe('decompose');
 
-  const provider: CandidateProvider = {
+  const provider: CandidateGenerator = {
     generate(input) {
       const { graph: goals, observation: state, planRef } = input.context;
       if (planRef === null)
@@ -213,7 +213,8 @@ test('manually wires planning, full candidate calls, selection, action and verif
     },
     control,
   );
-  const selector: Selector = {
+  const selector: SingleCallSelector = {
+    kind: 'single',
     select(input) {
       expect(input.context.graph.goalPath).toEqual([
         current.graph.rootGoalRef,

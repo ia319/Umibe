@@ -341,7 +341,7 @@ test.each([0, 255])(
         blocker: {
           reasonCode:
             count === 0
-              ? 'decision_basis_unchanged'
+              ? 'selection_no_candidates'
               : 'selection_candidate_limit',
         },
       });
