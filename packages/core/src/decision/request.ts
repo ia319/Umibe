@@ -30,7 +30,7 @@ import {
 } from '#internal/validation/fields';
 import { parseJsonValue } from '#internal/validation/json';
 import { readActionIntent } from '#internal/validation/record';
-import { createDecisionOptions } from './validation.js';
+import { createDecisionOptions, describeDecisionOption } from './validation.js';
 
 export interface DecisionRequestInput {
   readonly requestId: string;
@@ -322,21 +322,7 @@ export function createDecisionRequest(
         );
   const pending = input.planning.pending;
   const choices: readonly DecisionChoice[] = Object.freeze(
-    options.map(({ id, decision }) =>
-      Object.freeze({
-        id,
-        kind: decision.kind,
-        ...(decision.kind === 'selectOperation'
-          ? { operationId: decision.operationId }
-          : {}),
-        ...(decision.kind === 'replan' || decision.kind === 'adoptPlan'
-          ? { execution: decision.execution.kind }
-          : {}),
-        ...(decision.kind !== 'adoptPlan' && decision.proposal !== null
-          ? { proposal: decision.proposal.kind }
-          : {}),
-      }),
-    ),
+    options.map(describeDecisionOption),
   );
   const projected: DecisionInput = Object.freeze({
     rootGoal: describeGoal(root),

@@ -254,13 +254,14 @@ try {
     `import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { SqliteRunStore } from '@umibe/storage-sqlite';
-import { createAgent as createSdkAgent, createPlanner as createSdkPlanner, createSelector as createSdkSelector } from 'umibe';
-import { createAgent, createPlanner, createSelector, ActionRegistry, defineAction, MemoryRunStore, parseJsonValue, parseGoalGraph, parseObservation, prepareCandidates, checkCandidates, filterCandidates, selectCandidates, recheckCandidate } from '@umibe/core';
+import { createAgent as createSdkAgent, createPlanner as createSdkPlanner, createSelector as createSdkSelector, createDecisionPolicy as createSdkDecisionPolicy } from 'umibe';
+import { createAgent, createPlanner, createSelector, createDecisionPolicy, ActionRegistry, defineAction, MemoryRunStore, parseJsonValue, parseGoalGraph, parseObservation, prepareCandidates, checkCandidates, filterCandidates, selectCandidates, recheckCandidate } from '@umibe/core';
 import { ModelRequestError } from '@umibe/core/model';
 import { z } from 'zod';
 
 assert.equal(createSdkPlanner, createPlanner);
 assert.equal(createSdkSelector, createSelector);
+assert.equal(createSdkDecisionPolicy, createDecisionPolicy);
 assert.equal(new ModelRequestError('invalid_request').code, 'invalid_request');
 for (const provider of ['@umibe/provider-openai', '@umibe/provider-cloudflare', '@umibe/provider-codex', 'openai'])
   await assert.rejects(import(provider), { code: 'ERR_MODULE_NOT_FOUND' });
@@ -396,19 +397,22 @@ let plans = 0;
 const executionDepths = [];
 const taskOptions = {
   applicationId: 'packed-sdk', limits: { maxActionAttempts: 1 }, modelStages: ['planning', 'selection'],
-  decisionPolicy: { decide(request) {
-    const option = request.options.find(({ decision }) => decision.kind === 'adoptPlan') ??
+  decisionPolicy: createDecisionPolicy({ model: {
+    kind: 'structuredOutput', identity: { provider: 'consumer', model: 'decision' },
+    generate(request) {
+    const options = request.input.options;
+    const option = options.find(({ kind }) => kind === 'adoptPlan') ??
       ((request.input.acceptedPlan === null || request.input.planning.need !== null) && !request.input.planning.inFlight
-        ? request.options.find(({ decision }) => decision.kind === 'replan') : undefined) ??
+        ? options.find(({ kind }) => kind === 'replan') : undefined) ??
       (request.input.execution === null && request.input.selection === null
-        ? request.options.find(({ decision }) => decision.kind === 'selectOperation') : undefined) ??
-      request.options.find(({ decision }) => decision.kind === 'continueAction') ??
-      request.options.find(({ decision }) => decision.kind === 'continueSelection') ??
-      request.options.find(({ decision }) => decision.kind === 'wait') ??
-      request.options.find(({ decision }) => decision.kind === 'abstain');
+        ? options.find(({ kind }) => kind === 'selectOperation') : undefined) ??
+      options.find(({ kind }) => kind === 'continueAction') ??
+      options.find(({ kind }) => kind === 'continueSelection') ??
+      options.find(({ kind }) => kind === 'wait') ??
+      options.find(({ kind }) => kind === 'abstain');
     if (option === undefined) throw new Error('Consumer has no applicable decision option');
     return Promise.resolve({ optionId: option.id });
-  } },
+  } } }),
   actions: [defineAction({
     id: 'sample', version: 1, description: 'Take one sample', tags: [], expectedEffects: { count: 1 }, parameters: z.strictObject({}),
     check: () => Promise.resolve({ outcome: 'allowed' }),
@@ -528,8 +532,8 @@ import { z } from 'zod';
 import { SqliteRunStore, type SqliteInspection } from '@umibe/storage-sqlite';
 import { createAgent as createSdkAgent, type AgentOptions as SdkAgentOptions, type StorageInspection, type RunInspection as SdkRunInspection } from 'umibe';
 import type { RunStore } from '@umibe/core';
-import { createPlanner, createSelector } from '@umibe/core';
-import { createPlanner as createSdkPlanner, createSelector as createSdkSelector } from 'umibe';
+import { createPlanner, createSelector, createDecisionPolicy, type DecisionPolicy, type DecisionPolicyOptions } from '@umibe/core';
+import { createPlanner as createSdkPlanner, createSelector as createSdkSelector, createDecisionPolicy as createSdkDecisionPolicy } from 'umibe';
 import type { ChoiceModel, StructuredOutputModel } from '@umibe/core/model';
 declare const nativeModel: ChoiceModel;
 declare const structuredModel: StructuredOutputModel;
@@ -537,6 +541,10 @@ createPlanner({ model: structuredModel });
 createSdkPlanner({ model: structuredModel });
 createSelector({ model: nativeModel });
 createSdkSelector({ model: structuredModel });
+const decisionOptions: DecisionPolicyOptions = { model: nativeModel };
+const decisionPolicy: DecisionPolicy = createDecisionPolicy(decisionOptions);
+createSdkDecisionPolicy({ model: structuredModel });
+void decisionPolicy;
 // @ts-expect-error Native choice cannot generate plans.
 createPlanner({ model: nativeModel });
 const sqlite = new SqliteRunStore('typed.sqlite');

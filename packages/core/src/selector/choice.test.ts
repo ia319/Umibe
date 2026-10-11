@@ -141,6 +141,7 @@ test.each(['selected', 'abstain'] as const)(
     });
     expect(report).toHaveBeenCalledOnce();
     expect(reportChoice).toHaveBeenCalledWith({
+      kind: 'selection',
       candidateSetId: request.candidates.id,
       optionId: outcome === 'selected' ? 'candidate' : '__umibe_abstain__',
       options: [

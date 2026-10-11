@@ -51,14 +51,33 @@ export interface ModelResponseMetadata {
   readonly usage: ModelUsage | null;
 }
 
-/** Native choice evidence and its locally bound candidate mapping; never execution authority. */
-export interface ModelChoiceMetadata {
+/** Native choice evidence and its local bindings; never execution authority. */
+export type ModelChoiceMetadata =
+  SelectionModelChoiceMetadata | DecisionModelChoiceMetadata;
+
+export interface SelectionModelChoiceMetadata {
+  readonly kind: 'selection';
   readonly candidateSetId: string;
   readonly optionId: string;
   readonly options: readonly {
     readonly id: string;
     /** Null identifies the abstention option. */
     readonly candidateId: string | null;
+    /** Null means the model did not provide a probability. */
+    readonly probability: number | null;
+  }[];
+  /** Provider-specific certainty, or null when unavailable. */
+  readonly confidence: number | null;
+}
+
+export interface DecisionModelChoiceMetadata {
+  readonly kind: 'decision';
+  /** Joins the fixed option meanings in the recorded DecisionRequest. */
+  readonly requestId: string;
+  readonly optionId: string;
+  readonly options: readonly {
+    /** Exact offered DecisionOption ID, including any explicit abstention choice. */
+    readonly id: string;
     /** Null means the model did not provide a probability. */
     readonly probability: number | null;
   }[];

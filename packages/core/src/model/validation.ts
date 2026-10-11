@@ -6,6 +6,8 @@ import type {
   ModelRequestRecord,
   ModelResponseRecord,
   ModelProjectionRecord,
+  SelectionModelChoiceMetadata,
+  DecisionModelChoiceMetadata,
 } from './metadata.js';
 import type { JsonValue } from '#internal/contracts/json';
 import { ContractError } from '#internal/errors';
@@ -255,9 +257,22 @@ export function captureModelChoice(input: unknown): ModelChoiceMetadata {
     context,
     '',
   );
+  if (value.kind !== 'selection' && value.kind !== 'decision')
+    throw new ContractError(
+      context.code,
+      context.stage,
+      '/kind',
+      'invalid_choice_kind',
+    );
   requireKeys(
     value,
-    ['candidateSetId', 'optionId', 'options', 'confidence'],
+    [
+      'kind',
+      value.kind === 'selection' ? 'candidateSetId' : 'requestId',
+      'optionId',
+      'options',
+      'confidence',
+    ],
     context,
     '',
   );
@@ -269,17 +284,23 @@ export function captureModelChoice(input: unknown): ModelChoiceMetadata {
       'expected_choice_options',
     );
   const ids = new Set<string>();
+  const options: DecisionModelChoiceMetadata['options'][number][] = [];
+  const selectionOptions: SelectionModelChoiceMetadata['options'][number][] =
+    [];
   const candidates = new Set<string | null>();
-  const options = value.options.map((item, index) => {
+  for (const [index, item] of value.options.entries()) {
     const path = `/options/${index}`;
     const option = requireObject(item, context, path);
-    requireKeys(option, ['id', 'candidateId', 'probability'], context, path);
+    requireKeys(
+      option,
+      value.kind === 'selection'
+        ? ['id', 'candidateId', 'probability']
+        : ['id', 'probability'],
+      context,
+      path,
+    );
     const id = requireString(option.id, context, `${path}/id`);
-    const candidateId =
-      option.candidateId === null
-        ? null
-        : requireString(option.candidateId, context, `${path}/candidateId`);
-    if (ids.has(id) || candidates.has(candidateId))
+    if (ids.has(id))
       throw new ContractError(
         context.code,
         context.stage,
@@ -287,32 +308,59 @@ export function captureModelChoice(input: unknown): ModelChoiceMetadata {
         'duplicate_choice_option',
       );
     ids.add(id);
-    candidates.add(candidateId);
-    return Object.freeze({
+    const captured = Object.freeze({
       id,
-      candidateId,
       probability: captureProbability(
         option.probability,
         `${path}/probability`,
       ),
     });
-  });
+    options.push(captured);
+    if (value.kind === 'selection') {
+      const candidateId =
+        option.candidateId === null
+          ? null
+          : requireString(option.candidateId, context, `${path}/candidateId`);
+      if (candidates.has(candidateId))
+        throw new ContractError(
+          context.code,
+          context.stage,
+          path,
+          'duplicate_choice_option',
+        );
+      candidates.add(candidateId);
+      selectionOptions.push(Object.freeze({ ...captured, candidateId }));
+    }
+  }
   const optionId = requireString(value.optionId, context, '/optionId');
-  if (!ids.has(optionId) || !candidates.has(null))
+  if (
+    !ids.has(optionId) ||
+    (value.kind === 'selection' && !candidates.has(null))
+  )
     throw new ContractError(
       context.code,
       context.stage,
       '/optionId',
       'invalid_choice_mapping',
     );
-  return Object.freeze({
-    candidateSetId: requireString(
-      value.candidateSetId,
-      context,
-      '/candidateSetId',
-    ),
-    optionId,
-    options: Object.freeze(options),
-    confidence: captureProbability(value.confidence, '/confidence'),
-  });
+  const confidence = captureProbability(value.confidence, '/confidence');
+  return value.kind === 'selection'
+    ? Object.freeze({
+        kind: value.kind,
+        candidateSetId: requireString(
+          value.candidateSetId,
+          context,
+          '/candidateSetId',
+        ),
+        optionId,
+        options: Object.freeze(selectionOptions),
+        confidence,
+      })
+    : Object.freeze({
+        kind: value.kind,
+        requestId: requireString(value.requestId, context, '/requestId'),
+        optionId,
+        options: Object.freeze(options),
+        confidence,
+      });
 }

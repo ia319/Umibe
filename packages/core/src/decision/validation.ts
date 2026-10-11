@@ -2,6 +2,8 @@ import type {
   ControlDecision,
   DecisionOption,
   DecisionRequest,
+  DecisionResult,
+  DecisionChoice,
   ExecutionDisposition,
 } from '#internal/contracts/decision';
 import type { OperationSet } from '#internal/contracts/operation';
@@ -25,6 +27,127 @@ interface OptionBindings {
   readonly selectionId: string | null;
   readonly proposalId: string | null;
   readonly operations: OperationSet;
+}
+
+/** Preserve a fixed option's full behavior while excluding its local identity bindings. */
+export function describeDecisionOption(input: unknown): DecisionChoice {
+  const option = requireObject(
+    parseJsonValue(input, validation.stage),
+    validation,
+    '',
+  );
+  requireKeys(option, ['id', 'decision'], validation, '');
+  const id = requireString(option.id, validation, '/id');
+  const decision = requireObject(option.decision, validation, '/decision');
+  const kind = decision.kind;
+  switch (kind) {
+    case 'continueAction':
+    case 'continueSelection':
+    case 'wait':
+    case 'stopAction':
+    case 'selectOperation':
+    case 'replan':
+    case 'adoptPlan':
+    case 'abstain':
+      break;
+    default:
+      throw new ContractError(
+        validation.code,
+        validation.stage,
+        '/decision/kind',
+        'invalid_decision',
+      );
+  }
+  const fields =
+    kind === 'adoptPlan'
+      ? ['kind', 'proposalId', 'execution']
+      : [
+          'kind',
+          'proposal',
+          ...(kind === 'continueAction' || kind === 'stopAction'
+            ? ['executionId']
+            : []),
+          ...(kind === 'continueSelection' ? ['selectionId'] : []),
+          ...(kind === 'selectOperation' ? ['operationId'] : []),
+          ...(kind === 'replan' ? ['execution'] : []),
+        ];
+  requireKeys(decision, fields, validation, '/decision');
+  if (kind === 'continueAction' || kind === 'stopAction')
+    requireString(decision.executionId, validation, '/decision/executionId');
+  if (kind === 'continueSelection')
+    requireString(decision.selectionId, validation, '/decision/selectionId');
+  if (kind === 'adoptPlan')
+    requireString(decision.proposalId, validation, '/decision/proposalId');
+  let execution: ExecutionDisposition['kind'] | undefined;
+  if (kind === 'replan' || kind === 'adoptPlan') {
+    const value = requireObject(
+      decision.execution,
+      validation,
+      '/decision/execution',
+    );
+    if (value.kind !== 'none' && value.kind !== 'keep' && value.kind !== 'stop')
+      throw new ContractError(
+        validation.code,
+        validation.stage,
+        '/decision/execution/kind',
+        'invalid_execution_disposition',
+      );
+    requireKeys(
+      value,
+      value.kind === 'none' ? ['kind'] : ['kind', 'executionId'],
+      validation,
+      '/decision/execution',
+    );
+    if (value.kind !== 'none')
+      requireString(
+        value.executionId,
+        validation,
+        '/decision/execution/executionId',
+      );
+    execution = value.kind;
+  }
+  let proposal: 'defer' | 'discard' | undefined;
+  if (kind !== 'adoptPlan' && decision.proposal !== null) {
+    const value = requireObject(
+      decision.proposal,
+      validation,
+      '/decision/proposal',
+    );
+    requireKeys(
+      value,
+      ['kind', 'proposalId'],
+      validation,
+      '/decision/proposal',
+    );
+    if (value.kind !== 'defer' && value.kind !== 'discard')
+      throw new ContractError(
+        validation.code,
+        validation.stage,
+        '/decision/proposal/kind',
+        'invalid_proposal_disposition',
+      );
+    requireString(
+      value.proposalId,
+      validation,
+      '/decision/proposal/proposalId',
+    );
+    proposal = value.kind;
+  }
+  return Object.freeze({
+    id,
+    kind,
+    ...(kind === 'selectOperation'
+      ? {
+          operationId: requireString(
+            decision.operationId,
+            validation,
+            '/decision/operationId',
+          ),
+        }
+      : {}),
+    ...(execution === undefined ? {} : { execution }),
+    ...(proposal === undefined ? {} : { proposal }),
+  });
 }
 
 function readExecutionDisposition(
@@ -312,6 +435,18 @@ export function selectDecision(
   request: DecisionRequest,
   input: unknown,
 ): DecisionOption {
+  const result = parseDecisionResult(
+    input,
+    request.options.map((option) => option.id),
+  );
+  return request.options.find((option) => option.id === result.optionId)!;
+}
+
+/** Admit only an exact offered ID and reject generated control fields. */
+export function parseDecisionResult(
+  input: unknown,
+  optionIds: readonly string[],
+): DecisionResult {
   const context = {
     code: 'INVALID_DECISION_RESULT',
     stage: 'decision_result',
@@ -323,13 +458,12 @@ export function selectDecision(
   );
   requireKeys(value, ['optionId'], context, '');
   const optionId = requireString(value.optionId, context, '/optionId');
-  const option = request.options.find((candidate) => candidate.id === optionId);
-  if (option === undefined)
+  if (!optionIds.includes(optionId))
     throw new ContractError(
       context.code,
       context.stage,
       '/optionId',
       'option_not_offered',
     );
-  return option;
+  return Object.freeze({ optionId });
 }

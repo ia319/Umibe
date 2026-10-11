@@ -109,6 +109,7 @@ export function decodeChoiceSelection(
       'invalid_probability',
     );
   const metadata = captureModelChoice({
+    kind: 'selection',
     candidateSetId: request.candidates.id,
     optionId,
     options: ids.map((id) => ({

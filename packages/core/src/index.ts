@@ -50,6 +50,8 @@ export type {
   ModelUsage,
   ModelResponseIssue,
   ModelChoiceMetadata,
+  SelectionModelChoiceMetadata,
+  DecisionModelChoiceMetadata,
 } from '#internal/model/metadata';
 export type {
   CandidateProvider,
@@ -93,6 +95,8 @@ export type {
   ExecutionDisposition,
   ProposalDisposition,
 } from '#internal/contracts/decision';
+export { createDecisionPolicy } from '#internal/decision/model';
+export type { DecisionPolicyOptions } from '#internal/decision/model';
 export type {
   OperationAvailability,
   OperationOffer,

@@ -15,6 +15,8 @@ export type {
   ModelUsage,
   ModelResponseIssue,
   ModelChoiceMetadata,
+  SelectionModelChoiceMetadata,
+  DecisionModelChoiceMetadata,
 } from './metadata.js';
 export type { CallControl } from '#internal/contracts/control';
 export type { JsonObject, JsonValue } from '#internal/contracts/json';
