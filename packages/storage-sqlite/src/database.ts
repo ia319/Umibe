@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { statSync } from 'node:fs';
+import { statSync, writeSync } from 'node:fs';
 import { dirname } from 'node:path';
 import Database from 'better-sqlite3';
 import {
@@ -82,11 +82,21 @@ export class RunDatabase {
     if (!write && !existed) return undefined;
     if (write && !existed && !statSync(dirname(this.path)).isDirectory())
       throw new StoreError('STORE_FAILED', 'parent_not_directory');
+    if (process.env.UMIBE_SQLITE_TRACE === '1')
+      writeSync(
+        2,
+        `[sqlite-diag worker ${process.pid}] open database write=${write}\n`,
+      );
     const db = new Database(this.path, {
       readonly: !write,
       fileMustExist: !write,
       timeout: 5000,
     });
+    if (process.env.UMIBE_SQLITE_TRACE === '1')
+      writeSync(
+        2,
+        `[sqlite-diag worker ${process.pid}] native database opened\n`,
+      );
     try {
       db.pragma('foreign_keys = ON');
       const existingObjects = db
@@ -127,7 +137,17 @@ export class RunDatabase {
       this.db = db;
       return db;
     } catch (error) {
+      if (process.env.UMIBE_SQLITE_TRACE === '1')
+        writeSync(
+          2,
+          `[sqlite-diag worker ${process.pid}] close after ${String(error)}\n`,
+        );
       db.close();
+      if (process.env.UMIBE_SQLITE_TRACE === '1')
+        writeSync(
+          2,
+          `[sqlite-diag worker ${process.pid}] native database closed\n`,
+        );
       throw error;
     }
   }

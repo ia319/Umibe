@@ -25,4 +25,6 @@ jobs:
         uses: ./.github/actions/setup
 
       - name: Run package tests
+        env:
+          UMIBE_SQLITE_TRACE: ${{ runner.os == 'Windows' && '1' || '0' }}
         run: pnpm test
