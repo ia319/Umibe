@@ -118,6 +118,16 @@ export class ActionCoordinator {
       };
   }
 
+  get active():
+    (ExecutionSnapshot & { readonly phase: 'prepared' | 'running' }) | null {
+    const execution = this.session.state.execution;
+    return execution !== null &&
+      this.session.hasExecution &&
+      (execution.phase === 'prepared' || execution.phase === 'running')
+      ? { ...execution, phase: execution.phase }
+      : null;
+  }
+
   /**
    * Intent admission consumes the selected token across all coordinators.
    * A denied recheck leaves the token reusable.
