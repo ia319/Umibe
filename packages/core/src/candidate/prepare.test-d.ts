@@ -1,7 +1,7 @@
 import { assertType } from 'vitest';
 import type { ActionRegistry } from '#internal/action/registry';
 import type { CallControl } from '#internal/contracts/control';
-import type { CandidateProvider } from '#internal/contracts/adapters';
+import type { CandidateGenerator } from '#internal/contracts/adapters';
 import type { CandidateSet } from '#internal/contracts/candidate';
 import type {
   CandidateGenerationInput,
@@ -11,7 +11,7 @@ import { prepareCandidates } from './prepare.js';
 
 declare const input: CandidateGenerationInput;
 declare const registry: ActionRegistry;
-declare const provider: CandidateProvider;
+declare const provider: CandidateGenerator;
 declare const control: CallControl;
 assertType<Promise<CandidatePreparationResult>>(
   prepareCandidates(input, registry, provider, control),

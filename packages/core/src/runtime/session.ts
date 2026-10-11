@@ -1,7 +1,13 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { JsonObject } from '#internal/contracts/json';
 import type { CandidateGenerationInput } from '#internal/contracts/candidate-processing';
+import type { DecisionBasis } from '#internal/contracts/decision';
 import type { RunCheckpoint, RunRecord } from '#internal/contracts/record';
+import type {
+  ChangeBatch,
+  RecordedChange,
+  RecordedChangeBatch,
+} from '#internal/contracts/changes';
 import { captureDecisionRequest } from '#internal/candidate/context';
 import { canonicalJson } from '#internal/candidate/identity';
 import { ContractError } from '#internal/errors';
@@ -10,15 +16,21 @@ import type {
   RunStore,
   RunLease,
 } from '#internal/storage/contracts';
-import { requireObject } from '#internal/validation/fields';
+import { requireString } from '#internal/validation/fields';
 import { parseJsonValue } from '#internal/validation/json';
 import { parseGoalGraph } from '#internal/validation/goal';
+import {
+  parseChangeBatch,
+  parseRecordedChangeBatch,
+} from '#internal/validation/changes';
 import { createRunControl, transitionRun } from './state.js';
 import type { RunCommand, RunControlState } from './state.js';
 import { captureLimits } from './limits.js';
 import type { RuntimeLimits } from './limits.js';
 import type { ExecutionSnapshot } from './execution.js';
-import type { SchedulingState } from './scheduling.js';
+import { captureScheduling, requestReview } from './scheduling.js';
+import type { SchedulingConfiguration, SchedulingState } from './scheduling.js';
+import type { PendingPlanProposal } from '#internal/planner/contracts';
 import type { GoalState } from './goals.js';
 import type { GoalProgress, ProgressAttempt } from './progress.js';
 import type { ActionResult } from '#internal/contracts/record';
@@ -27,6 +39,18 @@ import {
   runtimeStateSchemaVersion,
 } from './checkpoint.js';
 import type { RuntimeIdentity, PendingModelAttempt } from './checkpoint.js';
+import { captureSessionSnapshot } from './session-snapshot.js';
+import type { SessionSnapshot } from './session-snapshot.js';
+
+/** Authorizes one live stop boundary; recovery discards it before reviewing the proposal. */
+export interface PendingPlanAdoption {
+  readonly proposalId: string;
+  readonly executionId: string;
+  readonly decisionRequestId: string;
+  readonly decisionEventId: string;
+  readonly basis: DecisionBasis;
+  readonly acceptedAt: string;
+}
 
 export interface SessionState {
   readonly identity: RuntimeIdentity;
@@ -37,7 +61,16 @@ export interface SessionState {
   readonly modelAttempts: number;
   readonly actionAttempts: number;
   readonly execution: ExecutionSnapshot | null;
+  readonly pendingProposal: PendingPlanProposal | null;
+  readonly pendingAdoption: PendingPlanAdoption | null;
   readonly scheduling: SchedulingState;
+  readonly observations: {
+    /** False only while the internal initialization marker awaits a source snapshot. */
+    readonly initialized: boolean;
+    readonly eventSequence: number;
+    readonly lastReviewedEventSequence: number;
+    readonly unreadChanges: readonly RecordedChange[];
+  };
   readonly goals: GoalState;
   readonly progress: readonly GoalProgress[];
   readonly progressAttempt: ProgressAttempt | null;
@@ -49,6 +82,7 @@ export interface RuntimeDiagnostic {
     | 'store_failed'
     | 'store_conflict'
     | 'subscriber_failed'
+    | 'receipt_failed'
     | 'environment_event_failed'
     | 'environment_subscription_failed';
   readonly runId: string;
@@ -69,6 +103,7 @@ const validation = {
 export class RunSession {
   readonly runId: string;
   #state: SessionState;
+  #snapshot: SessionSnapshot | null = null;
   #checkpoint: RunCheckpoint | null = null;
   #committedState: SessionState | null = null;
   #tail: Promise<void> = Promise.resolve();
@@ -82,6 +117,10 @@ export class RunSession {
   #rejectResult!: (error: unknown) => void;
   #result!: Promise<RunControlState>;
   #closing: Promise<void> | null = null;
+  readonly #changePublications = new Map<
+    string,
+    { readonly content: string; readonly promise: Promise<void> }
+  >();
   readonly #ownershipLost = () => this.fail('store_failed');
 
   private constructor(
@@ -110,6 +149,8 @@ export class RunSession {
       actionVersions: [],
       modelStages: [],
     },
+    initialObservationPending = false,
+    scheduling: SchedulingConfiguration = captureScheduling({}),
   ): Promise<RunSession> {
     const decision = captureDecisionRequest(input);
     const capturedLimits = captureLimits(limits);
@@ -130,20 +171,30 @@ export class RunSession {
       modelAttempts: 0,
       actionAttempts: 0,
       execution: null,
+      pendingProposal: null,
+      pendingAdoption: null,
       progress: [],
       progressAttempt: null,
       recentResults: [],
+      observations: {
+        initialized: !initialObservationPending,
+        eventSequence: 0,
+        lastReviewedEventSequence: 0,
+        unreadChanges: [],
+      },
       goals: {
         created: decision.context.graph.goals.length - 1,
         pending: [],
         order: [],
       },
       scheduling: {
-        policyVersion: 1,
+        ...scheduling,
+        policyVersion: 2,
+        reviewPending: true,
+        reviewVersion: 1,
+        lastDecisionStartedAt: null,
         planning: { kind: 'initial', assessment: 'notYet' },
-        recoveryAttempts: 0,
-        lastSelectionBasis: null,
-        selectionCause: 'initial',
+        planningVersion: 1,
       } satisfies SchedulingState,
     });
     const lease = await store.acquireRun(runId);
@@ -278,12 +329,21 @@ export class RunSession {
               underlyingSettled: false,
               confirmedEffects: {},
               unresolvedEffects: { execution: 'dispatch_unconfirmed' },
-              progress: {},
-              stopCauseEventId: cause.eventId,
+              progress: execution.progress,
+              stopCauseEventId: execution.stopCause?.eventId ?? cause.eventId,
             })
           : null;
       const unresolved = unknown !== null || execution?.phase === 'unknown';
       const records: RunRecordDraft[] = [record];
+      if (state.pendingAdoption !== null)
+        records.push(
+          session.event('plan_adoption_discarded', 'process_interrupted', {
+            proposalId: state.pendingAdoption.proposalId,
+            executionId: state.pendingAdoption.executionId,
+            decisionRequestId: state.pendingAdoption.decisionRequestId,
+            decisionEventId: state.pendingAdoption.decisionEventId,
+          }),
+        );
       for (const request of state.pendingModels)
         records.push(
           session.event('model_interrupted', 'process_interrupted', {
@@ -303,6 +363,7 @@ export class RunSession {
         {
           ...state,
           pendingModels: [],
+          pendingAdoption: null,
           control: {
             ...state.control,
             status: ['created', 'running', 'pausing'].includes(
@@ -317,7 +378,12 @@ export class RunSession {
           },
           execution:
             unknown !== null && execution !== null
-              ? { ...execution, result: unknown, phase: 'unknown' }
+              ? {
+                  ...execution,
+                  result: unknown,
+                  phase: 'unknown',
+                  stopCause: execution.stopCause ?? cause,
+                }
               : execution,
           decision:
             unknown === null
@@ -385,7 +451,154 @@ export class RunSession {
   }
 
   get hasPendingCommits(): boolean {
-    return this.#pending > 0;
+    return this.#pending > 0 || this.#changePublications.size > 0;
+  }
+
+  /** Capture before awaiting storage; acknowledge only after facts and review state commit. */
+  async publishChanges(input: ChangeBatch): Promise<void> {
+    this.ensurePublishing();
+    const batch = parseChangeBatch(input);
+    const content = canonicalJson(parseJsonValue(batch, 'change_batch'));
+    const receivedAt = new Date().toISOString();
+    const eventId = `observation:${createHash('sha256')
+      .update(canonicalJson([batch.source, batch.id]), 'utf8')
+      .digest('hex')}`;
+    const pending = this.#changePublications.get(eventId);
+    if (pending !== undefined) {
+      if (pending.content !== content)
+        throw new ContractError(
+          validation.code,
+          'change_batch',
+          '/id',
+          'conflicting_change_batch',
+        );
+      return pending.promise;
+    }
+    const promise = (async () => {
+      let previous: RunRecord | null;
+      try {
+        previous = await this.store.readRecord(this.runId, eventId);
+      } catch (error) {
+        this.fail('store_failed');
+        throw error;
+      }
+      // Terminal controls close admission, but must not discard an earlier
+      // captured receipt while its duplicate lookup is still in flight.
+      this.ensureOpen();
+      if (this.lease.signal.aborted)
+        throw new ContractError(
+          validation.code,
+          'change_batch',
+          '/status',
+          'publication_closed',
+        );
+      if (previous !== null) {
+        if (
+          previous.kind !== 'coreEvent' ||
+          previous.data.type !== 'observation_changes'
+        )
+          throw new ContractError(
+            validation.code,
+            'change_batch',
+            '/id',
+            'conflicting_change_batch',
+          );
+        const recorded = parseRecordedChangeBatch(previous.data.details.batch);
+        const original: ChangeBatch = {
+          id: recorded.id,
+          source: recorded.source,
+          changes: recorded.changes.map((change) => ({
+            sourceEvent: change.sourceEvent,
+            occurredAt: change.occurredAt,
+            data: change.data,
+            ...(change.sourceEventId === undefined
+              ? {}
+              : { sourceEventId: change.sourceEventId }),
+            ...(change.sourceSequence === undefined
+              ? {}
+              : { sourceSequence: change.sourceSequence }),
+            ...(change.executionId === undefined
+              ? {}
+              : { executionId: change.executionId }),
+          })),
+        };
+        if (
+          recorded.runId !== this.runId ||
+          canonicalJson(parseJsonValue(original, 'change_batch')) !== content
+        )
+          throw new ContractError(
+            validation.code,
+            'change_batch',
+            '/id',
+            'conflicting_change_batch',
+          );
+        return;
+      }
+      // Read the latest admitted state after lookup; other sources may have
+      // committed or requested review while this receipt waited on storage.
+      const current = this.#state;
+      const eventSequence =
+        current.observations.eventSequence + batch.changes.length;
+      const scheduling = requestReview(current.scheduling);
+      if (!Number.isSafeInteger(eventSequence))
+        throw new ContractError(
+          validation.code,
+          'change_batch',
+          '/sequence',
+          'sequence_exhausted',
+        );
+      const changes = batch.changes.map((fact, index) =>
+        Object.freeze({
+          ...fact,
+          sequence: current.observations.eventSequence + index + 1,
+          batchId: batch.id,
+          source: batch.source,
+          receivedAt,
+        }),
+      );
+      const recorded: RecordedChangeBatch = {
+        id: batch.id,
+        runId: this.runId,
+        source: batch.source,
+        receivedAt,
+        changes,
+      };
+      const event = this.event('observation_changes', 'facts_received', {
+        batch: parseJsonValue(recorded, 'change_batch'),
+      });
+      await this.commit(
+        {
+          ...current,
+          observations: {
+            ...current.observations,
+            eventSequence,
+            unreadChanges: [...current.observations.unreadChanges, ...changes],
+          },
+          scheduling,
+        },
+        [{ ...event, eventId }],
+      );
+    })();
+    this.#changePublications.set(eventId, { content, promise });
+    try {
+      await promise;
+    } finally {
+      this.#changePublications.delete(eventId);
+    }
+  }
+
+  /** Persist a flow or timer trigger before waking the decision scheduler. */
+  async markReview(reasonCode: string): Promise<void> {
+    await this.commit(
+      { ...this.#state, scheduling: requestReview(this.#state.scheduling) },
+      [
+        this.event(
+          'review_requested',
+          requireString(reasonCode, validation, '/reasonCode'),
+          {},
+        ),
+      ],
+    );
   }
 
   /** Holds the run across preparation, dispatch and uncertain external effects. */
@@ -415,6 +628,16 @@ export class RunSession {
     input: SessionState = this.#state,
   ): Promise<void> {
     this.ensureOpen();
+    if (
+      (command.kind === 'start' || command.kind === 'resume') &&
+      !input.observations.initialized
+    )
+      throw new ContractError(
+        validation.code,
+        validation.stage,
+        '/observations/initialized',
+        'initial_observation_required',
+      );
     if (
       (command.kind === 'resume' || command.kind === 'succeed') &&
       this.#executionOwned
@@ -451,6 +674,22 @@ export class RunSession {
         );
     }
     const control = transitionRun(input.control, command);
+    const pendingAdoption = input.pendingAdoption;
+    if (
+      pendingAdoption !== null &&
+      (command.kind === 'resume' || control.status !== 'running')
+    ) {
+      input = { ...input, pendingAdoption: null };
+      records = [
+        ...records,
+        this.event('plan_adoption_discarded', `run_${command.kind}`, {
+          proposalId: pendingAdoption.proposalId,
+          executionId: pendingAdoption.executionId,
+          decisionRequestId: pendingAdoption.decisionRequestId,
+          decisionEventId: pendingAdoption.decisionEventId,
+        }),
+      ];
+    }
     if (control === input.control) {
       if (records.length > 0 || input !== this.#state)
         await this.commit(input, records);
@@ -568,6 +807,7 @@ export class RunSession {
       !this.lease.signal.aborted &&
       this.#failure === null &&
       !this.signal.aborted &&
+      this.#state.observations.initialized &&
       this.#state.control.status === 'running' &&
       this.#state.decision.decisionEpoch === epoch
     );
@@ -579,79 +819,15 @@ export class RunSession {
     records: readonly RunRecordDraft[],
   ): Promise<void> {
     this.ensureOpen();
-    const path = new Set(
-      state.decision.context.graph.goalPath.map((ref) => ref.id),
-    );
-    state = {
-      ...state,
-      decision: Object.freeze({
-        ...state.decision,
-        context: Object.freeze({
-          ...state.decision.context,
-          runtime: Object.freeze({
-            execution:
-              state.execution === null
-                ? null
-                : Object.freeze({
-                    executionId: state.execution.intent.executionId,
-                    phase: state.execution.phase,
-                  }),
-            recentResults: state.recentResults,
-            progress: Object.freeze(
-              state.progress.map(
-                ({ goalRef, noProgress, recoveryAttempts, highWater }) =>
-                  Object.freeze({
-                    goalRef,
-                    noProgress,
-                    recoveryAttempts,
-                    highWater,
-                  }),
-              ),
-            ),
-            blocker: state.control.blocker,
-            completedSiblings: Object.freeze(
-              state.decision.context.graph.goals
-                .filter(
-                  (goal) =>
-                    !path.has(goal.id) &&
-                    goal.lifecycle === 'succeeded' &&
-                    goal.parentGoalRef !== null &&
-                    path.has(goal.parentGoalRef.id),
-                )
-                .flatMap((goal) =>
-                  goal.lastAssessment === null
-                    ? []
-                    : [
-                        Object.freeze({
-                          goalRef: { id: goal.id, version: goal.version },
-                          assessment: goal.lastAssessment,
-                        }),
-                      ],
-                ),
-            ),
-          }),
-        }),
-      }),
-    };
-    const checkpointState = requireObject(
-      parseJsonValue(state, validation.stage),
-      validation,
-      '/state',
-    );
-    // Preserve execution identity while freezing nested policy state exposed to adapters.
-    const pendingObjects: object[] = [state];
-    const frozen = new Set<object>();
-    while (pendingObjects.length > 0) {
-      const value = pendingObjects.pop()!;
-      if (frozen.has(value)) continue;
-      frozen.add(value);
-      Object.freeze(value);
-      const children: unknown[] = Object.values(value);
-      for (const child of children)
-        if (child !== null && typeof child === 'object')
-          pendingObjects.push(child);
-    }
-    this.#state = Object.freeze(state);
+    // Only this session's captured state can reuse its detached persistence payload.
+    const snapshot =
+      this.#snapshot !== null && this.#snapshot.state === state
+        ? this.#snapshot
+        : captureSessionSnapshot(state);
+    state = snapshot.state;
+    const checkpointState = snapshot.checkpointState;
+    this.#snapshot = snapshot;
+    this.#state = state;
     this.#pending += 1;
     const pending = this.#tail.then(async () => {
       if (this.#failure !== null) throw this.#failure;
@@ -743,10 +919,21 @@ export class RunSession {
     };
   }
 
+  /** Close source admission first, then drain admitted receipts and commits for cleanup. */
+  async drain(): Promise<void> {
+    do {
+      await Promise.allSettled([
+        ...[...this.#changePublications.values()].map(({ promise }) => promise),
+        this.#tail,
+      ]);
+    } while (this.#changePublications.size > 0 || this.#pending > 0);
+  }
+
   async close(): Promise<void> {
     if (this.#closing !== null) return this.#closing;
     if (
       this.#pending > 0 ||
+      this.#changePublications.size > 0 ||
       this.#executionOwned ||
       (this.#failure === null &&
         ['running', 'pausing', 'cancelling'].includes(
@@ -810,5 +997,21 @@ export class RunSession {
         'run_closed',
       );
     if (this.#failure !== null) throw this.#failure;
+  }
+
+  private ensurePublishing(): void {
+    this.ensureOpen();
+    if (
+      this.lease.signal.aborted ||
+      !['created', 'running', 'pausing', 'paused'].includes(
+        this.#state.control.status,
+      )
+    )
+      throw new ContractError(
+        validation.code,
+        'change_batch',
+        '/status',
+        'publication_closed',
+      );
   }
 }

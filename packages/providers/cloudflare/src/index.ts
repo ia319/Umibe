@@ -89,6 +89,11 @@ export function createCloudflareModel(
       if (Date.now() >= deadline)
         throw new ModelRequestError('deadline_exceeded');
       const { body, ids } = encodeRequest(request, maxRequestBytes);
+      await control.recordModelRequest?.({
+        protocol: 'http',
+        method: 'POST',
+        body,
+      });
       if (control.signal.aborted)
         throw new DOMException('Model request cancelled', 'AbortError');
       if (Date.now() >= deadline)
@@ -121,21 +126,33 @@ export function createCloudflareModel(
         const chunks: Uint8Array[] = [];
         let length = 0;
         const reader = response.body?.getReader();
-        if (reader !== undefined) {
-          try {
+        let complete = false;
+        let responseBody: Buffer<ArrayBuffer>;
+        try {
+          if (reader !== undefined) {
             while (true) {
               const chunk = await reader.read();
               if (chunk.done) break;
               length += chunk.value.byteLength;
+              chunks.push(chunk.value);
               if (length > maxResponseBytes) {
                 await reader.cancel();
                 throw protocolFailure('', 'response_too_large');
               }
-              chunks.push(chunk.value);
             }
-          } finally {
-            reader.releaseLock();
           }
+          complete = true;
+        } finally {
+          reader?.releaseLock();
+          responseBody = Buffer.concat(chunks, length);
+          await control.recordModelResult?.({
+            protocol: 'http',
+            method: 'POST',
+            body: responseBody.toString('base64'),
+            encoding: 'base64',
+            complete,
+            status: response.status,
+          });
         }
         if (control.signal.aborted)
           throw new DOMException('Model request cancelled', 'AbortError');
@@ -155,9 +172,7 @@ export function createCloudflareModel(
         try {
           data = parseJsonValue(
             JSON.parse(
-              new TextDecoder('utf-8', { fatal: true }).decode(
-                Buffer.concat(chunks, length),
-              ),
+              new TextDecoder('utf-8', { fatal: true }).decode(responseBody),
             ),
             'clef_response',
           );

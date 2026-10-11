@@ -13,7 +13,7 @@ import { httpFixture, responseBody } from './__tests__/http.js';
 
 function planningAgent(baseURL: string, limits: AgentOptions['limits'] = {}) {
   let revision = 0;
-  const generate = vi.fn<AgentOptions['candidateProvider']['generate']>();
+  const generate = vi.fn<AgentOptions['candidateProvider']['bind']>();
   const verify = vi.fn<AgentOptions['verifier']['verify']>((request) =>
     Promise.resolve({
       goalRef: { id: request.goal.id, version: request.goal.version },
@@ -29,6 +29,20 @@ function planningAgent(baseURL: string, limits: AgentOptions['limits'] = {}) {
   const agent = createAgent({
     store: new MemoryRunStore(),
     actions: [],
+    decisionPolicy: {
+      decide(request) {
+        const option =
+          request.options.find(
+            ({ decision }) => decision.kind === 'adoptPlan',
+          ) ??
+          request.options.find(({ decision }) => decision.kind === 'replan') ??
+          request.options.find(({ decision }) => decision.kind === 'wait') ??
+          request.options.find(({ decision }) => decision.kind === 'abstain');
+        if (option === undefined)
+          throw new Error('Planner fixture has no applicable decision option');
+        return Promise.resolve({ optionId: option.id });
+      },
+    },
     planner: createPlanner({
       model: createOpenAIModel({
         apiKey: 'test-only-key',
@@ -38,23 +52,35 @@ function planningAgent(baseURL: string, limits: AgentOptions['limits'] = {}) {
       }),
       criteriaDescription: 'Require observations of the requested count.',
     }),
-    selector: { select: vi.fn() },
-    candidateProvider: { generate },
-    environment: {
-      observe: () =>
+    selector: { kind: 'single', select: vi.fn() },
+    candidateProvider: {
+      listOperations: (request) =>
         Promise.resolve({
-          runId: 'run',
-          id: 'observation',
-          revision: ++revision,
-          observedAt: new Date().toISOString(),
-          source: 'local_http_test',
-          coverage: {
-            scope: 'nearby',
-            completeness: 'partial',
-            uncheckedScopes: ['far-side'],
-          },
-          data: { count: { status: 'known', value: 0 } },
+          id: 'planner-fixture-operations',
+          requestId: request.requestId,
+          operations: [],
+          informationGaps: [],
+          capabilityGaps: [],
         }),
+      bind: generate,
+    },
+    environment: {
+      observe: {
+        snapshot: () =>
+          Promise.resolve({
+            runId: 'run',
+            id: 'observation',
+            revision: ++revision,
+            observedAt: new Date().toISOString(),
+            source: 'local_http_test',
+            coverage: {
+              scope: 'nearby',
+              completeness: 'partial',
+              uncheckedScopes: ['far-side'],
+            },
+            data: { count: { status: 'known', value: 0 } },
+          }),
+      },
     },
     verifier: {
       support: (criteria) =>
@@ -140,14 +166,12 @@ test('sends the planner schema through the SDK and requires independent completi
   if (!isJsonObject(message) || typeof message.content !== 'string')
     throw new Error('Expected application data');
   expect(JSON.parse(message.content)).toMatchObject({
-    request: {
-      trigger: { kind: 'initial' },
-      context: {
-        effectiveConstraints: input.effectiveConstraints,
-        applicationContext: input.context,
-        observation: {
-          coverage: { completeness: 'partial', uncheckedScopes: ['far-side'] },
-        },
+    trigger: { kind: 'initial' },
+    context: {
+      constraints: input.effectiveConstraints,
+      applicationContext: input.context,
+      snapshot: {
+        coverage: { completeness: 'partial', uncheckedScopes: ['far-side'] },
       },
     },
     criteriaDescription: 'Require observations of the requested count.',
@@ -218,9 +242,16 @@ test.each([
         },
       },
     });
-    expect(JSON.stringify(records)).not.toMatch(
-      /test-only-key|private-error|Bearer/,
-    );
+    expect(JSON.stringify(records)).not.toMatch(/test-only-key|Bearer/);
+    expect(
+      JSON.stringify(
+        records.filter(
+          (record) =>
+            record.kind !== 'coreEvent' ||
+            record.data.type !== 'model_response_body',
+        ),
+      ),
+    ).not.toContain('private-error');
     await agent.close();
   },
 );

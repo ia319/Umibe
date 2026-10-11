@@ -57,15 +57,13 @@ function selectionResponse(provider: SelectionProvider, request: HttpRequest) {
   );
   if (
     !isJsonObject(input) ||
-    !isJsonObject(input.request) ||
-    !isJsonObject(input.request.candidates) ||
-    !isJsonArray(input.request.candidates.candidates) ||
-    !isJsonObject(input.request.candidates.candidates[0])
+    !isJsonArray(input.candidates) ||
+    !isJsonObject(input.candidates[0])
   )
     throw new Error('Expected fixed candidates');
   return openaiResponse({
     outcome: 'selected',
-    candidateId: input.request.candidates.candidates[0].id!,
+    candidateId: input.candidates[0].id!,
     reason: null,
   });
 }

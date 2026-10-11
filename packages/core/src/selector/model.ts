@@ -1,4 +1,6 @@
 import type {
+  SingleCallSelector,
+  ResumableSelector,
   Selector,
   SelectorRequest,
   SelectionResult,
@@ -7,8 +9,10 @@ import type {
   StructuredOutputModel,
   ChoiceModel,
   ChoiceResponse,
+  StructuredOutputRequest,
 } from '#internal/model/contracts';
 import type { JsonValue } from '#internal/contracts/json';
+import type { CallControl } from '#internal/contracts/control';
 import { captureModelIdentity } from '#internal/model/validation';
 import {
   captureDecisionRequest,
@@ -16,11 +20,18 @@ import {
 } from '#internal/candidate/context';
 import { captureControl } from '#internal/candidate/control';
 import { ContractError } from '#internal/errors';
-import { requireInteger } from '#internal/validation/fields';
+import {
+  requireInteger,
+  requireKeys,
+  requireObject,
+  requireString,
+  requireTimestamp,
+} from '#internal/validation/fields';
 import { parseJsonValue } from '#internal/validation/json';
 import { parseCandidateSet } from '#internal/validation/candidate';
 import { modelOutputError } from '#internal/model/output-error';
 import { ModelRequestError } from '#internal/runtime/model';
+import { projectSelectionInput } from '#internal/model/projection';
 import {
   decodeSelectionOutput,
   selectorInstructions,
@@ -36,16 +47,25 @@ export interface SelectorOptions {
    * Compare all candidates in provider-sized batches, then compare their chosen
    * winners until one remains. Every batch includes abstention. This tournament
    * is order-sensitive and does not reproduce an unlimited joint distribution.
-   * Requires a choice model with maxOptions >= 3. Explicit capacity still applies.
+   * Returns a resumable selector; Agent owns the tournament and yields between
+   * batches. Requires a choice model with maxOptions >= 3. Capacity limits the
+   * complete candidate set before any batch starts.
    */
   readonly overflow?: 'reject' | 'compareBatches';
 }
 
 /**
- * Create a stateless selector. Nonempty calls request once by default; Agent owns budgets.
+ * Create a stateless selector. Each nonempty select or advance requests once; Agent owns budgets.
  * Direct empty calls return abstain/no_candidates. Excess capacity rejects with
  * ContractError reason candidate_limit before model access. No candidate is truncated.
  */
+export function createSelector(
+  options: SelectorOptions & { readonly overflow: 'compareBatches' },
+): ResumableSelector;
+export function createSelector(
+  options: SelectorOptions & { readonly overflow?: 'reject' },
+): SingleCallSelector;
+export function createSelector(options: SelectorOptions): Selector;
 export function createSelector(options: SelectorOptions): Selector {
   const configured = options.model;
   if (!(
@@ -113,132 +133,191 @@ export function createSelector(options: SelectorOptions): Selector {
     if (compareBatches) batchCapacity = maximum - 1;
     else capacity = Math.min(capacity ?? Number.MAX_SAFE_INTEGER, maximum - 1);
   }
-  const single = compareBatches
-    ? createSelector({ model: configured })
-    : undefined;
-  return Object.freeze<Selector>({
-    model: identity,
-    ...(compareBatches ? { modelAccounting: 'perRequest' } : {}),
-    ...(capacity === undefined ? {} : { capacity }),
-    async select(input, controlInput) {
-      const control = captureControl(controlInput);
-      if (control.signal.aborted)
-        throw new DOMException('Model request cancelled', 'AbortError');
-      if (Date.now() >= control.deadlineMs)
-        throw new ModelRequestError('deadline_exceeded');
-      const request: SelectorRequest = Object.freeze({
-        ...captureDecisionRequest({
-          requestId: input.requestId,
-          decisionEpoch: input.decisionEpoch,
-          context: input.context,
-        }),
-        candidates: parseCandidateSet(input.candidates),
-      });
-      validateCandidateBasis(request.candidates, request);
-      const count = request.candidates.candidates.length;
-      if (count === 0)
-        return Object.freeze({
-          outcome: 'abstain',
-          decisionId: request.requestId,
-          candidateSetId: request.candidates.id,
-          reason: 'no_candidates',
-        });
-      if (capacity !== undefined && count > capacity)
+  const compare = async (
+    input: SelectorRequest,
+    controlInput: CallControl,
+  ): Promise<SelectionResult> => {
+    let control = captureControl(controlInput);
+    if (control.signal.aborted)
+      throw new DOMException('Model request cancelled', 'AbortError');
+    if (Date.now() >= control.deadlineMs)
+      throw new ModelRequestError('deadline_exceeded');
+    const source = requireObject(
+      parseJsonValue(input, 'selector_request'),
+      validation,
+      '',
+    );
+    const request: SelectorRequest = Object.freeze({
+      ...captureDecisionRequest({
+        requestId: source.requestId,
+        decisionEpoch: source.decisionEpoch,
+        context: source.context,
+      }),
+      candidates: parseCandidateSet(source.candidates),
+    });
+    validateCandidateBasis(request.candidates, request);
+    if (batchCapacity !== undefined) {
+      requireKeys(
+        source,
+        [
+          'requestId',
+          'decisionEpoch',
+          'context',
+          'candidates',
+          'selectionId',
+          'operationSetId',
+          'operationId',
+          'sourceCandidateSetId',
+          'deadlineAt',
+          'round',
+          'batchIndex',
+        ],
+        validation,
+        '',
+      );
+      requireString(source.selectionId, validation, '/selectionId');
+      requireString(source.operationSetId, validation, '/operationSetId');
+      const operationId = requireString(
+        source.operationId,
+        validation,
+        '/operationId',
+      );
+      requireString(
+        source.sourceCandidateSetId,
+        validation,
+        '/sourceCandidateSetId',
+      );
+      requireInteger(source.round, 0, validation, '/round');
+      requireInteger(source.batchIndex, 0, validation, '/batchIndex');
+      const deadlineAt = requireTimestamp(
+        source.deadlineAt,
+        validation,
+        '/deadlineAt',
+      );
+      if (
+        request.candidates.candidates.some(
+          (candidate) => candidate.actionId !== operationId,
+        )
+      )
         throw new ContractError(
-          'INVALID_CANDIDATE_REQUEST',
-          'selector',
-          '/candidates',
-          'candidate_limit',
+          validation.code,
+          validation.stage,
+          '/operationId',
+          'operation_mismatch',
         );
-      if (single !== undefined && batchCapacity !== undefined) {
-        let remaining = request.candidates.candidates;
-        for (let round = 0; ; round++) {
-          const winners: (typeof remaining)[number][] = [];
-          for (
-            let start = 0;
-            start < remaining.length;
-            start += batchCapacity
-          ) {
-            const id = `${request.candidates.id}/round-${round}/batch-${start / batchCapacity}`;
-            const batch: SelectorRequest = {
-              ...request,
-              requestId: `${request.requestId}/round-${round}/batch-${start / batchCapacity}`,
-              candidates: {
-                ...request.candidates,
-                id,
-                candidates: remaining
-                  .slice(start, start + batchCapacity)
-                  .map((candidate) => ({ ...candidate, candidateSetId: id })),
-              },
-            };
-            const selected =
-              control.requestModel === undefined
-                ? await single.select(batch, control)
-                : await control.requestModel(identity, (child) =>
-                    single.select(batch, child),
-                  );
-            if (selected.outcome === 'selected')
-              winners.push(
-                remaining.find(
-                  (candidate) => candidate.id === selected.candidateId,
-                )!,
-              );
-          }
-          // A winner has already been compared with abstention, including singleton batches.
-          if (winners.length <= 1) {
-            const result: SelectionResult = {
-              decisionId: request.requestId,
-              candidateSetId: request.candidates.id,
-              ...(winners.length === 0
-                ? { outcome: 'abstain', reason: 'model_abstained' }
-                : { outcome: 'selected', candidateId: winners[0]!.id }),
-            };
-            return Object.freeze(result);
-          }
-          remaining = winners;
-        }
-      }
-      let output:
-        | { kind: 'structuredOutput'; value: JsonValue }
-        | { kind: 'choice'; value: ChoiceResponse; abstainId: string };
-      if (model.kind === 'choice') {
-        const formatted = formatChoiceSelection(request);
-        output = {
-          kind: 'choice',
-          value: await model.choose(formatted.request, control),
-          abstainId: formatted.abstainId,
-        };
-      } else {
-        output = {
-          kind: 'structuredOutput',
-          value: await model.generate(
-            {
-              instructions: selectorInstructions,
-              input: parseJsonValue({ request }, 'selector_request'),
-              output: { name: 'umibe_selection', schema: selectorOutputSchema },
-            },
-            control,
-          ),
-        };
-      }
-      if (control.signal.aborted)
-        throw new DOMException('Model request cancelled', 'AbortError');
+      if (Date.parse(deadlineAt) < control.deadlineMs)
+        control = captureControl({ ...control, deadlineAt });
       if (Date.now() >= control.deadlineMs)
         throw new ModelRequestError('deadline_exceeded');
-      try {
-        if (output.kind === 'choice') {
-          const decoded = decodeChoiceSelection(
-            output.value,
-            request,
-            output.abstainId,
-          );
-          control.reportModelChoice?.(decoded.metadata);
-          return decoded.selection;
-        }
-        return decodeSelectionOutput(output.value, request);
-      } catch (error) {
-        throw modelOutputError('selection', error);
+    }
+    const count = request.candidates.candidates.length;
+    if (count === 0)
+      return Object.freeze({
+        outcome: 'abstain',
+        decisionId: request.requestId,
+        candidateSetId: request.candidates.id,
+        reason: 'no_candidates',
+      });
+    const requestCapacity =
+      batchCapacity === undefined
+        ? capacity
+        : capacity === undefined
+          ? batchCapacity
+          : Math.min(batchCapacity, capacity);
+    if (requestCapacity !== undefined && count > requestCapacity)
+      throw new ContractError(
+        'INVALID_CANDIDATE_REQUEST',
+        'selector',
+        '/candidates',
+        'candidate_limit',
+      );
+    let output:
+      | { kind: 'structuredOutput'; value: JsonValue }
+      | { kind: 'choice'; value: ChoiceResponse; abstainId: string };
+    if (model.kind === 'choice') {
+      const formatted = formatChoiceSelection(request);
+      if (control.recordModelProjection !== undefined) {
+        await control.recordModelProjection({
+          role: 'selection',
+          version: 1,
+          source:
+            batchCapacity === undefined
+              ? parseJsonValue(request, 'selector_request')
+              : source,
+          request: parseJsonValue(formatted.request, 'selector_request'),
+        });
+        if (control.signal.aborted)
+          throw new DOMException('Model request cancelled', 'AbortError');
+        if (Date.now() >= control.deadlineMs)
+          throw new ModelRequestError('deadline_exceeded');
       }
-    },
-  });
+      output = {
+        kind: 'choice',
+        value: await model.choose(formatted.request, control),
+        abstainId: formatted.abstainId,
+      };
+    } else {
+      const modelRequest: StructuredOutputRequest = Object.freeze({
+        instructions: selectorInstructions,
+        input: parseJsonValue(
+          projectSelectionInput(request),
+          'selector_request',
+        ),
+        output: Object.freeze({
+          name: 'umibe_selection',
+          schema: selectorOutputSchema,
+        }),
+      });
+      if (control.recordModelProjection !== undefined) {
+        await control.recordModelProjection({
+          role: 'selection',
+          version: 1,
+          source: parseJsonValue(request, 'selector_request'),
+          request: parseJsonValue(modelRequest, 'selector_request'),
+        });
+        if (control.signal.aborted)
+          throw new DOMException('Model request cancelled', 'AbortError');
+        if (Date.now() >= control.deadlineMs)
+          throw new ModelRequestError('deadline_exceeded');
+      }
+      output = {
+        kind: 'structuredOutput',
+        value: await model.generate(modelRequest, control),
+      };
+    }
+    if (control.signal.aborted)
+      throw new DOMException('Model request cancelled', 'AbortError');
+    if (Date.now() >= control.deadlineMs)
+      throw new ModelRequestError('deadline_exceeded');
+    try {
+      if (output.kind === 'choice') {
+        const decoded = decodeChoiceSelection(
+          output.value,
+          request,
+          output.abstainId,
+        );
+        control.reportModelChoice?.(decoded.metadata);
+        return decoded.selection;
+      }
+      return decodeSelectionOutput(output.value, request);
+    } catch (error) {
+      throw modelOutputError('selection', error);
+    }
+  };
+  const declaration = {
+    model: identity,
+    ...(capacity === undefined ? {} : { capacity }),
+  };
+  return batchCapacity === undefined
+    ? Object.freeze<SingleCallSelector>({
+        ...declaration,
+        kind: 'single',
+        select: compare,
+      })
+    : Object.freeze<ResumableSelector>({
+        ...declaration,
+        kind: 'resumable',
+        batchCapacity,
+        advance: compare,
+      });
 }

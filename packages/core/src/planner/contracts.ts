@@ -42,6 +42,11 @@ export type PlanningTrigger =
       readonly kind: 'recoveryExhausted';
       readonly goalRef: GoalRef;
       readonly failures: number;
+    }
+  | {
+      readonly kind: 'decision';
+      readonly requestId: string;
+      readonly goalRef: GoalRef;
     };
 
 export type ProposedParent =
@@ -73,36 +78,45 @@ interface ProposalBasis {
   readonly observationRef: ObservationRef;
 }
 
-export type PlanProposal = ProposalBasis &
-  (
-    | {
-        readonly outcome: 'continue';
-        readonly nextGoalRef: GoalRef;
-        readonly guidance: string;
-        readonly goalOrder?: readonly GoalRef[];
-      }
-    | {
-        readonly outcome: 'decompose';
-        readonly goals: readonly ProposedGoal[];
-        readonly nextTempId: string;
-        readonly guidance: string;
-        /** Temporary IDs in advancement order; omission uses proposal order. */
-        readonly goalOrder?: readonly string[];
-      }
-    | {
-        readonly outcome: 'switch';
-        readonly nextGoalRef: GoalRef;
-        readonly guidance: string;
-        readonly goalOrder?: readonly GoalRef[];
-      }
-    | {
-        readonly outcome: 'revise' | 'reconfirm';
-        readonly revisions: readonly GoalRevision[];
-        /** Reference before revision; the core selects the newly accepted version. */
-        readonly nextGoalRef: GoalRef;
-        readonly guidance: string;
-        readonly goalOrder?: readonly GoalRef[];
-      }
-    | { readonly outcome: 'blocked'; readonly reason: string }
-    | { readonly outcome: 'claimComplete'; readonly goalRef: GoalRef }
-  );
+export type PlanProposal = ProposalBasis & PlanProposalContent;
+
+/** The proposed goal changes, without request accounting or observation identity. */
+export type PlanProposalContent =
+  | {
+      readonly outcome: 'continue';
+      readonly nextGoalRef: GoalRef;
+      readonly guidance: string;
+      readonly goalOrder?: readonly GoalRef[];
+    }
+  | {
+      readonly outcome: 'decompose';
+      readonly goals: readonly ProposedGoal[];
+      readonly nextTempId: string;
+      readonly guidance: string;
+      /** Temporary IDs in advancement order; omission uses proposal order. */
+      readonly goalOrder?: readonly string[];
+    }
+  | {
+      readonly outcome: 'switch';
+      readonly nextGoalRef: GoalRef;
+      readonly guidance: string;
+      readonly goalOrder?: readonly GoalRef[];
+    }
+  | {
+      readonly outcome: 'revise' | 'reconfirm';
+      readonly revisions: readonly GoalRevision[];
+      /** Reference before revision; the core selects the newly accepted version. */
+      readonly nextGoalRef: GoalRef;
+      readonly guidance: string;
+      readonly goalOrder?: readonly GoalRef[];
+    }
+  | { readonly outcome: 'blocked'; readonly reason: string }
+  | { readonly outcome: 'claimComplete'; readonly goalRef: GoalRef };
+
+/** A received proposal remains separate from the currently accepted goal graph. */
+export interface PendingPlanProposal {
+  readonly proposalId: string;
+  readonly request: PlannerRequest;
+  readonly proposal: PlanProposal;
+  readonly receivedAt: string;
+}

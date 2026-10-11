@@ -89,6 +89,8 @@ export class WorkerChannel {
         this.worker.postMessage({ id, command });
       } catch {
         this.fail(new StoreError('STORE_WORKER_FAILED', 'worker_send_failed'));
+        // A failed send leaves no reliable route for cooperative shutdown.
+        void this.worker.terminate();
       }
     });
   }
@@ -99,7 +101,6 @@ export class WorkerChannel {
     this.controller.abort(error);
     for (const request of this.pending.values()) request.reject(error);
     this.pending.clear();
-    void this.worker.terminate();
   }
 
   close(): Promise<void> {

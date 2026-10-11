@@ -1,7 +1,10 @@
 import type {
   ModelIdentity,
+  ModelRequestRecord,
+  ModelResponseRecord,
   ModelResponseMetadata,
   ModelChoiceMetadata,
+  ModelProjectionRecord,
 } from '#internal/model/metadata';
 
 /** One invocation owns its cancellation signal; a cancelled call cannot authorize a later effect. */
@@ -19,6 +22,29 @@ export interface CallControl {
     model: ModelIdentity,
     invoke: (control: CallControl) => Promise<T>,
   ) => Promise<T>;
+  /**
+   * Persist the captured role source and exact model-facing projection before
+   * provider conversion. Await success and recheck cancellation and deadline
+   * before invoking the model; rejection forbids dispatch. Forward unchanged
+   * through role boundaries; absent for unrecorded direct calls.
+   */
+  readonly recordModelProjection?: (
+    projection: ModelProjectionRecord,
+  ) => Promise<void>;
+  /**
+   * Persist the exact serialized JSON body after protocol conversion and before
+   * transport. Await success, then recheck cancellation and the deadline before
+   * sending; rejection forbids dispatch. Exclude credentials and authentication
+   * fields. A service task may record several RPC frames under one model attempt.
+   * Forward unchanged through role boundaries; absent for unrecorded direct calls.
+   */
+  readonly recordModelRequest?: (request: ModelRequestRecord) => Promise<void>;
+  /**
+   * Persist received provider output before decoding or accepting it, including
+   * errors and output received after cancellation. This records evidence only;
+   * it never restores execution authority. Forward unchanged through boundaries.
+   */
+  readonly recordModelResult?: (response: ModelResponseRecord) => Promise<void>;
   /**
    * Report one response before decoding role output. The core copies and freezes
    * the first valid report; later reports and reports after settlement or abort

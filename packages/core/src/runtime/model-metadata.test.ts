@@ -25,6 +25,7 @@ const metadata = {
   usage: { inputTokens: 8, outputTokens: 4, totalTokens: 12 },
 };
 const choice: ModelChoiceMetadata = {
+  kind: 'selection',
   candidateSetId: 'candidates',
   optionId: 'a',
   options: [

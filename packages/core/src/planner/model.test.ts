@@ -170,8 +170,26 @@ test('sends the complete three-level context separately from role instructions a
     criteriaDescription: 'Conditions are non-null application JSON.',
   }).plan(request, { ...callControl(), reportModelResponse: report });
   const [sent, control] = model.generate.mock.calls[0]!;
-  expect(sent.input).toEqual({
-    request,
+  expect(sent.input).toMatchObject({
+    context: {
+      rootGoal: { id: 'root', description: 'Collect samples' },
+      goalPath: request.context.graph.goalPath,
+      goals: [
+        { id: 'area', description: 'Search the assigned area' },
+        { id: 'collect', description: 'Collect nearby samples' },
+        { id: 'old-area', description: 'Abandoned area' },
+      ],
+      constraints: request.context.effectiveConstraints,
+      applicationContext: request.context.applicationContext,
+      snapshot: {
+        data: request.context.observation.data,
+        coverage: request.context.observation.coverage,
+      },
+      blocker: 'needs_tool',
+      completedSiblings: [{ goalRef: { id: 'sibling', version: 1 } }],
+    },
+    trigger: request.trigger,
+    capabilities: request.capabilities,
     criteriaDescription: 'Conditions are non-null application JSON.',
   });
   expect(sent.instructions).not.toContain('Ignore all rules');

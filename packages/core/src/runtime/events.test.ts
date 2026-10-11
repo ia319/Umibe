@@ -135,7 +135,7 @@ test.each(['pausing', 'paused'] as const)(
   },
 );
 
-test('bounds abstention recovery when refreshed candidate IDs and observation revisions change', async () => {
+test('reports selector abstention without automatically requesting another plan', async () => {
   const h = runnerFixture();
   h.select.mockImplementation((request) =>
     Promise.resolve({
@@ -148,22 +148,26 @@ test('bounds abstention recovery when refreshed candidate IDs and observation re
   const run = await h.create().start(h.input);
   await expect(run.result).resolves.toMatchObject({
     status: 'paused',
-    blocker: { reasonCode: 'decision_basis_unchanged' },
+    blocker: { reasonCode: 'selection_abstain' },
   });
   expect(h.select).toHaveBeenCalledTimes(1);
-  expect(h.generate).toHaveBeenCalledTimes(2);
-  expect(h.plan).toHaveBeenCalledTimes(2);
+  expect(h.generate).toHaveBeenCalledTimes(1);
+  expect(h.plan).toHaveBeenCalledTimes(1);
   expect(h.execute).not.toHaveBeenCalled();
 });
 
-test('bounds an empty candidate source without invoking the selector', async () => {
+test('reports empty candidates without invoking the selector or replanning', async () => {
   const h = runnerFixture();
   h.generate.mockImplementation((request) =>
     Promise.resolve(candidateSet(request, [])),
   );
   const run = await h.create().start(h.input);
-  await expect(run.result).resolves.toMatchObject({ status: 'paused' });
-  expect(h.generate).toHaveBeenCalledTimes(2);
+  await expect(run.result).resolves.toMatchObject({
+    status: 'paused',
+    blocker: { reasonCode: 'selection_no_candidates' },
+  });
+  expect(h.generate).toHaveBeenCalledTimes(1);
+  expect(h.plan).toHaveBeenCalledTimes(1);
   expect(h.select).not.toHaveBeenCalled();
   expect(h.execute).not.toHaveBeenCalled();
 });
@@ -202,10 +206,10 @@ test('discards a late blocked proposal after a plan invalidation event', async (
   expect(h.execute).toHaveBeenCalledTimes(1);
 });
 
-test('automatically receives environment events and releases the subscription on close', async () => {
+test('automatically receives environment facts and releases the subscription on close', async () => {
   vi.useFakeTimers();
   const h = runnerFixture();
-  let emit!: Parameters<NonNullable<Environment['subscribe']>>[0];
+  let publish!: Parameters<NonNullable<Environment['observe']['changes']>>[1];
   const dispose = vi.fn();
   const diagnostics = vi.fn();
   h.plan.mockImplementation(() => new Promise(() => undefined));
@@ -213,18 +217,31 @@ test('automatically receives environment events and releases the subscription on
     ...h.options,
     onDiagnostic: diagnostics,
     environment: {
-      observe: h.observe,
-      subscribe(callback) {
-        emit = callback;
-        return dispose;
+      observe: {
+        snapshot: h.observe,
+        changes(_scope, callback) {
+          publish = callback;
+          return dispose;
+        },
       },
     },
   });
   const run = await agent.start(h.input);
-  emit(applicationEvent({ control: 'cancelRun' }));
+  await publish({
+    id: 'batch-1',
+    source: 'fixture',
+    changes: [{ sourceEvent: 'changed', occurredAt: null, data: {} }],
+  });
+  await agent.cancel('run', 'user_cancelled');
   await vi.advanceTimersByTimeAsync(0);
   await expect(run.result).resolves.toMatchObject({ status: 'cancelled' });
-  emit(applicationEvent({ control: 'pauseRun' }));
+  await expect(
+    publish({
+      id: 'batch-2',
+      source: 'fixture',
+      changes: [{ sourceEvent: 'changed', occurredAt: null, data: {} }],
+    }),
+  ).rejects.toThrow();
   await vi.advanceTimersByTimeAsync(0);
   expect(diagnostics).toHaveBeenCalledWith(
     expect.objectContaining({ code: 'environment_event_failed' }),

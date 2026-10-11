@@ -1,5 +1,5 @@
 import type { ActionResult } from './record.js';
-import type { ApplicationEvent } from './event.js';
+import type { ChangeBatch, ObservationScope } from './changes.js';
 import type { GoalAssessment, GoalRecord } from './goal.js';
 import type { JsonValue } from './json.js';
 import type { Observation } from './observation.js';
@@ -8,6 +8,7 @@ import type { CandidateFilterResult } from './candidate-filter.js';
 import type { ActionCapability } from './action.js';
 import type { DecisionContext } from './context.js';
 import type { CallControl } from './control.js';
+import type { OperationOffer, OperationSet } from './operation.js';
 
 export interface CandidateRequest {
   readonly requestId: string;
@@ -17,9 +18,27 @@ export interface CandidateRequest {
 }
 
 /** Returns complete action calls and explicit coverage, including when no calls were found. */
-export interface CandidateProvider {
+export interface CandidateGenerator {
   generate(
     request: CandidateRequest,
+    control: CallControl,
+  ): Promise<CandidateSet>;
+}
+
+export interface OperationBindingRequest extends CandidateRequest {
+  readonly operationSetId: string;
+  readonly operation: OperationOffer;
+}
+
+/** List operation availability before choosing one; bind complete calls against a fresh snapshot. */
+export interface CandidateProvider {
+  listOperations(
+    request: CandidateRequest,
+    control: CallControl,
+  ): Promise<OperationSet>;
+  /** Every returned candidate must use the selected operation's registered action and version. */
+  bind(
+    request: OperationBindingRequest,
     control: CallControl,
   ): Promise<CandidateSet>;
 }
@@ -36,13 +55,26 @@ export interface CandidateFilter {
   ): Promise<CandidateFilterResult>;
 }
 
-/** The application owns observation semantics and may additionally publish domain events. */
-export interface Environment {
-  observe(
+/** One source supplies current snapshots and, when available, captured changes. */
+export interface ObservationSource {
+  snapshot(
     context: DecisionContext | null,
     control: CallControl,
   ): Promise<Observation>;
-  subscribe?(emit: (event: ApplicationEvent) => void): () => void;
+  /**
+   * Subscribe once per owned run, before its first snapshot. Publishing captures
+   * input immediately and resolves after facts and pending review commit together.
+   * Handle rejection; failed publication has not been accepted. Unsubscribe must
+   * release source listeners. Pausing a run does not end this subscription.
+   */
+  changes?(
+    scope: ObservationScope,
+    publish: (batch: ChangeBatch) => Promise<void>,
+  ): () => void;
+}
+
+export interface Environment {
+  readonly observe: ObservationSource;
 }
 
 export type CriteriaSupport<TCriteria extends JsonValue> =

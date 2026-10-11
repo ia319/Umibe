@@ -2,7 +2,7 @@ import type { ApplicationEvent } from './event.js';
 import type { GoalAssessment, GoalGraphSnapshot } from './goal.js';
 import type { JsonObject } from './json.js';
 import type { Observation } from './observation.js';
-import type { ActionResult } from './record.js';
+import type { ActionIntent, ActionResult } from './record.js';
 import type { GoalRef, PlanRef } from './references.js';
 import type { GoalProgress } from '#internal/runtime/progress';
 
@@ -10,6 +10,13 @@ export interface RuntimeContext {
   readonly execution: {
     readonly executionId: string;
     readonly phase: 'prepared' | 'running' | ActionResult['outcome'];
+    /** Original dispatch basis; adopting a later plan never rewrites this intent. */
+    readonly intent: ActionIntent;
+    readonly progress: JsonObject;
+    readonly stopCause: {
+      readonly eventId: string;
+      readonly reasonCode: string;
+    } | null;
   } | null;
   readonly recentResults: readonly ActionResult[];
   readonly progress: readonly Pick<

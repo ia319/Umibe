@@ -6,6 +6,7 @@ import { parseJsonValue } from '#internal/validation/json';
 import { parseGoalGraph } from '#internal/validation/goal';
 import { ContractError } from '#internal/errors';
 import { captureLimits } from './limits.js';
+import { requestPlanning, requestReview } from './scheduling.js';
 import type { SessionState } from './session.js';
 
 /** Validate application-owned changes before any paused state is replaced. */
@@ -151,6 +152,7 @@ export function prepareResume(
       planGuidance: changedRoot ? null : context.planGuidance,
     },
   });
+  const scheduling = requestReview(state.scheduling);
   return {
     ...state,
     decision,
@@ -159,16 +161,10 @@ export function prepareResume(
     control: { ...state.control, rootGoalRef: graph.rootGoalRef },
     progress: changedRoot ? [] : state.progress,
     progressAttempt: changedRoot ? null : state.progressAttempt,
-    scheduling: {
-      ...state.scheduling,
-      planning: changedRoot
-        ? { kind: 'initial', assessment: 'notYet' }
-        : raw.context !== undefined || raw.effectiveConstraints !== undefined
-          ? { kind: 'planInvalidated', eventId }
-          : state.scheduling.planning,
-      recoveryAttempts: changedRoot ? 0 : state.scheduling.recoveryAttempts,
-      selectionCause: 'resumed',
-      lastSelectionBasis: null,
-    },
+    scheduling: changedRoot
+      ? requestPlanning(scheduling, { kind: 'initial', assessment: 'notYet' })
+      : raw.context !== undefined || raw.effectiveConstraints !== undefined
+        ? requestPlanning(scheduling, { kind: 'planInvalidated', eventId })
+        : scheduling,
   };
 }

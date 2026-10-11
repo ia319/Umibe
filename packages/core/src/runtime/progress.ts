@@ -28,7 +28,12 @@ export function assessProgress(
 ): readonly GoalProgress[] {
   const progress = new Map(previous.map((item) => [item.goalRef.id, item]));
   for (const ref of before.goalPath) {
-    const goal = after.goals.find((item) => item.id === ref.id);
+    // A retained action still belongs to the goal versions captured at dispatch.
+    const goal = after.goals.find(
+      (item) =>
+        item.id === ref.id &&
+        (attempt !== 'action' || item.version === ref.version),
+    );
     if (!goal) continue;
     const prior = progress.get(ref.id);
     const assessment = goal.lastAssessment;
@@ -41,8 +46,9 @@ export function assessProgress(
       for (const item of before.goals) {
         if (
           item.lastAssessment?.outcome === 'passed' ||
-          after.goals.find((goal) => goal.id === item.id)?.lastAssessment
-            ?.outcome !== 'passed'
+          after.goals.find(
+            (goal) => goal.id === item.id && goal.version === item.version,
+          )?.lastAssessment?.outcome !== 'passed'
         )
           continue;
         let ancestor = item;
@@ -86,6 +92,7 @@ export function assessProgress(
       after.goals.some(
         (goal) =>
           goal.id === item.goalRef.id &&
+          goal.version === item.goalRef.version &&
           (goal.kind === 'root' ||
             goal.lifecycle === 'inProgress' ||
             goal.lifecycle === 'pending'),

@@ -43,6 +43,36 @@ export function captureControl(input: CallControl): CapturedControl {
       'expected_function',
     );
   if (
+    input.recordModelProjection !== undefined &&
+    typeof input.recordModelProjection !== 'function'
+  )
+    throw new ContractError(
+      'INVALID_CANDIDATE_REQUEST',
+      'candidate_request',
+      '/control/recordModelProjection',
+      'expected_function',
+    );
+  if (
+    input.recordModelRequest !== undefined &&
+    typeof input.recordModelRequest !== 'function'
+  )
+    throw new ContractError(
+      'INVALID_CANDIDATE_REQUEST',
+      'candidate_request',
+      '/control/recordModelRequest',
+      'expected_function',
+    );
+  if (
+    input.recordModelResult !== undefined &&
+    typeof input.recordModelResult !== 'function'
+  )
+    throw new ContractError(
+      'INVALID_CANDIDATE_REQUEST',
+      'candidate_request',
+      '/control/recordModelResult',
+      'expected_function',
+    );
+  if (
     input.reportModelResponse !== undefined &&
     typeof input.reportModelResponse !== 'function'
   )
@@ -69,6 +99,15 @@ export function captureControl(input: CallControl): CapturedControl {
     ...(input.requestModel === undefined
       ? {}
       : { requestModel: input.requestModel }),
+    ...(input.recordModelProjection === undefined
+      ? {}
+      : { recordModelProjection: input.recordModelProjection }),
+    ...(input.recordModelRequest === undefined
+      ? {}
+      : { recordModelRequest: input.recordModelRequest }),
+    ...(input.recordModelResult === undefined
+      ? {}
+      : { recordModelResult: input.recordModelResult }),
     ...(input.reportModelResponse === undefined
       ? {}
       : { reportModelResponse: input.reportModelResponse }),
@@ -95,6 +134,15 @@ export function invokeControlled<T>(
       ...(control.requestModel === undefined
         ? {}
         : { requestModel: control.requestModel }),
+      ...(control.recordModelProjection === undefined
+        ? {}
+        : { recordModelProjection: control.recordModelProjection }),
+      ...(control.recordModelRequest === undefined
+        ? {}
+        : { recordModelRequest: control.recordModelRequest }),
+      ...(control.recordModelResult === undefined
+        ? {}
+        : { recordModelResult: control.recordModelResult }),
       ...(control.reportModelResponse === undefined
         ? {}
         : { reportModelResponse: control.reportModelResponse }),

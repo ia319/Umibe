@@ -1,19 +1,31 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
+import { scheduler } from 'node:timers/promises';
 import type { IntervalHistogram } from 'node:perf_hooks';
 import type { ActionRegistry } from '#internal/action/registry';
 import type {
   AgentOptions,
-  ModelStage,
   RunHandle,
   ResumeRun,
 } from '#internal/contracts/runtime';
 import type { CallControl } from '#internal/contracts/control';
-import type { ModelIdentity } from '#internal/model/metadata';
 import type {
   PlannerRequest,
   PlanningTrigger,
+  PendingPlanProposal,
 } from '#internal/planner/contracts';
+import type {
+  ControlDecision,
+  DecisionOption,
+  ExecutionDisposition,
+} from '#internal/contracts/decision';
+import type { ActionResult } from '#internal/contracts/record';
+import type {
+  CandidateSelectionResult,
+  CandidateGenerationInput,
+  SelectedCandidate,
+} from '#internal/contracts/candidate-processing';
+import type { OperationSet } from '#internal/contracts/operation';
 import type { JsonValue } from '#internal/contracts/json';
 import type {
   GoalAssessment,
@@ -21,11 +33,28 @@ import type {
   GoalRecord,
 } from '#internal/contracts/goal';
 import type { ApplicationEvent } from '#internal/contracts/event';
-import { captureControl, invokeControlled } from '#internal/candidate/control';
+import type {
+  ChangeBatch,
+  RecordedChange,
+  RecordedChangeBatch,
+} from '#internal/contracts/changes';
+import type { Observation } from '#internal/contracts/observation';
 import { prepareCandidates } from '#internal/candidate/prepare';
-import { checkCandidates } from '#internal/candidate/check';
+import { checkCandidatesWithInvocation } from '#internal/candidate/check';
 import { filterCandidates } from '#internal/candidate/filter';
 import { selectCandidates } from '#internal/selector/select';
+import {
+  beginSelection,
+  acceptSelectionBatch,
+} from '#internal/selector/cursor';
+import { createDecisionRequest } from '#internal/decision/request';
+import { selectDecision } from '#internal/decision/validation';
+import {
+  createOperationRequest,
+  parseOperationSet,
+  createOperationBindingRequest,
+  parseBoundCandidates,
+} from '#internal/candidate/operations';
 import { canonicalJson } from '#internal/candidate/identity';
 import { ContractError } from '#internal/errors';
 import { requireObject, requireString } from '#internal/validation/fields';
@@ -37,10 +66,25 @@ import { readGoalAssessment } from '#internal/validation/assessment';
 import { parseApplicationEvent } from '#internal/validation/event';
 import { captureDecisionRequest } from '#internal/candidate/context';
 import { ActionCoordinator } from './execution.js';
-import { invokeModel, ModelRequestError } from './model.js';
-import type { RunSession } from './session.js';
+import { ModelRequestError } from './model.js';
+import { captureObservation } from './observation.js';
+import { captureCallback } from './callback-receipt.js';
+import { invokeRole } from './role-callback.js';
+import type { RoleStage } from './role-callback.js';
+import { SelectionLifecycle } from './selection-lifecycle.js';
+import type { SelectionBatch } from './selection-lifecycle.js';
+import type { PendingPlanAdoption, RunSession } from './session.js';
+import {
+  acceptDecision,
+  acceptStoppedPlan,
+  decisionApplies,
+  proposalApplies,
+  rejectDecision,
+  stopAdoptionApplies,
+} from './decision-acceptance.js';
+import type { PreparedPlan } from './decision-acceptance.js';
 import type { RunRecordDraft } from '#internal/storage/contracts';
-import { selectionBasis } from './scheduling.js';
+import { requestPlanning, requestReview } from './scheduling.js';
 import { assessProgress } from './progress.js';
 import { prepareResume } from './resume.js';
 import {
@@ -52,15 +96,19 @@ import {
 
 const validation = { code: 'INVALID_RUN_CONTROL', stage: 'run_loop' } as const;
 class CallStopped extends Error {}
-type CallbackStage =
-  ModelStage | 'support' | 'observation' | 'checking' | 'filtering';
+
+interface PlanAdoption<TCriteria extends JsonValue> extends PreparedPlan {
+  readonly criteria: Map<string, TCriteria>;
+  readonly before: GoalGraphSnapshot;
+  readonly verifyGoals: boolean;
+}
 
 /** One asynchronous loop per run; control admission never waits for this loop. */
 export class RunDriver<TCriteria extends JsonValue> {
   readonly execution: ActionCoordinator;
   #task: Promise<void> | null = null;
   readonly #criteria = new Map<string, TCriteria>();
-  readonly #events = new Map<
+  readonly #pendingEventReceipts = new Map<
     string,
     { fingerprint: string; committed: Promise<void> }
   >();
@@ -69,7 +117,13 @@ export class RunDriver<TCriteria extends JsonValue> {
   #resumeController: AbortController | null = null;
   #pendingEvents = 0;
   #loopDelay: IntervalHistogram | null = null;
-  readonly #callbacks = new Set<Promise<unknown>>();
+  readonly #callbacks = new Map<Promise<unknown>, RoleStage>();
+  #plannerTask: Promise<void> | null = null;
+  #executionTask: Promise<void> | null = null;
+  readonly #selection = new SelectionLifecycle();
+  #verifyPending = false;
+  #wake: (() => void) | null = null;
+  #reviewTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     readonly session: RunSession,
@@ -105,6 +159,15 @@ export class RunDriver<TCriteria extends JsonValue> {
     return this.#pendingEvents !== 0;
   }
 
+  async publish(batch: ChangeBatch): Promise<void> {
+    this.#pendingEvents++;
+    try {
+      await this.session.publishChanges(batch);
+    } finally {
+      this.#pendingEvents--;
+    }
+  }
+
   start(): void {
     if (this.#task !== null) return;
     this.#loopDelay = monitorEventLoopDelay({ resolution: 20 });
@@ -136,7 +199,7 @@ export class RunDriver<TCriteria extends JsonValue> {
     const fingerprint = createHash('sha256')
       .update(canonicalJson(parseJsonValue(event, 'event')), 'utf8')
       .digest('hex');
-    const previous = this.#events.get(event.eventId);
+    const previous = this.#pendingEventReceipts.get(event.eventId);
     if (previous !== undefined) {
       if (previous.fingerprint !== fingerprint)
         throw new ContractError(
@@ -148,20 +211,19 @@ export class RunDriver<TCriteria extends JsonValue> {
       return previous.committed;
     }
     this.#pendingEvents++;
-    const committed = this.acceptEvent(event).finally(() => {
+    const committed = this.acceptEvent(event);
+    this.#pendingEventReceipts.set(event.eventId, { fingerprint, committed });
+    try {
+      await committed;
+    } finally {
       this.#pendingEvents--;
-    });
-    const receipt = { fingerprint, committed };
-    this.#events.set(event.eventId, receipt);
-    void committed.catch(() => {
-      if (this.#events.get(event.eventId) === receipt)
-        this.#events.delete(event.eventId);
-    });
-    return committed;
+      this.#pendingEventReceipts.delete(event.eventId);
+    }
   }
 
   private async acceptEvent(event: ApplicationEvent): Promise<void> {
     const session = this.session;
+    const receivedAt = new Date().toISOString();
     // Deduplication precedes admission: a repeated stop event must not stop a
     // resumed run. Recompute applicability after the asynchronous history read.
     const previous = await this.options.store.readRecord(
@@ -220,16 +282,49 @@ export class RunDriver<TCriteria extends JsonValue> {
         recentEvents: [...context.recentEvents, event].slice(-50),
       },
     });
-    const scheduling = invalidates
-      ? {
-          ...session.state.scheduling,
-          planning:
-            event.impact === 'plan'
-              ? { kind: 'planInvalidated' as const, eventId: event.eventId }
-              : session.state.scheduling.planning,
-          selectionCause: 'candidates_changed' as const,
-        }
-      : session.state.scheduling;
+    const observationOnly =
+      event.impact === 'observation' && event.control === 'none';
+    const requestsReview = observationOnly || invalidates;
+    const eventSequence =
+      session.state.observations.eventSequence + (observationOnly ? 1 : 0);
+    const reviewVersion =
+      session.state.scheduling.reviewVersion + (requestsReview ? 1 : 0);
+    if (
+      !Number.isSafeInteger(eventSequence) ||
+      !Number.isSafeInteger(reviewVersion)
+    )
+      throw new ContractError(
+        validation.code,
+        validation.stage,
+        '/sequence',
+        'sequence_exhausted',
+      );
+    const changes: readonly RecordedChange[] = observationOnly
+      ? [
+          {
+            sourceEvent: event.type,
+            occurredAt: event.observedAt,
+            data: parseJsonValue(event, 'event'),
+            sourceEventId: event.eventId,
+            ...(event.executionId === null
+              ? {}
+              : { executionId: event.executionId }),
+            sequence: eventSequence,
+            batchId: event.eventId,
+            source: `application:${event.source.id}`,
+            receivedAt,
+          },
+        ]
+      : [];
+    let scheduling =
+      invalidates && event.impact === 'plan'
+        ? requestPlanning(session.state.scheduling, {
+            kind: 'planInvalidated',
+            eventId: event.eventId,
+          })
+        : session.state.scheduling;
+    if (requestsReview)
+      scheduling = { ...scheduling, reviewPending: true, reviewVersion };
     const records: RunRecordDraft[] = [
       {
         formatVersion: 1,
@@ -253,7 +348,59 @@ export class RunDriver<TCriteria extends JsonValue> {
         },
       ),
     ];
-    const state = { ...session.state, decision, scheduling };
+    if (observationOnly) {
+      const batch: RecordedChangeBatch = {
+        id: event.eventId,
+        runId: session.runId,
+        source: `application:${event.source.id}`,
+        receivedAt,
+        changes,
+      };
+      records.push(
+        session.event('observation_changes', 'facts_received', {
+          batch: parseJsonValue(batch, 'change_batch'),
+        }),
+      );
+    }
+    const state = {
+      ...session.state,
+      decision,
+      scheduling,
+      pendingProposal:
+        invalidates && event.impact === 'plan'
+          ? null
+          : session.state.pendingProposal,
+      pendingAdoption: invalidates ? null : session.state.pendingAdoption,
+      observations: observationOnly
+        ? {
+            ...session.state.observations,
+            eventSequence,
+            unreadChanges: [
+              ...session.state.observations.unreadChanges,
+              ...changes,
+            ],
+          }
+        : session.state.observations,
+    };
+    if (invalidates && session.state.pendingAdoption !== null)
+      records.push(
+        session.event('plan_adoption_discarded', 'decision_invalidated', {
+          proposalId: session.state.pendingAdoption.proposalId,
+          executionId: session.state.pendingAdoption.executionId,
+          decisionRequestId: session.state.pendingAdoption.decisionRequestId,
+          decisionEventId: session.state.pendingAdoption.decisionEventId,
+        }),
+      );
+    if (
+      invalidates &&
+      event.impact === 'plan' &&
+      session.state.pendingProposal !== null
+    )
+      records.push(
+        session.event('proposal_discarded', 'plan_invalidated', {
+          proposalId: session.state.pendingProposal.proposalId,
+        }),
+      );
     const controlsRun =
       applicable &&
       (event.control === 'pauseRun' || event.control === 'cancelRun');
@@ -284,7 +431,7 @@ export class RunDriver<TCriteria extends JsonValue> {
     }
     await committed;
     if (this.#task === null) {
-      if (active && invalidates) this.start();
+      if (active && requestsReview) this.start();
       else await this.settleStop();
     }
   }
@@ -346,8 +493,29 @@ export class RunDriver<TCriteria extends JsonValue> {
         ).toISOString(),
       };
       if (root.version !== session.state.control.rootGoalRef.version) {
-        const supported = await invokeControlled(
-          captureControl(control),
+        const current = () =>
+          this.#resumeController === controller &&
+          !controller.signal.aborted &&
+          !session.ownershipSignal.aborted &&
+          session.failure === null &&
+          session.state.control.status === 'paused' &&
+          session.state.decision.decisionEpoch === epoch;
+        const supported = await captureCallback(
+          session,
+          {
+            stage: 'support',
+            phase: 'resume',
+            decisionEpoch: epoch,
+            input: root.criteria,
+          },
+          {
+            ...control,
+            signal: AbortSignal.any([
+              controller.signal,
+              session.ownershipSignal,
+            ]),
+          },
+          current,
           (control) => this.options.verifier.support(root.criteria, control),
         );
         if (supported.outcome !== 'returned')
@@ -356,6 +524,13 @@ export class RunDriver<TCriteria extends JsonValue> {
             'resume',
             '/goal',
             `support_${supported.outcome}`,
+          );
+        if (!current())
+          throw new ContractError(
+            validation.code,
+            'resume',
+            '/goal',
+            'resume_invalidated',
           );
         criteria = this.decodeSupport(supported.value);
       }
@@ -367,6 +542,36 @@ export class RunDriver<TCriteria extends JsonValue> {
           '/execution',
           'execution_unsettled',
         );
+      let initialObservation: Observation | undefined;
+      if (!session.state.observations.initialized) {
+        const observed = await captureObservation(
+          session,
+          this.options.environment.observe,
+          null,
+          {
+            ...control,
+            signal: AbortSignal.any([
+              controller.signal,
+              session.ownershipSignal,
+            ]),
+          },
+        );
+        if (observed.outcome !== 'returned')
+          throw new ContractError(
+            validation.code,
+            'resume',
+            '/observation',
+            `initial_observation_${observed.outcome}`,
+          );
+        initialObservation = parseObservation(observed.value);
+        if (initialObservation.runId !== session.runId)
+          throw new ContractError(
+            validation.code,
+            'resume',
+            '/observation/runId',
+            'cross_run_observation',
+          );
+      }
       if (
         controller.signal.aborted ||
         session.state.control.status !== 'paused' ||
@@ -380,11 +585,39 @@ export class RunDriver<TCriteria extends JsonValue> {
         );
       // Reconciliation and event delivery may have added records while validation was pending.
       next = prepareResume(session.state, update, record.eventId);
+      if (initialObservation !== undefined)
+        next = {
+          ...next,
+          observations: { ...next.observations, initialized: true },
+          decision: {
+            ...next.decision,
+            context: {
+              ...next.decision.context,
+              observation: initialObservation,
+            },
+          },
+        };
       if (criteria !== undefined) {
         this.#criteria.clear();
         this.#criteria.set(`${root.id}:${root.version}`, criteria);
       }
-      await session.transition({ kind: 'resume' }, [record], next);
+      await session.transition(
+        { kind: 'resume' },
+        [
+          record,
+          ...(initialObservation === undefined
+            ? []
+            : [
+                session.event('observation_accepted', 'initial_observation', {
+                  observation: parseJsonValue(
+                    initialObservation,
+                    'observation',
+                  ),
+                }),
+              ]),
+        ],
+        next,
+      );
       if (
         controller.signal.aborted ||
         !session.canDispatch(session.state.decision.decisionEpoch)
@@ -403,7 +636,7 @@ export class RunDriver<TCriteria extends JsonValue> {
     }
   }
 
-  private control(stage: CallbackStage): CallControl {
+  private control(stage: RoleStage): CallControl {
     const limits = this.session.state.limits;
     return {
       signal: AbortSignal.any([
@@ -414,7 +647,9 @@ export class RunDriver<TCriteria extends JsonValue> {
         Date.now() +
           (stage === 'verification' || stage === 'support'
             ? limits.verificationTimeoutMs
-            : stage === 'planning' || stage === 'selection'
+            : stage === 'decision' ||
+                stage === 'planning' ||
+                stage === 'selection'
               ? limits.modelTimeoutMs
               : limits.callbackTimeoutMs),
       ).toISOString(),
@@ -422,47 +657,17 @@ export class RunDriver<TCriteria extends JsonValue> {
   }
 
   private call<T>(
-    stage: CallbackStage,
+    stage: RoleStage,
     input: unknown,
     invoke: (control: CallControl) => Promise<T>,
     requestId: string = randomUUID(),
     control: CallControl = this.control(stage),
-  ): Promise<T> {
-    const pending = this.invokeCallback(
-      stage,
-      input,
-      invoke,
-      requestId,
-      control,
-    );
-    this.#callbacks.add(pending);
-    // Pipeline timeouts may return before callback accounting has committed.
-    // Track the bounded gateway, never the uncooperative underlying adapter.
-    void pending
-      .finally(() => this.#callbacks.delete(pending))
-      .catch(() => undefined);
-    return pending;
-  }
-
-  private async invokeCallback<T>(
-    stage: CallbackStage,
-    input: unknown,
-    invoke: (control: CallControl) => Promise<T>,
-    requestId: string,
-    control: CallControl,
+    retryAttempt?: number,
   ): Promise<T> {
     const session = this.session;
     const epoch = session.state.decision.decisionEpoch;
-    const startedAt = Date.now();
-    await session.commit(session.state, [
-      session.event('callback_started', stage, {
-        requestId,
-        decisionEpoch: epoch,
-        input: parseJsonValue(input, stage),
-      }),
-    ]);
-    if (!session.canDispatch(epoch)) throw new CallStopped();
     const modelStage =
+      stage === 'decision' ||
       stage === 'planning' ||
       stage === 'selection' ||
       stage === 'candidates' ||
@@ -477,137 +682,51 @@ export class RunDriver<TCriteria extends JsonValue> {
       this.options.modelStages?.includes(modelStage) === true &&
       !perRequest;
     const modelIdentity =
-      stage === 'planning'
-        ? this.options.planner.model
-        : stage === 'selection'
-          ? this.options.selector.model
-          : undefined;
-    const modelRequests = new Set<Promise<unknown>>();
-    const result = model
-      ? await invokeModel(
-          session,
-          {
-            requestId,
-            decisionEpoch: epoch,
-            purpose: modelStage,
-            ...(modelIdentity === undefined ? {} : { model: modelIdentity }),
-          },
-          control,
-          async (control) => ({ value: await invoke(control), usage: null }),
-        )
-      : await invokeControlled(captureControl(control), async (roleControl) => {
-          if (!perRequest || modelStage === null) return invoke(roleControl);
-          let open = true;
-          let pending: Promise<unknown> | null = null;
-          let sequence = 0;
-          try {
-            return await invoke({
-              ...roleControl,
-              requestModel: async <R>(
-                identity: ModelIdentity,
-                request: (child: CallControl) => Promise<R>,
-              ): Promise<R> => {
-                if (
-                  !open ||
-                  roleControl.signal.aborted ||
-                  !session.canDispatch(epoch)
-                )
-                  throw new DOMException(
-                    'Model request cancelled',
-                    'AbortError',
-                  );
-                if (pending !== null)
-                  throw new ContractError(
-                    'INVALID_RUN_CONTROL',
-                    'model_request',
-                    '/control/requestModel',
-                    'concurrent_model_request',
-                  );
-                const child = invokeModel(
-                  session,
-                  {
-                    requestId: `${requestId}/model-${++sequence}`,
-                    decisionEpoch: epoch,
-                    purpose: modelStage,
-                    model: identity,
-                  },
-                  roleControl,
-                  async (childControl) => ({
-                    value: await request(childControl),
-                    usage: null,
-                  }),
-                );
-                pending = child;
-                modelRequests.add(child);
-                try {
-                  const answer = await child;
-                  if (answer.outcome === 'returned') return answer.value;
-                  if (answer.outcome === 'failed')
-                    throw new ModelRequestError(
-                      answer.reasonCode,
-                      0,
-                      answer.issue,
-                    );
-                  if (answer.outcome === 'deadlineExceeded')
-                    throw new ModelRequestError('deadline_exceeded');
-                  throw new DOMException(
-                    'Model request cancelled',
-                    'AbortError',
-                  );
-                } finally {
-                  pending = null;
-                  modelRequests.delete(child);
-                }
-              },
-            });
-          } finally {
-            open = false;
-          }
-        });
-    // The enclosing timeout can settle before a child finishes persisting its usage.
-    await Promise.allSettled(modelRequests);
-    if (session.failure !== null) throw new CallStopped();
-    const accepted = session.canDispatch(epoch);
-    const reasonCode =
-      session.state.control.stopCause?.reasonCode ??
-      (result.outcome === 'failed' && 'reasonCode' in result
-        ? result.reasonCode
-        : result.outcome === 'failed' &&
-            'error' in result &&
-            result.error instanceof ModelRequestError
-          ? result.error.code
-          : model && result.outcome === 'deadlineExceeded'
-            ? 'deadline_exceeded'
-            : `${stage}_${result.outcome}`);
-    const delay = this.#loopDelay;
-    const sampled = delay !== null && delay.count > 0;
-    await session.commit(session.state, [
-      session.event('callback_finished', stage, {
-        requestId,
-        decisionEpoch: epoch,
-        outcome: result.outcome,
-        ...(result.outcome !== 'returned' ? { reasonCode } : {}),
-        ...('issue' in result && result.issue !== undefined
-          ? { issue: { ...result.issue } }
-          : {}),
-        currentAtReceipt: accepted,
-        durationMs: Math.max(0, Date.now() - startedAt),
-        eventLoopDelay: {
-          samples: delay?.count ?? 0,
-          meanMs: sampled ? delay.mean / 1_000_000 : null,
-          maxMs: sampled ? delay.max / 1_000_000 : null,
-        },
-        ...(accepted && result.outcome === 'returned'
-          ? { response: parseJsonValue(result.value, stage) }
-          : {}),
-      }),
-    ]);
-    if (!session.canDispatch(epoch)) throw new CallStopped();
-    if (result.outcome !== 'returned') {
-      await this.block(reasonCode);
-      throw new CallStopped();
-    }
-    return result.value;
+      stage === 'decision'
+        ? this.options.decisionPolicy.model
+        : stage === 'planning'
+          ? this.options.planner.model
+          : stage === 'selection'
+            ? this.options.selector.model
+            : undefined;
+    const request = {
+      requestId,
+      decisionEpoch: epoch,
+      input,
+      ...(retryAttempt === undefined ? {} : { retryAttempt }),
+    };
+    const pending = invokeRole(
+      session,
+      perRequest
+        ? { ...request, stage: 'selection', accounting: 'perRequest' }
+        : model
+          ? {
+              ...request,
+              stage: modelStage,
+              accounting: 'model',
+              ...(modelIdentity === undefined ? {} : { model: modelIdentity }),
+            }
+          : { ...request, stage, accounting: 'local' },
+      control,
+      this.#loopDelay,
+      invoke,
+    ).then(async (result) => {
+      if (!session.canDispatch(epoch) || result.outcome === 'interrupted')
+        throw new CallStopped();
+      if (result.outcome === 'failed') {
+        if (result.retryError !== null) throw result.retryError;
+        await this.block(result.reasonCode);
+        throw new CallStopped();
+      }
+      return result.value;
+    });
+    this.#callbacks.set(pending, stage);
+    // Pipeline timeouts may return before callback accounting has committed.
+    // Track the bounded gateway, never the uncooperative underlying adapter.
+    void pending
+      .finally(() => this.#callbacks.delete(pending))
+      .catch(() => undefined);
+    return pending;
   }
 
   private async support(goal: GoalRecord): Promise<TCriteria> {
@@ -659,7 +778,7 @@ export class RunDriver<TCriteria extends JsonValue> {
     const context = session.state.decision.context;
     const observation = parseObservation(
       await this.call('observation', context, (control) =>
-        this.options.environment.observe(context, control),
+        this.options.environment.observe.snapshot(context, control),
       ),
     );
     const previous = session.state.decision.context.observation;
@@ -749,7 +868,11 @@ export class RunDriver<TCriteria extends JsonValue> {
               ...item,
               lastAssessment: assessment,
               lifecycle:
-                assessment.outcome === 'passed' ? 'succeeded' : 'inProgress',
+                assessment.outcome === 'passed'
+                  ? 'succeeded'
+                  : context.graph.goalPath.some((ref) => ref.id === goal.id)
+                    ? 'inProgress'
+                    : item.lifecycle,
             }
           : closed.has(item.id) &&
               (item.lifecycle === 'pending' || item.lifecycle === 'inProgress')
@@ -779,10 +902,6 @@ export class RunDriver<TCriteria extends JsonValue> {
         decision,
         progress,
         progressAttempt: completed ? null : attempt,
-        scheduling:
-          closed.size === 0
-            ? session.state.scheduling
-            : { ...session.state.scheduling, recoveryAttempts: 0 },
         goals: {
           ...session.state.goals,
           order: session.state.goals.order.filter((ref) => !closed.has(ref.id)),
@@ -839,10 +958,25 @@ export class RunDriver<TCriteria extends JsonValue> {
   private async verify(): Promise<void> {
     const session = this.session;
     const path = [...session.state.decision.context.graph.goalPath].reverse();
-    for (const ref of path) {
+    // Adoption may focus another branch while the retained action finishes.
+    // Assess its surviving original goals before consuming that action's progress.
+    const retained = [...(session.state.progressAttempt?.before.goalPath ?? [])]
+      .reverse()
+      .filter(
+        (ref) =>
+          !path.some((current) => current.id === ref.id) &&
+          session.state.decision.context.graph.goals.some(
+            (goal) =>
+              goal.id === ref.id &&
+              goal.version === ref.version &&
+              (goal.lifecycle === 'pending' || goal.lifecycle === 'inProgress'),
+          ),
+      );
+    for (const ref of [...retained, ...path]) {
       const goal = session.state.decision.context.graph.goals.find(
-        (item) => item.id === ref.id,
-      )!;
+        (item) => item.id === ref.id && item.version === ref.version,
+      );
+      if (goal === undefined) continue;
       await this.verifyGoal(goal);
       if (session.state.control.status !== 'running') return;
     }
@@ -883,15 +1017,13 @@ export class RunDriver<TCriteria extends JsonValue> {
               !focused.goalPath.some((ancestor) => ancestor.id === ref.id),
           ),
         },
-        scheduling: {
-          ...session.state.scheduling,
-          planning:
-            planned === null
-              ? { kind: 'branchExhausted', goalRef: next }
-              : session.state.scheduling.planning,
-          lastSelectionBasis: null,
-          selectionCause: 'candidates_changed',
-        },
+        scheduling:
+          planned === null
+            ? requestPlanning(session.state.scheduling, {
+                kind: 'branchExhausted',
+                goalRef: next,
+              })
+            : session.state.scheduling,
       },
       [
         session.event(
@@ -947,14 +1079,11 @@ export class RunDriver<TCriteria extends JsonValue> {
           attempt === 'action' ? null : session.state.progressAttempt,
         scheduling:
           recovery && !blocked
-            ? {
-                ...session.state.scheduling,
-                planning: {
-                  kind: 'recoveryExhausted',
-                  goalRef: recovery.goalRef,
-                  failures: recovery.recoveryAttempts,
-                },
-              }
+            ? requestPlanning(session.state.scheduling, {
+                kind: 'recoveryExhausted',
+                goalRef: recovery.goalRef,
+                failures: recovery.recoveryAttempts,
+              })
             : session.state.scheduling,
       },
       [
@@ -974,23 +1103,209 @@ export class RunDriver<TCriteria extends JsonValue> {
     }
   }
 
-  private async plan(trigger: PlanningTrigger): Promise<void> {
-    const session = this.session;
-    const request: PlannerRequest = Object.freeze({
-      ...session.state.decision,
-      requestId: randomUUID(),
-      capabilities: this.registry.capabilities,
-      trigger,
-      pendingGoals: session.state.goals.pending,
+  private clearReviewTimer(): void {
+    if (this.#reviewTimer !== null) clearTimeout(this.#reviewTimer);
+    this.#reviewTimer = null;
+  }
+
+  private scheduleReview(): void {
+    this.clearReviewTimer();
+    const interval = this.session.state.scheduling.reviewIntervalMs;
+    if (interval === null || this.session.state.control.status !== 'running')
+      return;
+    this.#reviewTimer = setTimeout(() => {
+      this.#reviewTimer = null;
+      void this.session.markReview('review_interval').catch(() => undefined);
+    }, interval);
+  }
+
+  /** Wakeups own no external work and end immediately on direct run controls. */
+  private async waitForWake(until?: number): Promise<void> {
+    const signal = this.session.signal;
+    if (signal.aborted) return;
+    await new Promise<void>((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const wake = () => {
+        if (timer !== undefined) clearTimeout(timer);
+        signal.removeEventListener('abort', wake);
+        if (this.#wake === wake) this.#wake = null;
+        resolve();
+      };
+      this.#wake = wake;
+      signal.addEventListener('abort', wake, { once: true });
+      if (until !== undefined)
+        timer = setTimeout(wake, Math.max(0, until - Date.now()));
+      if (signal.aborted) wake();
     });
+  }
+
+  private async drainLightCallbacks(): Promise<void> {
+    await Promise.allSettled(
+      [...this.#callbacks]
+        .filter(([, stage]) => stage !== 'planning')
+        .map(([pending]) => pending),
+    );
+  }
+
+  private decisionOptions(
+    operations: OperationSet,
+  ): readonly ControlDecision[] {
+    const state = this.session.state;
+    const execution = this.execution.active;
+    const pending = state.pendingProposal;
+    const selection = this.#selection.snapshot()?.summary ?? null;
+    type Undisposed =
+      | { kind: 'continueAction' | 'stopAction'; executionId: string }
+      | { kind: 'continueSelection'; selectionId: string }
+      | { kind: 'wait' | 'abstain' }
+      | { kind: 'selectOperation'; operationId: string }
+      | {
+          kind: 'replan';
+          execution:
+            { kind: 'none' } | { kind: 'keep' | 'stop'; executionId: string };
+        };
+    const choices: Undisposed[] = [];
+    if (execution !== null && execution.stopCause === null) {
+      choices.push({
+        kind: 'continueAction',
+        executionId: execution.intent.executionId,
+      });
+      choices.push({
+        kind: 'stopAction',
+        executionId: execution.intent.executionId,
+      });
+    }
+    if (selection !== null)
+      choices.push({
+        kind: 'continueSelection',
+        selectionId: selection.selectionId,
+      });
+    if (execution === null && selection === null)
+      choices.push({ kind: 'wait' });
+    if (state.decision.context.planRef !== null)
+      for (const operation of operations.operations)
+        if (operation.availability.status === 'available')
+          choices.push({
+            kind: 'selectOperation',
+            operationId: operation.operationId,
+          });
+    if (this.#plannerTask === null) {
+      if (execution === null)
+        choices.push({ kind: 'replan', execution: { kind: 'none' } });
+      else {
+        choices.push({
+          kind: 'replan',
+          execution: {
+            kind: 'keep',
+            executionId: execution.intent.executionId,
+          },
+        });
+        choices.push({
+          kind: 'replan',
+          execution: {
+            kind: 'stop',
+            executionId: execution.intent.executionId,
+          },
+        });
+      }
+    }
+    choices.push({ kind: 'abstain' });
+    const decisions: ControlDecision[] = [];
+    for (const choice of choices) {
+      if (pending === null) decisions.push({ ...choice, proposal: null });
+      else {
+        if (choice.kind !== 'replan')
+          decisions.push({
+            ...choice,
+            proposal: { kind: 'defer', proposalId: pending.proposalId },
+          });
+        decisions.push({
+          ...choice,
+          proposal: { kind: 'discard', proposalId: pending.proposalId },
+        });
+      }
+    }
+    if (pending !== null && proposalApplies(this.session, pending)) {
+      if (execution === null)
+        decisions.push({
+          kind: 'adoptPlan',
+          proposalId: pending.proposalId,
+          execution: { kind: 'none' },
+        });
+      else if (execution.stopCause === null) {
+        if (this.canKeepPlan(pending))
+          decisions.push({
+            kind: 'adoptPlan',
+            proposalId: pending.proposalId,
+            execution: {
+              kind: 'keep',
+              executionId: execution.intent.executionId,
+            },
+          });
+        decisions.push({
+          kind: 'adoptPlan',
+          proposalId: pending.proposalId,
+          execution: {
+            kind: 'stop',
+            executionId: execution.intent.executionId,
+          },
+        });
+      }
+    }
+    return decisions;
+  }
+
+  private canKeepPlan(pending: PendingPlanProposal): boolean {
+    const execution = this.execution.active;
+    const proposal = pending.proposal;
+    if (
+      execution === null ||
+      proposal.outcome === 'blocked' ||
+      proposal.outcome === 'claimComplete' ||
+      !proposalApplies(this.session, pending)
+    )
+      return false;
+    if (
+      (proposal.outcome === 'revise' || proposal.outcome === 'reconfirm') &&
+      proposal.revisions.some((revision) =>
+        execution.basis.context.graph.goalPath.some(
+          (ref) => ref.id === revision.goalRef.id,
+        ),
+      )
+    )
+      return false;
+    return (
+      this.execution.continuationInvalidationReason(
+        execution.intent.executionId,
+        this.session.state.decision,
+      ) === null
+    );
+  }
+
+  private async prepareAdoption(
+    pending: PendingPlanProposal,
+    execution: ExecutionDisposition,
+  ): Promise<PlanAdoption<TCriteria> | null> {
+    const session = this.session;
+    if (
+      !proposalApplies(this.session, pending) ||
+      (execution.kind === 'keep'
+        ? !this.canKeepPlan(pending) ||
+          this.execution.active?.intent.executionId !== execution.executionId
+        : session.hasExecution)
+    )
+      throw new CallStopped();
+    const current = session.state.decision.context;
+    // Revalidate live goal membership while retaining the proposal's original response identity.
     const proposal = parsePlanProposal(
-      await this.call(
-        'planning',
-        request,
-        (control) => this.options.planner.plan(request, control),
-        request.requestId,
-      ),
-      request,
+      pending.proposal,
+      {
+        ...pending.request,
+        context: {
+          ...current,
+          observation: pending.request.context.observation,
+        },
+      },
       {
         maxDepth:
           session.state.limits.maxGoalDepth === null
@@ -1006,35 +1321,8 @@ export class RunDriver<TCriteria extends JsonValue> {
             : session.state.limits.maxSubgoals + 1,
       },
     );
-    if (proposal.outcome === 'blocked') {
-      await this.block(proposal.reason);
-      throw new CallStopped();
-    }
-    if (proposal.outcome === 'claimComplete') {
-      await session.commit(
-        {
-          ...session.state,
-          scheduling: { ...session.state.scheduling, planning: null },
-        },
-        [
-          session.event('completion_claimed', 'planner_claim', {
-            goalRef: { ...proposal.goalRef },
-          }),
-        ],
-      );
-      await this.observe();
-      await this.verify();
-      if (
-        session.state.decision.context.graph.goals.find(
-          (goal) => goal.id === proposal.goalRef.id,
-        )?.lastAssessment?.outcome !== 'passed'
-      ) {
-        await this.block('completion_not_verified');
-        throw new CallStopped();
-      }
-      return;
-    }
-    const current = session.state.decision.context;
+    if (proposal.outcome === 'blocked' || proposal.outcome === 'claimComplete')
+      return null;
     const planRef = Object.freeze({
       id: current.planRef?.id ?? randomUUID(),
       version: (current.planRef?.version ?? 0) + 1,
@@ -1047,36 +1335,23 @@ export class RunDriver<TCriteria extends JsonValue> {
       planRef,
       session.state.limits.maxSubgoals,
     );
-    const supported = new Map<string, TCriteria>();
+    const criteria = new Map<string, TCriteria>();
     for (const goal of prepared.changed)
-      supported.set(`${goal.id}:${goal.version}`, await this.support(goal));
-    if (!session.canDispatch(request.decisionEpoch)) throw new CallStopped();
-    const decision = captureDecisionRequest({
-      requestId: randomUUID(),
-      decisionEpoch: session.state.decision.decisionEpoch + 1,
-      context: {
-        ...session.state.decision.context,
-        graph: prepared.graph,
-        planRef,
-        planGuidance: proposal.guidance,
-      },
-    });
-    await session.commit(
-      {
-        ...session.state,
-        decision,
-        goals: prepared.state,
-        scheduling: {
-          ...session.state.scheduling,
-          planning:
-            session.state.scheduling.planning === trigger
-              ? null
-              : session.state.scheduling.planning,
-        },
-      },
-      [
-        session.event('plan_accepted', trigger.kind, {
-          requestId: request.requestId,
+      criteria.set(`${goal.id}:${goal.version}`, await this.support(goal));
+    return {
+      graph: prepared.graph,
+      planRef,
+      guidance: proposal.guidance,
+      goals: prepared.state,
+      criteria,
+      before: current.graph,
+      verifyGoals:
+        prepared.changed.length > 0 ||
+        current.graph.currentGoalRef.id !== prepared.graph.currentGoalRef.id,
+      records: [
+        session.event('plan_accepted', pending.request.trigger.kind, {
+          requestId: pending.request.requestId,
+          proposalId: pending.proposalId,
           planRef: { ...planRef },
           proposal: parseJsonValue(proposal, 'planning'),
           acceptedGoals: parseJsonValue(prepared.changed, 'planning'),
@@ -1084,10 +1359,388 @@ export class RunDriver<TCriteria extends JsonValue> {
           goalOrder: prepared.state.order.map((ref) => ({ ...ref })),
         }),
       ],
+    };
+  }
+
+  private launchPlanning(trigger: PlanningTrigger): void {
+    if (
+      this.#plannerTask !== null ||
+      this.session.state.pendingProposal !== null
+    )
+      throw new ContractError(
+        validation.code,
+        validation.stage,
+        '/planning',
+        'planning_busy',
+      );
+    const session = this.session;
+    const version = session.state.scheduling.planningVersion;
+    const request: PlannerRequest = Object.freeze({
+      ...session.state.decision,
+      requestId: randomUUID(),
+      capabilities: this.registry.capabilities,
+      trigger,
+      pendingGoals: session.state.goals.pending,
+    });
+    const task = (async () => {
+      const raw = await this.call(
+        'planning',
+        request,
+        (control) => this.options.planner.plan(request, control),
+        request.requestId,
+      );
+      const proposal = parsePlanProposal(raw, request, {
+        maxDepth:
+          session.state.limits.maxGoalDepth === null
+            ? null
+            : session.state.limits.maxGoalDepth + 1,
+        maxNewGoals:
+          session.state.limits.maxSubgoals === null
+            ? null
+            : Math.max(1, session.state.limits.maxSubgoals),
+        maxTotalGoals:
+          session.state.limits.maxSubgoals === null
+            ? null
+            : session.state.limits.maxSubgoals + 1,
+      });
+      if (!session.canDispatch(request.decisionEpoch)) throw new CallStopped();
+      if (session.state.pendingProposal !== null)
+        throw new ContractError(
+          validation.code,
+          validation.stage,
+          '/pendingProposal',
+          'proposal_not_disposed',
+        );
+      const pending: PendingPlanProposal = {
+        proposalId: randomUUID(),
+        request,
+        proposal,
+        receivedAt: new Date().toISOString(),
+      };
+      await session.commit(
+        {
+          ...session.state,
+          pendingProposal: pending,
+          scheduling: requestReview({
+            ...session.state.scheduling,
+            planning:
+              session.state.scheduling.planningVersion === version
+                ? null
+                : session.state.scheduling.planning,
+          }),
+        },
+        [
+          session.event('proposal_received', proposal.outcome, {
+            proposal: parseJsonValue(pending, 'planning'),
+          }),
+        ],
+      );
+    })()
+      .catch(async (error: unknown) => {
+        if (
+          session.failure !== null ||
+          session.state.control.status !== 'running'
+        )
+          return;
+        if (error instanceof CallStopped)
+          await session.markReview('planning_invalidated');
+        else
+          await this.block(
+            error instanceof ContractError ? error.reason : 'planning_failed',
+          );
+      })
+      .finally(() => {
+        if (this.#plannerTask === task) this.#plannerTask = null;
+        this.#wake?.();
+      });
+    this.#plannerTask = task;
+    void task.catch(() => undefined);
+  }
+
+  private async review(): Promise<void> {
+    const session = this.session;
+    const timing = session.state.scheduling;
+    const earliest =
+      timing.lastDecisionStartedAt === null
+        ? 0
+        : Date.parse(timing.lastDecisionStartedAt) +
+          timing.minDecisionIntervalMs;
+    while (Date.now() < earliest && session.state.control.status === 'running')
+      await this.waitForWake(earliest);
+    if (session.state.control.status !== 'running') throw new CallStopped();
+    if (this.#verifyPending && !session.hasExecution) return;
+    // Facts received during collection belong to the following review, even if the snapshot overlaps them.
+    const epoch = session.state.decision.decisionEpoch;
+    const reviewVersion = session.state.scheduling.reviewVersion;
+    const throughSequence = session.state.observations.eventSequence;
+    const changes = session.state.observations.unreadChanges.filter(
+      (change) => change.sequence <= throughSequence,
     );
-    for (const [key, criteria] of supported) this.#criteria.set(key, criteria);
-    const liveCriteria = new Set(
-      prepared.graph.goals
+    await this.observe();
+    const context = session.state.decision.context;
+    const operationRequest = createOperationRequest(
+      session.state.decision,
+      this.registry,
+    );
+    const operations = parseOperationSet(
+      await this.call(
+        'operations',
+        operationRequest,
+        (control) =>
+          this.options.candidateProvider.listOperations(
+            operationRequest,
+            control,
+          ),
+        operationRequest.requestId,
+      ),
+      operationRequest,
+    );
+    if (!session.canDispatch(epoch)) throw new CallStopped();
+    if (
+      (this.#verifyPending || this.#executionTask !== null) &&
+      this.execution.active === null
+    )
+      return;
+    const execution = this.execution.active;
+    if (execution?.stopCause != null) return;
+    const selectionState = this.#selection.snapshot();
+    const selection = selectionState?.summary ?? null;
+    const request = createDecisionRequest({
+      requestId: randomUUID(),
+      decisionEpoch: epoch,
+      context,
+      reviewVersion,
+      throughSequence,
+      changes,
+      capabilities: this.registry.capabilities,
+      operations,
+      execution:
+        execution === null
+          ? null
+          : {
+              intent: execution.intent,
+              phase: execution.phase,
+              progress: execution.progress,
+            },
+      selection,
+      planning: {
+        need: session.state.scheduling.planning,
+        inFlight: this.#plannerTask !== null,
+        pending: session.state.pendingProposal,
+      },
+      decisions: this.decisionOptions(operations),
+    });
+    this.#selection.suspend();
+    this.clearReviewTimer();
+    await session.commit(
+      {
+        ...session.state,
+        scheduling: {
+          ...session.state.scheduling,
+          lastDecisionStartedAt: new Date().toISOString(),
+        },
+      },
+      [
+        session.event('decision_requested', 'review_pending', {
+          projectionVersion: 1,
+          request: parseJsonValue(request, 'decision'),
+          source: parseJsonValue(
+            {
+              context,
+              changes,
+              operations,
+              execution,
+              selectionCursor: selectionState?.source.selectionCursor ?? null,
+              completedSelection:
+                selectionState?.source.completedSelection ?? null,
+              pendingProposal: session.state.pendingProposal,
+            },
+            'decision',
+          ),
+        }),
+      ],
+    );
+    let option: DecisionOption;
+    try {
+      option = selectDecision(
+        request,
+        await this.call(
+          'decision',
+          request,
+          (control) => this.options.decisionPolicy.decide(request, control),
+          request.requestId,
+        ),
+      );
+    } catch (error) {
+      await rejectDecision(
+        session,
+        request,
+        error instanceof ContractError
+          ? error.reason
+          : (session.state.control.stopCause?.reasonCode ??
+              'decision_interrupted'),
+        null,
+      );
+      throw error;
+    } finally {
+      this.scheduleReview();
+    }
+    if (!decisionApplies(session, request, this.execution, this.#selection)) {
+      await rejectDecision(session, request, 'basis_changed', option.id);
+      return;
+    }
+    const chosen = option.decision;
+    const pending = session.state.pendingProposal;
+    let adoption: PlanAdoption<TCriteria> | null = null;
+    let continuationBasis: CandidateGenerationInput | null = null;
+    try {
+      if (chosen.kind === 'adoptPlan') {
+        if (pending === null) throw new CallStopped();
+        if (chosen.execution.kind !== 'stop')
+          adoption = await this.prepareAdoption(pending, chosen.execution);
+        if (chosen.execution.kind === 'keep') {
+          const execution = this.execution.active;
+          if (adoption === null || execution === null) throw new CallStopped();
+          continuationBasis = {
+            requestId: request.requestId,
+            decisionEpoch: epoch,
+            context: {
+              ...session.state.decision.context,
+              graph: focusGoal(adoption.graph, execution.intent.currentGoalRef),
+              planRef: adoption.planRef,
+              planGuidance: adoption.guidance,
+            },
+          };
+          const continuation = await this.execution.checkContinuation(
+            chosen.execution.executionId,
+            continuationBasis,
+            this.control('checking'),
+          );
+          if (continuation.outcome !== 'allowed') {
+            await rejectDecision(
+              session,
+              request,
+              `continuation_${continuation.outcome}`,
+              option.id,
+            );
+            return;
+          }
+        }
+      }
+    } catch (error) {
+      await rejectDecision(
+        session,
+        request,
+        error instanceof ContractError
+          ? error.reason
+          : (session.state.control.stopCause?.reasonCode ??
+              'adoption_interrupted'),
+        option.id,
+      );
+      throw error;
+    }
+    const accepted = await acceptDecision(
+      session,
+      this.execution,
+      this.#selection,
+      {
+        request,
+        option,
+        prepared: adoption,
+        continuationBasis,
+      },
+    );
+    if (accepted.outcome === 'rejected') return;
+    if (chosen.kind === 'adoptPlan') {
+      this.#selection.discard();
+      if (pending === null) throw new CallStopped();
+      if (chosen.execution.kind === 'stop') {
+        if (accepted.pendingAdoption === null) throw new CallStopped();
+        await this.adoptAfterStop(pending, accepted.pendingAdoption);
+      } else if (session.canDispatch(accepted.decisionEpoch))
+        await this.completeAdoption(pending, adoption);
+      return;
+    }
+    if (!session.canDispatch(epoch)) return;
+    switch (chosen.kind) {
+      case 'continueAction':
+      case 'wait':
+        return;
+      case 'continueSelection':
+        if (!this.#selection.authorize(chosen.selectionId))
+          throw new CallStopped();
+        return;
+      case 'abstain':
+        await this.block('decision_abstained');
+        return;
+      case 'stopAction':
+        await this.stopExecution(chosen.executionId, accepted.decisionEventId);
+        return;
+      case 'selectOperation':
+        this.#selection.discard();
+        if (execution !== null)
+          await this.stopExecution(
+            execution.intent.executionId,
+            accepted.decisionEventId,
+          );
+        if (session.canDispatch(epoch) && !session.hasExecution)
+          await this.bindOperation(operations, chosen.operationId);
+        return;
+      case 'replan': {
+        if (chosen.execution.kind === 'stop')
+          await this.stopExecution(
+            chosen.execution.executionId,
+            accepted.decisionEventId,
+          );
+        if (!session.canDispatch(epoch)) return;
+        const trigger = session.state.scheduling.planning ?? {
+          kind: 'decision' as const,
+          requestId: request.requestId,
+          goalRef: session.state.decision.context.graph.currentGoalRef,
+        };
+        if (session.state.scheduling.planning === null)
+          await session.commit(
+            {
+              ...session.state,
+              scheduling: requestPlanning(session.state.scheduling, trigger),
+            },
+            [],
+          );
+        if (session.canDispatch(epoch)) this.launchPlanning(trigger);
+        return;
+      }
+    }
+  }
+
+  private async completeAdoption(
+    pending: PendingPlanProposal,
+    adoption: PlanAdoption<TCriteria> | null,
+  ): Promise<void> {
+    const session = this.session;
+    if (adoption === null) {
+      if (pending.proposal.outcome === 'blocked')
+        await this.block(pending.proposal.reason);
+      else if (pending.proposal.outcome === 'claimComplete') {
+        const claimedGoal = pending.proposal.goalRef;
+        await this.observe();
+        await this.verify();
+        this.#verifyPending = false;
+        if (
+          session.state.control.status === 'running' &&
+          session.state.decision.context.graph.goals.find(
+            (goal) =>
+              goal.id === claimedGoal.id &&
+              goal.version === claimedGoal.version,
+          )?.lastAssessment?.outcome !== 'passed'
+        )
+          await this.block('completion_not_verified');
+      }
+      return;
+    }
+    for (const [key, criteria] of adoption.criteria)
+      this.#criteria.set(key, criteria);
+    const live = new Set(
+      adoption.graph.goals
         .filter(
           (goal) =>
             goal.lifecycle === 'pending' || goal.lifecycle === 'inProgress',
@@ -1095,262 +1748,477 @@ export class RunDriver<TCriteria extends JsonValue> {
         .map((goal) => `${goal.id}:${goal.version}`),
     );
     for (const key of this.#criteria.keys())
-      if (!liveCriteria.has(key)) this.#criteria.delete(key);
-    if (!session.canDispatch(decision.decisionEpoch)) throw new CallStopped();
-    if (
-      prepared.changed.length > 0 ||
-      current.graph.currentGoalRef.id !== prepared.graph.currentGoalRef.id
-    ) {
+      if (!live.has(key)) this.#criteria.delete(key);
+    this.#verifyPending ||= adoption.verifyGoals;
+    if (this.#verifyPending && !session.hasExecution) {
+      await this.observe();
       await this.verify();
+      this.#verifyPending = false;
       if (
+        adoption.verifyGoals &&
         session.state.control.status === 'running' &&
         session.state.scheduling.planning !== null
       )
-        await this.recordProgress(current.graph, 'planning', false);
+        await this.recordProgress(adoption.before, 'planning', false);
     }
+  }
+
+  /** A live stop decision authorizes adoption after settlement, without another policy call. */
+  private async adoptAfterStop(
+    pending: PendingPlanProposal,
+    authorization: PendingPlanAdoption,
+  ): Promise<void> {
+    const session = this.session;
+    let discardReason = 'basis_changed';
+    try {
+      if (!stopAdoptionApplies(session, authorization)) throw new CallStopped();
+      await this.awaitExecutionStop(
+        authorization.executionId,
+        authorization.decisionEventId,
+      );
+      if (!stopAdoptionApplies(session, authorization)) throw new CallStopped();
+      // Verify only after applying the plan; old-plan verification could advance
+      // its goal and invalidate an otherwise applicable approved proposal.
+      await this.observe();
+      if (!stopAdoptionApplies(session, authorization)) throw new CallStopped();
+      const adoption = await this.prepareAdoption(pending, { kind: 'none' });
+      const accepted = await acceptStoppedPlan(
+        session,
+        authorization,
+        adoption,
+      );
+      if (accepted.outcome === 'rejected') throw new CallStopped();
+      if (session.canDispatch(accepted.decisionEpoch))
+        await this.completeAdoption(pending, adoption);
+    } catch (error) {
+      discardReason =
+        error instanceof ContractError
+          ? error.reason
+          : error instanceof CallStopped
+            ? stopAdoptionApplies(session, authorization)
+              ? 'execution_unsettled'
+              : 'basis_changed'
+            : (session.state.control.stopCause?.reasonCode ??
+              'adoption_failed');
+      throw error;
+    } finally {
+      if (
+        session.failure === null &&
+        session.state.pendingAdoption?.decisionEventId ===
+          authorization.decisionEventId
+      )
+        await session.commit(
+          {
+            ...session.state,
+            pendingAdoption: null,
+            scheduling: requestReview(session.state.scheduling),
+          },
+          [
+            session.event('plan_adoption_discarded', discardReason, {
+              proposalId: authorization.proposalId,
+              executionId: authorization.executionId,
+              decisionRequestId: authorization.decisionRequestId,
+              decisionEventId: authorization.decisionEventId,
+            }),
+          ],
+        );
+    }
+  }
+
+  private async awaitExecutionStop(
+    executionId: string,
+    eventId: string,
+  ): Promise<void> {
+    this.execution.interrupt(executionId, {
+      eventId,
+      reasonCode: 'decision_stop',
+    });
+    await this.#executionTask;
+    const execution = this.session.state.execution;
+    if (
+      this.session.hasExecution ||
+      execution?.intent.executionId !== executionId ||
+      execution.result === null ||
+      execution.result.outcome === 'unknown' ||
+      !execution.result.underlyingSettled
+    )
+      throw new CallStopped();
+  }
+
+  private async stopExecution(
+    executionId: string,
+    eventId: string,
+  ): Promise<void> {
+    await this.awaitExecutionStop(executionId, eventId);
+    if (
+      this.#verifyPending &&
+      this.session.state.control.status === 'running'
+    ) {
+      await this.observe();
+      await this.verify();
+      this.#verifyPending = false;
+    }
+  }
+
+  private async bindOperation(
+    operations: OperationSet,
+    operationId: string,
+  ): Promise<void> {
+    const session = this.session;
+    await this.observe();
+    const input = { ...session.state.decision, requestId: randomUUID() };
+    const request = createOperationBindingRequest(
+      input,
+      this.registry,
+      operations,
+      operationId,
+    );
+    const bound = parseBoundCandidates(
+      await this.call(
+        'candidates',
+        request,
+        (control) => this.options.candidateProvider.bind(request, control),
+        request.requestId,
+      ),
+      request,
+    );
+    const prepared = await prepareCandidates(
+      input,
+      this.registry,
+      { generate: () => Promise.resolve(bound) },
+      this.control('candidates'),
+    );
+    await this.drainLightCallbacks();
+    if (!session.canDispatch(input.decisionEpoch)) throw new CallStopped();
+    if (prepared.outcome !== 'prepared') {
+      await this.block(`candidates_${prepared.outcome}`);
+      return;
+    }
+    const checkingStartedAt = Date.now();
+    const checked = await checkCandidatesWithInvocation(
+      prepared.prepared,
+      this.control('checking'),
+      (input, control, check) =>
+        captureCallback(
+          session,
+          {
+            stage: 'checking',
+            phase: 'selection',
+            decisionEpoch: input.basis.decisionEpoch,
+            input,
+          },
+          control,
+          () => session.canDispatch(input.basis.decisionEpoch),
+          check,
+        ),
+    );
+    if (!session.canDispatch(input.decisionEpoch)) throw new CallStopped();
+    if (checked.outcome !== 'checked') {
+      await this.block(`checking_${checked.outcome}`);
+      return;
+    }
+    const filtered = await filterCandidates(
+      checked.checked,
+      this.control('filtering'),
+      this.options.candidateFilter === undefined
+        ? undefined
+        : {
+            filter: (request, control) =>
+              this.call(
+                'filtering',
+                request,
+                (control) =>
+                  this.options.candidateFilter!.filter(request, control),
+                request.requestId,
+                control,
+              ),
+          },
+    );
+    await this.drainLightCallbacks();
+    if (!session.canDispatch(input.decisionEpoch)) throw new CallStopped();
+    if (filtered.outcome !== 'filtered') {
+      await this.block(`filtering_${filtered.outcome}`);
+      return;
+    }
+    await session.commit(session.state, [
+      session.event('candidates_processed', 'operation_bound', {
+        requestId: input.requestId,
+        operationSetId: operations.id,
+        operationId,
+        generation: parseJsonValue(prepared.prepared.report, 'generation'),
+        checking: parseJsonValue(checked.checked.report, 'checking'),
+        checkingDurationMs: Math.max(0, Date.now() - checkingStartedAt),
+        filtering: parseJsonValue(filtered.filtered.report, 'filtering'),
+        candidates: parseJsonValue(filtered.filtered.set, 'candidates'),
+      }),
+    ]);
+    if (!session.canDispatch(input.decisionEpoch)) throw new CallStopped();
+    const selector = this.options.selector;
+    if (selector.kind === 'resumable') {
+      const capacity =
+        this.options.selectorCapacity === undefined
+          ? selector.capacity
+          : selector.capacity === undefined
+            ? this.options.selectorCapacity
+            : Math.min(this.options.selectorCapacity, selector.capacity);
+      const started = beginSelection(
+        filtered.filtered,
+        operations.id,
+        operationId,
+        selector.batchCapacity,
+        this.control('selection'),
+        capacity,
+      );
+      if (started.outcome === 'pending') {
+        this.#selection.start({ kind: 'comparing', cursor: started.cursor });
+      } else await this.finishSelection(started);
+      return;
+    }
+    const selectionControl = this.control('selection');
+    const selected = await selectCandidates(
+      filtered.filtered,
+      {
+        kind: 'single',
+        ...(selector.capacity === undefined
+          ? {}
+          : { capacity: selector.capacity }),
+        select: (request, control) =>
+          this.call(
+            'selection',
+            request,
+            (control) => selector.select(request, control),
+            request.requestId,
+            control,
+          ),
+      },
+      selectionControl,
+      this.options.selectorCapacity,
+    );
+    await this.drainLightCallbacks();
+    if (!session.canDispatch(input.decisionEpoch)) throw new CallStopped();
+    if (selected.outcome === 'selected') {
+      this.#selection.start({
+        kind: 'ready',
+        selection: {
+          selectionId: input.requestId,
+          operationId,
+          deadlineAt: selectionControl.deadlineAt,
+          round: 0,
+          completedBatches: 1,
+          result: selected,
+        },
+      });
+    } else await this.finishSelection(selected);
+  }
+
+  private async advanceSelection(batch: SelectionBatch): Promise<void> {
+    const { cursor, request, attempt } = batch;
+    const selector = this.options.selector;
+    if (selector.kind !== 'resumable') return;
+    const control = {
+      ...this.control('selection'),
+      deadlineAt: cursor.deadlineAt,
+    };
+    try {
+      const raw = await this.call(
+        'selection',
+        request,
+        (control) => selector.advance(request, control),
+        request.requestId,
+        control,
+        attempt,
+      );
+      if (
+        this.#selection.snapshot()?.source.selectionCursor !== cursor ||
+        !this.session.canDispatch(request.decisionEpoch)
+      )
+        throw new CallStopped();
+      const result = acceptSelectionBatch(cursor, raw);
+      await this.session.commit(this.session.state, [
+        this.session.event('selection_batch_finished', result.outcome, {
+          selectionId: cursor.selectionId,
+          request: parseJsonValue(request, 'selection'),
+          response: parseJsonValue(raw, 'selection'),
+        }),
+      ]);
+      if (!this.#selection.advance(cursor, result)) throw new CallStopped();
+      if (result.outcome !== 'pending' && result.outcome !== 'selected')
+        await this.finishSelection(result);
+    } catch (error) {
+      if (
+        !this.#selection.retry(
+          cursor,
+          error,
+          this.session.state.limits.modelRetries,
+        )
+      )
+        throw error;
+    }
+    // Let queued source and timer callbacks run between finite synchronous batches.
+    await scheduler.yield();
+  }
+
+  private async finishSelection(
+    selected: CandidateSelectionResult,
+  ): Promise<void> {
+    await this.session.commit(this.session.state, [
+      this.session.event('selection_finished', selected.outcome, {
+        ...(selected.outcome === 'selected' || selected.outcome === 'abstain'
+          ? { selection: parseJsonValue(selected.selection, 'selection') }
+          : {}),
+      }),
+    ]);
+    if (selected.outcome !== 'selected') {
+      await this.block(`selection_${selected.outcome}`);
+      return;
+    }
+    await this.startExecution(selected);
+  }
+
+  private async startExecution(selected: SelectedCandidate): Promise<void> {
+    const session = this.session;
+    if (this.#verifyPending) {
+      await session.markReview('execution_verification_pending');
+      return;
+    }
+    const started = await this.execution.start(selected);
+    if (started.outcome === 'notExecuted') {
+      if (session.state.control.status === 'running')
+        await session.markReview(started.reasonCode);
+      return;
+    }
+    const task = started.completion
+      .then((result: ActionResult) => {
+        if (result.outcome !== 'unknown') this.#verifyPending = true;
+        this.#wake?.();
+      })
+      .catch(async (error: unknown) => {
+        if (
+          session.failure === null &&
+          session.state.control.status === 'running'
+        )
+          await this.block(
+            error instanceof ContractError ? error.reason : 'execution_failed',
+          );
+      })
+      .finally(() => {
+        if (this.#executionTask === task) this.#executionTask = null;
+        this.#wake?.();
+      });
+    this.#executionTask = task;
+    void task.catch(() => undefined);
   }
 
   private async run(): Promise<void> {
     const session = this.session;
+    const unwatch = session.subscribe(() => this.#wake?.());
     try {
       this.#refresh = false;
-      await this.observe();
-      await this.verify();
-      while (session.state.control.status === 'running') {
-        if (this.#refresh) {
-          this.#refresh = false;
-          await this.observe();
-          await this.verify();
-        }
-        if (session.state.control.status !== 'running') break;
-        const planning = session.state.scheduling.planning;
-        if (planning !== null) {
-          await this.plan(planning);
-          // Planning can outlast observation-only events without invalidating
-          // the goal graph. Ground the next decision in the current environment.
-          if (session.state.control.status === 'running') await this.observe();
-        }
-        if (
-          this.#refresh ||
-          session.state.control.status !== 'running' ||
-          session.state.scheduling.planning !== null
-        )
-          continue;
-        const input = { ...session.state.decision, requestId: randomUUID() };
-        const prepared = await prepareCandidates(
-          input,
-          this.registry,
-          {
-            generate: (request, control) =>
-              this.call(
-                'candidates',
-                request,
-                (control) =>
-                  this.options.candidateProvider.generate(request, control),
-                request.requestId,
-                control,
-              ),
-          },
-          this.control('candidates'),
-        );
-        await Promise.allSettled(this.#callbacks);
-        if (!session.canDispatch(input.decisionEpoch)) {
-          if (this.#refresh) continue;
-          break;
-        }
-        if (prepared.outcome !== 'prepared') {
-          if (session.state.control.status === 'running')
-            await this.block(`candidates_${prepared.outcome}`);
-          break;
-        }
-        const checkingStartedAt = Date.now();
-        const checked = await checkCandidates(
-          prepared.prepared,
-          this.control('checking'),
-        );
-        const checkingDurationMs = Math.max(0, Date.now() - checkingStartedAt);
-        if (!session.canDispatch(input.decisionEpoch)) {
-          if (this.#refresh) continue;
-          break;
-        }
-        if (checked.outcome !== 'checked') {
-          if (session.state.control.status === 'running')
-            await this.block(`checking_${checked.outcome}`);
-          break;
-        }
-        const filtered = await filterCandidates(
-          checked.checked,
-          this.control('filtering'),
-          this.options.candidateFilter === undefined
-            ? undefined
-            : {
-                filter: (request, control) =>
-                  this.call(
-                    'filtering',
-                    request,
-                    (control) =>
-                      this.options.candidateFilter!.filter(request, control),
-                    request.requestId,
-                    control,
-                  ),
-              },
-        );
-        await Promise.allSettled(this.#callbacks);
-        if (!session.canDispatch(input.decisionEpoch)) {
-          if (this.#refresh) continue;
-          break;
-        }
-        if (filtered.outcome !== 'filtered') {
-          if (session.state.control.status === 'running')
-            await this.block(`filtering_${filtered.outcome}`);
-          break;
-        }
-        const basis = selectionBasis(
-          session.state.decision.context,
-          filtered.filtered.set,
-        );
-        await session.commit(session.state, [
-          session.event('candidates_processed', 'candidates_ready', {
-            requestId: input.requestId,
-            generation: parseJsonValue(prepared.prepared.report, 'generation'),
-            checking: parseJsonValue(checked.checked.report, 'checking'),
-            checkingDurationMs,
-            filtering: parseJsonValue(filtered.filtered.report, 'filtering'),
-            candidates: parseJsonValue(filtered.filtered.set, 'candidates'),
-          }),
-        ]);
-        if (!session.canDispatch(input.decisionEpoch)) continue;
-        const scheduling = session.state.scheduling;
-        if (
-          basis === scheduling.lastSelectionBasis &&
-          scheduling.selectionCause !== 'action_completed' &&
-          scheduling.selectionCause !== 'resumed'
-        ) {
-          await this.block('decision_basis_unchanged');
-          break;
-        }
-        await session.commit(session.state, [
-          session.event('selection_requested', scheduling.selectionCause, {
-            requestId: input.requestId,
-            decisionEpoch: input.decisionEpoch,
-          }),
-        ]);
-        if (!session.canDispatch(input.decisionEpoch)) continue;
-        const selected = await selectCandidates(
-          filtered.filtered,
-          {
-            ...(this.options.selector.capacity === undefined
-              ? {}
-              : { capacity: this.options.selector.capacity }),
-            select: (request, control) =>
-              this.call(
-                'selection',
-                request,
-                (control) => this.options.selector.select(request, control),
-                request.requestId,
-                control,
-              ),
-          },
-          this.control('selection'),
-          this.options.selectorCapacity,
-        );
-        await Promise.allSettled(this.#callbacks);
-        if (!session.canDispatch(input.decisionEpoch)) {
-          if (this.#refresh) continue;
-          break;
-        }
-        await session.commit(
-          {
-            ...session.state,
-            scheduling: {
-              ...session.state.scheduling,
-              lastSelectionBasis: basis,
-            },
-          },
-          [
-            session.event('selection_finished', selected.outcome, {
-              requestId: input.requestId,
-              ...(selected.outcome === 'selected' ||
-              selected.outcome === 'abstain'
-                ? { selection: parseJsonValue(selected.selection, 'selection') }
-                : {}),
-            }),
-          ],
-        );
-        if (!session.canDispatch(input.decisionEpoch)) continue;
-        if (selected.outcome !== 'selected') {
+      this.#verifyPending = true;
+      while (
+        session.state.control.status === 'running' &&
+        session.failure === null
+      ) {
+        try {
+          if (this.#refresh) {
+            this.#refresh = false;
+            this.#selection.discard();
+          }
           if (
-            (selected.outcome === 'no_candidates' ||
-              selected.outcome === 'abstain') &&
-            (session.state.limits.maxRecoveryAttempts === null ||
-              session.state.scheduling.recoveryAttempts === 0)
+            session.hasExecution &&
+            session.state.execution?.phase === 'unknown'
           ) {
+            await this.block('execution_unsettled');
+            break;
+          }
+          if (this.#executionTask !== null && this.execution.active === null) {
+            await this.#executionTask;
+            continue;
+          }
+          if (this.execution.active?.stopCause != null) {
+            await this.#executionTask;
+            continue;
+          }
+          if (this.#verifyPending && !session.hasExecution) {
+            await this.observe();
+            await this.verify();
+            this.#verifyPending = false;
+            if (session.state.control.status === 'running')
+              await session.markReview('flow_advanced');
+            continue;
+          }
+          const pending = session.state.pendingProposal;
+          if (pending !== null && !proposalApplies(this.session, pending)) {
             await session.commit(
               {
                 ...session.state,
-                scheduling: {
-                  ...session.state.scheduling,
-                  recoveryAttempts:
-                    session.state.scheduling.recoveryAttempts + 1,
-                  selectionCause: 'remedy',
-                  planning: {
-                    kind: 'selectionUnavailable',
-                    goalRef:
-                      session.state.decision.context.graph.currentGoalRef,
-                    reason: selected.outcome,
-                    attempts: session.state.scheduling.recoveryAttempts + 1,
-                  },
-                },
+                pendingProposal: null,
+                scheduling: requestReview(session.state.scheduling),
               },
               [
-                session.event('decision_remedy', selected.outcome, {
-                  requestId: input.requestId,
+                session.event('proposal_discarded', 'basis_changed', {
+                  proposalId: pending.proposalId,
                 }),
               ],
             );
-            await this.observe();
-            await this.verify();
             continue;
           }
-          if (session.state.control.status === 'running')
-            await this.block(`selection_${selected.outcome}`);
-          break;
+          const selection = this.#selection.snapshot()?.summary ?? null;
+          if (
+            selection !== null &&
+            Date.now() >= Date.parse(selection.deadlineAt)
+          ) {
+            this.#selection.discard();
+            await this.block('selection_deadlineExceeded');
+            break;
+          }
+          if (session.state.scheduling.reviewPending) {
+            await this.review();
+            continue;
+          }
+          const ready = this.#selection.takeReady();
+          if (ready !== null) {
+            await this.finishSelection(ready);
+            continue;
+          }
+          const batch = this.#selection.nextBatch();
+          if (batch !== null) {
+            if (batch.kind === 'wait') await this.waitForWake(batch.until);
+            else await this.advanceSelection(batch);
+            continue;
+          }
+          await this.waitForWake(
+            selection === null ? undefined : Date.parse(selection.deadlineAt),
+          );
+        } catch (error) {
+          if (error instanceof CallStopped) continue;
+          throw error;
         }
-        const result = await this.execution.execute(selected);
-        if (session.state.control.status !== 'running') break;
-        if (result.outcome !== 'recorded') {
-          if (this.#refresh) continue;
-          await this.block(result.reasonCode);
-          break;
-        }
-        await session.commit(
-          {
-            ...session.state,
-            scheduling: {
-              ...session.state.scheduling,
-              selectionCause: 'action_completed',
-            },
-          },
-          [],
-        );
-        if (this.#refresh) continue;
-        await this.verify();
       }
     } catch (error) {
       if (
-        !(error instanceof CallStopped) &&
         session.failure === null &&
         session.state.control.status === 'running'
       )
         await this.block(
-          error instanceof ContractError ? error.reason : 'callback_failed',
+          error instanceof ContractError
+            ? error.reason
+            : error instanceof ModelRequestError
+              ? error.code
+              : 'callback_failed',
         );
     } finally {
-      await Promise.allSettled(this.#callbacks);
+      this.clearReviewTimer();
+      this.#selection.discard();
+      await Promise.allSettled([
+        ...this.#callbacks.keys(),
+        this.#plannerTask,
+        this.#executionTask,
+      ]);
+      unwatch();
       if (session.failure === null) await this.settleStop();
     }
   }
-
   private async block(reasonCode: string): Promise<void> {
     if (this.session.state.control.status !== 'running') return;
     const record = this.session.event('run_blocked', reasonCode, {});

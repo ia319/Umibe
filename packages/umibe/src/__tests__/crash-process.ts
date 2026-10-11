@@ -91,6 +91,33 @@ const agent = createAgent({
   applicationId: config.applicationId ?? 'crash-fixture',
   projectRoot: config.directory,
   modelStages: ['planning'],
+  decisionPolicy: {
+    decide(request) {
+      const option =
+        request.options.find(({ decision }) => decision.kind === 'adoptPlan') ??
+        ((request.input.acceptedPlan === null ||
+          request.input.planning.need !== null) &&
+        !request.input.planning.inFlight
+          ? request.options.find(({ decision }) => decision.kind === 'replan')
+          : undefined) ??
+        (request.input.execution === null && request.input.selection === null
+          ? request.options.find(
+              ({ decision }) => decision.kind === 'selectOperation',
+            )
+          : undefined) ??
+        request.options.find(
+          ({ decision }) => decision.kind === 'continueAction',
+        ) ??
+        request.options.find(
+          ({ decision }) => decision.kind === 'continueSelection',
+        ) ??
+        request.options.find(({ decision }) => decision.kind === 'wait') ??
+        request.options.find(({ decision }) => decision.kind === 'abstain');
+      if (option === undefined)
+        throw new Error('Crash fixture has no applicable decision option');
+      return Promise.resolve({ optionId: option.id });
+    },
+  },
   limits: {
     maxModelAttempts: 2,
     maxActionAttempts: 20,
@@ -161,25 +188,27 @@ const agent = createAgent({
     }),
   ],
   environment: {
-    observe: () => {
-      // The environment owns its revision sequence across host restarts.
-      writeFileSync(revisionPath, String(++revision), {
-        encoding: 'utf8',
-        flush: true,
-      });
-      return Promise.resolve({
-        runId: 'run',
-        id: 'observation',
-        revision,
-        observedAt: new Date().toISOString(),
-        source: 'fixture',
-        coverage: {
-          scope: 'samples',
-          completeness: 'complete',
-          uncheckedScopes: [],
-        },
-        data: { count: { status: 'known', value: effects().length } },
-      });
+    observe: {
+      snapshot: () => {
+        // The environment owns its revision sequence across host restarts.
+        writeFileSync(revisionPath, String(++revision), {
+          encoding: 'utf8',
+          flush: true,
+        });
+        return Promise.resolve({
+          runId: 'run',
+          id: 'observation',
+          revision,
+          observedAt: new Date().toISOString(),
+          source: 'fixture',
+          coverage: {
+            scope: 'samples',
+            completeness: 'complete',
+            uncheckedScopes: [],
+          },
+          data: { count: { status: 'known', value: effects().length } },
+        });
+      },
     },
   },
   planner: {
@@ -250,7 +279,21 @@ const agent = createAgent({
     },
   },
   candidateProvider: {
-    generate: (request) => {
+    listOperations: (request) =>
+      Promise.resolve({
+        id: `${request.requestId}:operations`,
+        requestId: request.requestId,
+        operations: request.capabilities.map((capability) => ({
+          operationId: capability.id,
+          actionVersion: capability.version,
+          availability: { status: 'available' as const },
+          parameterSources: {},
+          informationGaps: [],
+        })),
+        informationGaps: [],
+        capabilityGaps: [],
+      }),
+    bind: (request) => {
       const current = request.context;
       if (current.planRef === null)
         throw new Error('A plan must precede candidate generation');
@@ -300,6 +343,7 @@ const agent = createAgent({
     },
   },
   selector: {
+    kind: 'single',
     select: (request) =>
       Promise.resolve({
         outcome: 'selected',

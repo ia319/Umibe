@@ -59,28 +59,49 @@ test.each([0, 1, 254, 255])(
       });
     expect(h.requests).toHaveLength(count === 0 || count === 255 ? 0 : 1);
     if (count === 0 || count === 255) return;
-    const { observation, ...context } = request.context;
-    const { candidates, ...candidateContext } = request.candidates;
+    const observation = request.context.observation;
+    const candidates = request.candidates.candidates;
     const body = parseJsonValue(h.requests[0]!.body, 'http_request');
     expect(body).toMatchObject({
-      state: JSON.stringify(observation),
+      state: JSON.stringify({
+        source: observation.source,
+        observedAt: observation.observedAt,
+        coverage: observation.coverage,
+        data: observation.data,
+      }),
       questions: {
         selection: {
           instructions: {
             references: {
-              requestId: request.requestId,
-              decisionEpoch: request.decisionEpoch,
-              context,
-              candidates: candidateContext,
+              context: {
+                goalPath: request.context.graph.goalPath,
+                constraints: request.context.effectiveConstraints,
+                rootGoal: { id: 'root', description: 'Collect samples' },
+              },
+              coverage: request.candidates.coverage,
             },
           },
           criteria: Object.fromEntries(
-            candidates.map((candidate) => [candidate.id, candidate]),
+            candidates.map((candidate) => [
+              candidate.id,
+              {
+                actionId: candidate.actionId,
+                actionVersion: candidate.actionVersion,
+                params: candidate.params,
+                paramSources: candidate.paramSources,
+                description: candidate.description,
+                expectedEffects: candidate.expectedEffects,
+                cost: candidate.cost,
+                risk: candidate.risk,
+                source: candidate.source,
+                goalRef: candidate.goalRef,
+              },
+            ]),
           ),
         },
       },
     });
-    expect(context.graph.goalPath).toHaveLength(3);
+    expect(request.context.graph.goalPath).toHaveLength(3);
     expect(
       isJsonObject(body) &&
         isJsonObject(body.questions) &&

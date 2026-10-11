@@ -106,6 +106,7 @@ export async function runScenario(options) {
     };
     /** @type {import('@umibe/core').Selector} */
     let selector = {
+      kind: 'single',
       select: (request) =>
         Promise.resolve({
           outcome: 'abstain',
@@ -185,6 +186,40 @@ export async function runScenario(options) {
       actions: [action],
       planner,
       selector,
+      decisionPolicy: {
+        decide(request) {
+          const option =
+            request.options.find(
+              ({ decision }) => decision.kind === 'adoptPlan',
+            ) ??
+            ((request.input.acceptedPlan === null ||
+              request.input.planning.need !== null) &&
+            !request.input.planning.inFlight
+              ? request.options.find(
+                  ({ decision }) => decision.kind === 'replan',
+                )
+              : undefined) ??
+            (request.input.execution === null &&
+            request.input.selection === null
+              ? request.options.find(
+                  ({ decision }) => decision.kind === 'selectOperation',
+                )
+              : undefined) ??
+            request.options.find(
+              ({ decision }) => decision.kind === 'continueAction',
+            ) ??
+            request.options.find(
+              ({ decision }) => decision.kind === 'continueSelection',
+            ) ??
+            request.options.find(({ decision }) => decision.kind === 'wait') ??
+            request.options.find(({ decision }) => decision.kind === 'abstain');
+          if (option === undefined)
+            throw new Error(
+              'Synthetic scenario has no applicable decision option',
+            );
+          return Promise.resolve({ optionId: option.id });
+        },
+      },
       limits: {
         maxModelAttempts: 1,
         modelRetries: 0,
@@ -201,20 +236,22 @@ export async function runScenario(options) {
         maxRecoveryAttempts: 1,
       },
       environment: {
-        observe: () =>
-          Promise.resolve({
-            runId,
-            id: 'synthetic-observation',
-            revision: ++revision,
-            observedAt: new Date().toISOString(),
-            source: 'synthetic',
-            coverage: {
-              scope: 'sample',
-              completeness: 'complete',
-              uncheckedScopes: [],
-            },
-            data: { count: { status: 'known', value: count } },
-          }),
+        observe: {
+          snapshot: () =>
+            Promise.resolve({
+              runId,
+              id: 'synthetic-observation',
+              revision: ++revision,
+              observedAt: new Date().toISOString(),
+              source: 'synthetic',
+              coverage: {
+                scope: 'sample',
+                completeness: 'complete',
+                uncheckedScopes: [],
+              },
+              data: { count: { status: 'known', value: count } },
+            }),
+        },
       },
       verifier: {
         support: (criteria) => {
@@ -262,7 +299,21 @@ export async function runScenario(options) {
         },
       },
       candidateProvider: {
-        generate: ({ context }) => {
+        listOperations: (request) =>
+          Promise.resolve({
+            id: request.requestId + ':operations',
+            requestId: request.requestId,
+            operations: request.capabilities.map((capability) => ({
+              operationId: capability.id,
+              actionVersion: capability.version,
+              availability: { status: 'available' },
+              parameterSources: {},
+              informationGaps: [],
+            })),
+            informationGaps: [],
+            capabilityGaps: [],
+          }),
+        bind: ({ context }) => {
           if (context.planRef === null)
             throw new Error('Synthetic candidate needs an accepted plan');
           const basis = {

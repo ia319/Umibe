@@ -134,37 +134,57 @@ export function createOpenAIModel(
             throw new DOMException('Model request cancelled', 'AbortError');
           if (Date.now() >= deadline)
             throw new ModelRequestError('deadline_exceeded');
+          if (typeof init?.body !== 'string')
+            throw new ModelRequestError('invalid_request');
+          await control.recordModelRequest?.({
+            protocol: 'http',
+            method: init.method ?? 'GET',
+            body: init.body,
+          });
+          if (control.signal.aborted)
+            throw new DOMException('Model request cancelled', 'AbortError');
+          if (Date.now() >= deadline)
+            throw new ModelRequestError('deadline_exceeded');
           const response = await fetch(input, init);
           receivedRequestId =
             response.headers.get('x-request-id')?.trim() || null;
           const chunks: Uint8Array[] = [];
           let length = 0;
           const reader = response.body?.getReader();
-          if (reader !== undefined) {
-            try {
+          let complete = false;
+          let responseBody: Buffer<ArrayBuffer>;
+          try {
+            if (reader !== undefined) {
               // Read inside SDK fetch so its timeout also bounds error bodies.
               while (true) {
                 const chunk = await reader.read();
                 if (chunk.done) break;
                 length += chunk.value.byteLength;
+                chunks.push(chunk.value);
                 if (length > maxResponseBytes) {
                   await reader.cancel();
                   throw new ModelRequestError('invalid_response');
                 }
-                chunks.push(chunk.value);
               }
-            } finally {
-              reader.releaseLock();
             }
-          }
-          return new Response(
-            length === 0 ? null : Buffer.concat(chunks, length),
-            {
+            complete = true;
+          } finally {
+            reader?.releaseLock();
+            responseBody = Buffer.concat(chunks, length);
+            await control.recordModelResult?.({
+              protocol: 'http',
+              method: init.method ?? 'GET',
+              body: responseBody.toString('base64'),
+              encoding: 'base64',
+              complete,
               status: response.status,
-              statusText: response.statusText,
-              headers: response.headers,
-            },
-          );
+            });
+          }
+          return new Response(length === 0 ? null : responseBody, {
+            status: response.status,
+            statusText: response.statusText,
+            headers: response.headers,
+          });
         },
       });
       try {

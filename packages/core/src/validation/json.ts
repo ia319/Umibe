@@ -15,6 +15,9 @@ export function isJsonArray(
 
 type Container = Record<string, JsonValue> | JsonValue[];
 
+// Only completed parser-owned copies are trusted; frozen external inputs still need validation.
+const validatedCopies = new WeakMap<object, JsonValue>();
+
 type Task =
   | {
       readonly kind: 'visit';
@@ -33,6 +36,7 @@ export function jsonPointerChild(path: string, key: string): string {
 }
 
 /** Copy and freeze JSON data after validating its complete runtime shape.
+ * Previously captured immutable values may be reused without copying again.
  * @param input - The untrusted value to validate and copy.
  * @param stage - The diagnostic boundary reported on invalid input.
  * @returns A detached, recursively frozen JSON value with null-prototype objects.
@@ -51,6 +55,7 @@ export function parseJsonValue(input: unknown, stage: string): JsonValue {
 
     if (task.kind === 'finish') {
       Object.freeze(task.target);
+      validatedCopies.set(task.target, task.target);
       active.delete(task.source);
       continue;
     }
@@ -83,6 +88,11 @@ export function parseJsonValue(input: unknown, stage: string): JsonValue {
         task.path,
         'unsupported_type',
       );
+    }
+    const captured = validatedCopies.get(value);
+    if (captured !== undefined) {
+      task.assign(captured);
+      continue;
     }
     if (active.has(value)) {
       throw new ContractError(

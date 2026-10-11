@@ -24,6 +24,8 @@ export type {
 export { parseGoalGraph } from '#internal/validation/goal';
 export type {
   PlanProposal,
+  PlanProposalContent,
+  PendingPlanProposal,
   PlanningTrigger,
   GoalRevision,
   ProposedGoal,
@@ -41,16 +43,24 @@ export type { RegisteredAction } from '#internal/action/registry';
 export type { CallControl } from '#internal/contracts/control';
 export type {
   ModelIdentity,
+  ModelRequestRecord,
+  ModelProjectionRecord,
+  ModelResponseRecord,
   ModelResponseMetadata,
   ModelUsage,
   ModelResponseIssue,
   ModelChoiceMetadata,
+  SelectionModelChoiceMetadata,
+  DecisionModelChoiceMetadata,
 } from '#internal/model/metadata';
 export type {
   CandidateProvider,
+  CandidateGenerator,
   CandidateRequest,
+  OperationBindingRequest,
   CriteriaSupport,
   Environment,
+  ObservationSource,
   VerificationRequest,
   Verifier,
   CandidateFilter,
@@ -58,7 +68,12 @@ export type {
 } from '#internal/contracts/adapters';
 export type {
   Selector,
+  SingleCallSelector,
+  ResumableSelector,
   SelectorRequest,
+  SelectorBatchRequest,
+  SelectionCursor,
+  SelectionBatchMapping,
   SelectionResult,
 } from '#internal/selector/contracts';
 export { createSelector } from '#internal/selector/model';
@@ -67,6 +82,26 @@ export type {
   DecisionContext,
   RuntimeContext,
 } from '#internal/contracts/context';
+export type {
+  ControlDecision,
+  DecisionBasis,
+  DecisionChoice,
+  DecisionGoal,
+  DecisionInput,
+  DecisionOption,
+  DecisionPolicy,
+  DecisionRequest,
+  DecisionResult,
+  ExecutionDisposition,
+  ProposalDisposition,
+} from '#internal/contracts/decision';
+export { createDecisionPolicy } from '#internal/decision/model';
+export type { DecisionPolicyOptions } from '#internal/decision/model';
+export type {
+  OperationAvailability,
+  OperationOffer,
+  OperationSet,
+} from '#internal/contracts/operation';
 export type {
   ActionCapability,
   ActionCheck,
@@ -83,6 +118,14 @@ export type {
   ObservationFact,
 } from '#internal/contracts/observation';
 export { parseObservation } from '#internal/validation/observation';
+export type {
+  ObservationScope,
+  ChangeFact,
+  ChangeBatch,
+  RecordedChange,
+  RecordedChangeBatch,
+} from '#internal/contracts/changes';
+export { parseChangeBatch } from '#internal/validation/changes';
 export type {
   Candidate,
   CandidateCoverage,

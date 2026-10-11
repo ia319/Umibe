@@ -2,7 +2,7 @@ import { getEventListeners } from 'node:events';
 import { afterEach, expect, test, vi } from 'vitest';
 import type { ActionRegistry } from '#internal/action/registry';
 import type {
-  Selector,
+  SingleCallSelector,
   SelectorRequest,
   SelectionResult,
 } from '#internal/selector/contracts';
@@ -35,42 +35,49 @@ test.each(['selected', 'abstain'] as const)(
     const filtered = await filteredBatch(actionRegistry(), ['north']);
     const parent = new AbortController();
     const control = callControl(parent.signal);
-    const select = vi.fn<Selector['select']>((request, invocation) => {
-      expect(request.candidates).toBe(filtered.set);
-      expect(request.context).toBe(filtered.checked.prepared.request.context);
-      expect(request.requestId).toBe(
-        filtered.checked.prepared.request.requestId,
-      );
-      expect(request.decisionEpoch).toBe(
-        filtered.checked.prepared.request.decisionEpoch,
-      );
-      expect(Object.isFrozen(request)).toBe(true);
-      expect(invocation.signal).not.toBe(parent.signal);
-      expect(invocation.deadlineAt).toBe(control.deadlineAt);
-      expect(
-        Reflect.set(
-          request.candidates.candidates[0]!.params,
-          'target',
-          'mutated',
-        ),
-      ).toBe(false);
-      return Promise.resolve(
-        outcome === 'selected'
-          ? {
-              outcome,
-              decisionId: 'decision',
-              candidateSetId: request.candidates.id,
-              candidateId: request.candidates.candidates[0]!.id,
-            }
-          : {
-              outcome,
-              decisionId: 'decision',
-              candidateSetId: request.candidates.id,
-              reason: 'not_useful',
-            },
-      );
-    });
-    const result = await selectCandidates(filtered, { select }, control, 1);
+    const select = vi.fn<SingleCallSelector['select']>(
+      (request, invocation) => {
+        expect(request.candidates).toBe(filtered.set);
+        expect(request.context).toBe(filtered.checked.prepared.request.context);
+        expect(request.requestId).toBe(
+          filtered.checked.prepared.request.requestId,
+        );
+        expect(request.decisionEpoch).toBe(
+          filtered.checked.prepared.request.decisionEpoch,
+        );
+        expect(Object.isFrozen(request)).toBe(true);
+        expect(invocation.signal).not.toBe(parent.signal);
+        expect(invocation.deadlineAt).toBe(control.deadlineAt);
+        expect(
+          Reflect.set(
+            request.candidates.candidates[0]!.params,
+            'target',
+            'mutated',
+          ),
+        ).toBe(false);
+        return Promise.resolve(
+          outcome === 'selected'
+            ? {
+                outcome,
+                decisionId: 'decision',
+                candidateSetId: request.candidates.id,
+                candidateId: request.candidates.candidates[0]!.id,
+              }
+            : {
+                outcome,
+                decisionId: 'decision',
+                candidateSetId: request.candidates.id,
+                reason: 'not_useful',
+              },
+        );
+      },
+    );
+    const result = await selectCandidates(
+      filtered,
+      { kind: 'single', select },
+      control,
+      1,
+    );
     expect(result.outcome).toBe(outcome);
     if (result.outcome === 'selected') {
       expect(result.candidate).toBe(filtered.set.candidates[0]);
@@ -92,7 +99,7 @@ test('does not impose an implicit capacity or truncate a multi-candidate request
     actionRegistry(),
     Array.from({ length: 65 }, (_, index) => `target-${index}`),
   );
-  const select = vi.fn<Selector['select']>((request) => {
+  const select = vi.fn<SingleCallSelector['select']>((request) => {
     expect(request.candidates.candidates).toHaveLength(65);
     return Promise.resolve({
       outcome: 'selected',
@@ -101,7 +108,11 @@ test('does not impose an implicit capacity or truncate a multi-candidate request
       candidateId: request.candidates.candidates.at(-1)!.id,
     });
   });
-  const result = await selectCandidates(filtered, { select }, callControl());
+  const result = await selectCandidates(
+    filtered,
+    { kind: 'single', select },
+    callControl(),
+  );
   expect(result).toMatchObject({
     outcome: 'selected',
     candidate: { params: { target: 'target-64' } },
@@ -129,7 +140,7 @@ test('checks capacity after filtering and preserves exact boundary behavior', as
   });
   if (unrestricted.outcome !== 'filtered' || reduced.outcome !== 'filtered')
     throw new Error('Expected filtered fixture');
-  const select = vi.fn<Selector['select']>((request) =>
+  const select = vi.fn<SingleCallSelector['select']>((request) =>
     Promise.resolve({
       outcome: 'abstain',
       reason: 'not_useful',
@@ -138,7 +149,12 @@ test('checks capacity after filtering and preserves exact boundary behavior', as
     }),
   );
   expect(
-    await selectCandidates(unrestricted.filtered, { select }, callControl(), 2),
+    await selectCandidates(
+      unrestricted.filtered,
+      { kind: 'single', select },
+      callControl(),
+      2,
+    ),
   ).toMatchObject({
     outcome: 'candidate_limit',
     count: 3,
@@ -146,7 +162,12 @@ test('checks capacity after filtering and preserves exact boundary behavior', as
   });
   expect(select).not.toHaveBeenCalled();
   expect(
-    await selectCandidates(reduced.filtered, { select }, callControl(), 2),
+    await selectCandidates(
+      reduced.filtered,
+      { kind: 'single', select },
+      callControl(),
+      2,
+    ),
   ).toMatchObject({ outcome: 'abstain' });
   expect(
     select.mock.calls[0]![0].candidates.candidates.map(
@@ -176,12 +197,12 @@ test.each(['initially_empty', 'fully_filtered'] as const)(
     });
     if (filtering.outcome !== 'filtered')
       throw new Error('Expected filtered fixture');
-    const select = vi.fn<Selector['select']>(() =>
+    const select = vi.fn<SingleCallSelector['select']>(() =>
       Promise.reject(new Error('must not select')),
     );
     const result = await selectCandidates(
       filtering.filtered,
-      { select },
+      { kind: 'single', select },
       callControl(),
       1,
     );
@@ -199,11 +220,16 @@ test.each([0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])(
   'rejects invalid capacity %s before selector invocation',
   async (capacity) => {
     const filtered = await filteredBatch(actionRegistry(), ['north']);
-    const select = vi.fn<Selector['select']>(() =>
+    const select = vi.fn<SingleCallSelector['select']>(() =>
       Promise.reject(new Error('must not select')),
     );
     await expect(
-      selectCandidates(filtered, { select }, callControl(), capacity),
+      selectCandidates(
+        filtered,
+        { kind: 'single', select },
+        callControl(),
+        capacity,
+      ),
     ).rejects.toMatchObject({
       code: 'INVALID_CANDIDATE_REQUEST',
       stage: 'candidate_selection',
@@ -277,7 +303,7 @@ test.each([
     const result = await selectCandidates(
       filtering.filtered,
       // @ts-expect-error Deliberately simulate selector output that violates the declared contract.
-      { select },
+      { kind: 'single', select },
       callControl(),
     );
     expect(result).toMatchObject({
@@ -298,11 +324,15 @@ test.each(['throw', 'reject'] as const)(
   'reports a selector %s as callback failure without retry',
   async (kind) => {
     const filtered = await filteredBatch(actionRegistry(), ['north']);
-    const select = vi.fn<Selector['select']>(() => {
+    const select = vi.fn<SingleCallSelector['select']>(() => {
       if (kind === 'throw') throw new Error('private failure');
       return Promise.reject(new Error('private failure'));
     });
-    const result = await selectCandidates(filtered, { select }, callControl());
+    const result = await selectCandidates(
+      filtered,
+      { kind: 'single', select },
+      callControl(),
+    );
     expect(result).toMatchObject({
       outcome: 'failed',
       reason: 'callback_failed',
@@ -322,7 +352,7 @@ test.each(['cancelled', 'deadlineExceeded'] as const)(
     let resolve!: (value: SelectionResult) => void;
     let reject!: (reason: unknown) => void;
     let signal: AbortSignal | undefined;
-    const select = vi.fn<Selector['select']>((_request, control) => {
+    const select = vi.fn<SingleCallSelector['select']>((_request, control) => {
       signal = control.signal;
       return new Promise((done, fail) => {
         resolve = done;
@@ -331,7 +361,7 @@ test.each(['cancelled', 'deadlineExceeded'] as const)(
     });
     const pending = selectCandidates(
       filtered,
-      { select },
+      { kind: 'single', select },
       {
         signal: parent.signal,
         deadlineAt: new Date(Date.now() + 20).toISOString(),
@@ -360,11 +390,15 @@ test('enforces control before the empty branch and after result validation', asy
   const empty = await filteredBatch(actionRegistry(), []);
   const parent = new AbortController();
   parent.abort();
-  const select = vi.fn<Selector['select']>(() =>
+  const select = vi.fn<SingleCallSelector['select']>(() =>
     Promise.reject(new Error('must not select')),
   );
   expect(
-    await selectCandidates(empty, { select }, callControl(parent.signal)),
+    await selectCandidates(
+      empty,
+      { kind: 'single', select },
+      callControl(parent.signal),
+    ),
   ).toMatchObject({ outcome: 'cancelled' });
   expect(select).not.toHaveBeenCalled();
 
@@ -387,7 +421,7 @@ test('enforces control before the empty branch and after result validation', asy
   expect(
     await selectCandidates(
       filtered,
-      { select: () => Promise.resolve(answer) },
+      { kind: 'single', select: () => Promise.resolve(answer) },
       callControl(lateParent.signal),
     ),
   ).toMatchObject({ outcome: 'cancelled', stage: 'selection' });
@@ -395,11 +429,15 @@ test('enforces control before the empty branch and after result validation', asy
 
 test('rejects copied filter results and invalid selector definitions', async () => {
   const filtered = await filteredBatch(actionRegistry(), ['north']);
-  const select = vi.fn<Selector['select']>(() =>
+  const select = vi.fn<SingleCallSelector['select']>(() =>
     Promise.reject(new Error('must not select')),
   );
   await expect(
-    selectCandidates({ ...filtered }, { select }, callControl()),
+    selectCandidates(
+      { ...filtered },
+      { kind: 'single', select },
+      callControl(),
+    ),
   ).rejects.toMatchObject({ reason: 'unfiltered_candidates' });
   await expect(
     // @ts-expect-error A selector definition must provide its select method.

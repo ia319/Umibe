@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { ActionRegistry } from '#internal/action/registry';
 import type {
+  ActionCheck,
   PreparedAction,
   Reconciliation,
 } from '#internal/contracts/action';
@@ -8,22 +9,43 @@ import type { CallControl } from '#internal/contracts/control';
 import type { Environment } from '#internal/contracts/adapters';
 import type { SelectedCandidate } from '#internal/contracts/candidate-processing';
 import type { ActionIntent, ActionResult } from '#internal/contracts/record';
-import type { JsonObject } from '#internal/contracts/json';
+import type { JsonObject, JsonValue } from '#internal/contracts/json';
 import type { CandidateGenerationInput } from '#internal/contracts/candidate-processing';
 import { captureControl, invokeControlled } from '#internal/candidate/control';
+import type { InvocationResult } from '#internal/candidate/control';
+import { captureDecisionRequest } from '#internal/candidate/context';
 import { getSelectedCall } from '#internal/candidate/handles';
 import {
   candidateInvalidationReason,
-  recheckCandidate,
+  recheckCandidateWithInvocation,
 } from '#internal/candidate/recheck';
 import { canonicalJson } from '#internal/candidate/identity';
 import { ContractError } from '#internal/errors';
 import { requireObject, requireString } from '#internal/validation/fields';
 import { isJsonArray, parseJsonValue } from '#internal/validation/json';
 import { parseObservation } from '#internal/validation/observation';
+import { parseActionCheck } from '#internal/validation/action-check';
 import { readActionResult } from '#internal/validation/record';
 import type { RunSession } from './session.js';
 import type { RunCause } from './state.js';
+import { captureObservation } from './observation.js';
+import {
+  captureCallback,
+  captureCallbackResponse,
+} from './callback-receipt.js';
+import type { CapturedCallbackResponse } from './callback-receipt.js';
+import { requestReview } from './scheduling.js';
+
+/** Records later-plan authorization without rewriting the original intent or launch basis. */
+export interface ExecutionContinuation {
+  readonly executionId: string;
+  readonly decisionRequestId: string;
+  readonly decisionEventId: string;
+  /** Adopted plan epoch; the execution snapshot retains its original launch epoch. */
+  readonly decisionEpoch: number;
+  readonly planRef: ActionIntent['planRef'];
+  readonly authorizedAt: string;
+}
 
 export interface ExecutionSnapshot {
   readonly basis: CandidateGenerationInput;
@@ -34,10 +56,18 @@ export interface ExecutionSnapshot {
   readonly result: ActionResult | null;
   readonly retries: number;
   readonly reconciliation: 'performed' | 'notPerformed' | null;
+  readonly progress: JsonObject;
+  readonly stopCause: RunCause | null;
+  /** Latest later-plan authorization, retained as history after execution or recovery. */
+  readonly continuation: ExecutionContinuation | null;
 }
 
-export type ActionDispatchResult =
-  | { readonly outcome: 'recorded'; readonly result: ActionResult }
+export type ActionStartResult =
+  | {
+      readonly outcome: 'started';
+      readonly executionId: string;
+      readonly completion: Promise<ActionResult>;
+    }
   | { readonly outcome: 'notExecuted'; readonly reasonCode: string };
 
 interface Attempt {
@@ -46,6 +76,8 @@ interface Attempt {
   readonly intent: ActionIntent;
   readonly release: () => void;
   dispatched: boolean;
+  // Raw settlement closes continuation before result persistence and verification finish.
+  responseReceived: boolean;
   result: ActionResult | null;
   stopCause: RunCause | null;
   progress: JsonObject;
@@ -77,12 +109,23 @@ export class ActionCoordinator {
         intent: execution.intent,
         release: session.claimExecution(),
         dispatched: true,
+        responseReceived: true,
         result: execution.result,
-        stopCause: session.state.control.stopCause,
+        stopCause: execution.stopCause,
         progress: execution.result.progress,
         reconciled: false,
         stop: null,
       };
+  }
+
+  get active():
+    (ExecutionSnapshot & { readonly phase: 'prepared' | 'running' }) | null {
+    const execution = this.session.state.execution;
+    return execution !== null &&
+      this.session.hasExecution &&
+      (execution.phase === 'prepared' || execution.phase === 'running')
+      ? { ...execution, phase: execution.phase }
+      : null;
   }
 
   /**
@@ -92,63 +135,66 @@ export class ActionCoordinator {
    * recovered without that token require a freshly checked call with identical parameters.
    * No automatic retries occur. Unknown effects retain the session's execution
    * lease until a late result or reconciliation confirms a complete boundary.
+   * A started result confirms dispatch, not success. Completion waits for result
+   * persistence and stop settlement; a storage rejection does not prove that the
+   * external action stopped. The completion remains observed until cleanup ends.
    */
-  async execute(
+  async start(
     selected: SelectedCandidate,
     retryOf: string | null = null,
-  ): Promise<ActionDispatchResult> {
+  ): Promise<ActionStartResult> {
     const session = this.session;
     const call = getSelectedCall(selected);
     const epoch = selected.filtered.checked.prepared.request.decisionEpoch;
     if (!session.canDispatch(epoch))
       return { outcome: 'notExecuted', reasonCode: 'run_or_decision_inactive' };
-    let retries = 0;
-    const prior = session.state.execution;
-    if (prior?.reconciliation === 'notPerformed') {
-      if (
-        prior.intent.actionId !== call.call.actionId ||
-        prior.intent.actionVersion !== call.call.actionVersion ||
-        canonicalJson(prior.intent.params) !== canonicalJson(call.call.params)
-      ) {
-        await this.block('retry_call_changed');
-        return { outcome: 'notExecuted', reasonCode: 'retry_call_changed' };
-      }
-      retryOf ??= prior.intent.executionId;
-    }
-    if (retryOf === null && consumedSelections.has(selected))
-      throw new ContractError(
-        validation.code,
-        validation.stage,
-        '/selected',
-        'selection_already_used',
-      );
-    if (retryOf !== null) {
-      const previous = session.state.execution;
-      if (
-        previous?.intent.executionId !== retryOf ||
-        (previous.reconciliation !== 'notPerformed' &&
-          this.#attempt?.selected !== selected) ||
-        previous.result === null ||
-        previous.result.outcome === 'unknown' ||
-        previous.result.outcome === 'succeeded' ||
-        previous.retries >= session.state.limits.actionRetries ||
-        call.retryMode !== previous.retryMode ||
-        previous.retryMode === 'never' ||
-        (call.retryMode === 'reconcile' &&
-          previous.reconciliation !== 'notPerformed')
-      ) {
-        throw new ContractError(
-          validation.code,
-          validation.stage,
-          '/retryOf',
-          'retry_not_allowed',
-        );
-      }
-      retries = previous.retries + 1;
-    }
     const release = session.claimExecution();
     let attempt: Attempt | null = null;
     try {
+      let retries = 0;
+      const prior = session.state.execution;
+      if (prior?.reconciliation === 'notPerformed') {
+        if (
+          prior.intent.actionId !== call.call.actionId ||
+          prior.intent.actionVersion !== call.call.actionVersion ||
+          canonicalJson(prior.intent.params) !== canonicalJson(call.call.params)
+        ) {
+          await this.block('retry_call_changed');
+          return { outcome: 'notExecuted', reasonCode: 'retry_call_changed' };
+        }
+        retryOf ??= prior.intent.executionId;
+      }
+      if (retryOf === null && consumedSelections.has(selected))
+        throw new ContractError(
+          validation.code,
+          validation.stage,
+          '/selected',
+          'selection_already_used',
+        );
+      if (retryOf !== null) {
+        const previous = session.state.execution;
+        if (
+          previous?.intent.executionId !== retryOf ||
+          (previous.reconciliation !== 'notPerformed' &&
+            this.#attempt?.selected !== selected) ||
+          previous.result === null ||
+          previous.result.outcome === 'unknown' ||
+          previous.result.outcome === 'succeeded' ||
+          previous.retries >= session.state.limits.actionRetries ||
+          call.retryMode !== previous.retryMode ||
+          previous.retryMode === 'never' ||
+          (call.retryMode === 'reconcile' &&
+            previous.reconciliation !== 'notPerformed')
+        ) {
+          throw new ContractError(
+            validation.code,
+            validation.stage,
+            '/retryOf',
+            'retry_not_allowed',
+          );
+        }
+        retries = previous.retries + 1;
+      }
       if (
         session.state.limits.maxActionAttempts !== null &&
         session.state.actionAttempts >= session.state.limits.maxActionAttempts
@@ -162,7 +208,7 @@ export class ActionCoordinator {
       const observationFailure = await this.refreshObservation(epoch);
       if (observationFailure !== null)
         return { outcome: 'notExecuted', reasonCode: observationFailure };
-      const recheck = await recheckCandidate(
+      const recheck = await recheckCandidateWithInvocation(
         selected,
         session.state.decision,
         this.registry,
@@ -172,6 +218,19 @@ export class ActionCoordinator {
             Date.now() + session.state.limits.callbackTimeoutMs,
           ).toISOString(),
         },
+        (input, control, check) =>
+          captureCallback(
+            session,
+            {
+              stage: 'rechecking',
+              phase: 'execution',
+              decisionEpoch: epoch,
+              input,
+            },
+            control,
+            () => session.canDispatch(epoch),
+            check,
+          ),
       );
       if (
         recheck.outcome !== 'rechecked' ||
@@ -230,6 +289,7 @@ export class ActionCoordinator {
         intent,
         release,
         dispatched: false,
+        responseReceived: false,
         result: null,
         stopCause: null,
         progress: {},
@@ -251,6 +311,9 @@ export class ActionCoordinator {
             result: null,
             retries,
             reconciliation: null,
+            progress: {},
+            stopCause: null,
+            continuation: null,
           }),
         },
         [
@@ -299,19 +362,223 @@ export class ActionCoordinator {
           }),
         ],
       );
-      const result = await this.runAction(attempt, call, dispatchCommit);
-      if (result.outcome !== 'unknown' && session.canDispatch(epoch))
-        await this.refreshObservation(epoch);
-      return { outcome: 'recorded', result };
+      const completion = this.runAction(attempt, call, dispatchCommit);
+      // The caller may attach its completion continuation after dispatch settles.
+      void completion.catch(() => undefined);
+      return {
+        outcome: 'started',
+        executionId: intent.executionId,
+        completion,
+      };
     } finally {
-      if (
-        attempt === null ||
-        !attempt.dispatched ||
-        (attempt.result !== null && attempt.result.outcome !== 'unknown')
-      )
+      if (attempt === null || !attempt.dispatched) {
         release();
-      if (session.failure === null)
-        await this.settleStop(attempt?.result ?? null);
+        if (session.failure === null)
+          await this.settleStop(attempt?.result ?? null);
+      }
+    }
+  }
+
+  /**
+   * Retain only a live call whose original goal path and hard constraints survive.
+   * The proposed graph may focus another goal; plan references and guidance can
+   * change without changing the fixed parameters or original execution ownership.
+   */
+  continuationInvalidationReason(
+    executionId: string,
+    input: CandidateGenerationInput,
+  ): string | null {
+    const attempt = this.#attempt;
+    const execution = this.session.state.execution;
+    if (!this.session.canDispatch(input.decisionEpoch))
+      return 'run_or_decision_inactive';
+    if (
+      attempt === null ||
+      attempt.intent.executionId !== executionId ||
+      attempt.selected === null ||
+      !attempt.dispatched ||
+      attempt.responseReceived ||
+      attempt.reconciled ||
+      attempt.result !== null ||
+      attempt.stopCause !== null ||
+      !this.session.hasExecution ||
+      execution?.intent.executionId !== executionId ||
+      execution.phase !== 'running' ||
+      execution.result !== null ||
+      execution.stopCause !== null
+    )
+      return 'execution_changed';
+    const original = attempt.selected.filtered.checked.prepared.request;
+    const capability = this.registry.capabilities.find(
+      (entry) => entry.id === attempt.intent.actionId,
+    );
+    if (capability === undefined) return 'action_unavailable';
+    if (capability.version !== attempt.intent.actionVersion)
+      return 'action_version_changed';
+    if (
+      capability !==
+      original.capabilities.find((entry) => entry.id === capability.id)
+    )
+      return 'action_registration_changed';
+    const previous = attempt.basis.context;
+    const current = input.context;
+    if (current.graph.runId !== previous.graph.runId) return 'run_changed';
+    if (
+      current.graph.rootGoalRef.id !== previous.graph.rootGoalRef.id ||
+      current.graph.rootGoalRef.version !== previous.graph.rootGoalRef.version
+    )
+      return 'root_goal_changed';
+    const currentGoals = new Map(
+      current.graph.goals.map((goal) => [goal.id, goal]),
+    );
+    const previousGoals = new Map(
+      previous.graph.goals.map((goal) => [goal.id, goal]),
+    );
+    for (const ref of previous.graph.goalPath) {
+      const goal = currentGoals.get(ref.id);
+      const prior = previousGoals.get(ref.id)!;
+      if (goal === undefined || goal.version !== ref.version)
+        return 'goal_path_changed';
+      if (goal.lifecycle !== 'pending' && goal.lifecycle !== 'inProgress')
+        return 'inactive_goal_path';
+      // Plan adoption may update acceptedPlanRef while preserving the goal itself.
+      if (
+        goal.kind !== prior.kind ||
+        goal.description !== prior.description ||
+        canonicalJson(goal.criteria) !== canonicalJson(prior.criteria) ||
+        JSON.stringify(goal.parentGoalRef) !==
+          JSON.stringify(prior.parentGoalRef) ||
+        (goal.kind === 'root' &&
+          prior.kind === 'root' &&
+          canonicalJson([
+            goal.hardConstraints,
+            goal.limits,
+            goal.preferences,
+          ]) !==
+            canonicalJson([
+              prior.hardConstraints,
+              prior.limits,
+              prior.preferences,
+            ]))
+      )
+        return 'goal_definition_changed';
+    }
+    if (current.planRef === null) return 'plan_unavailable';
+    if (
+      current.constraintsVersion !== previous.constraintsVersion ||
+      canonicalJson(current.effectiveConstraints) !==
+        canonicalJson(previous.effectiveConstraints) ||
+      canonicalJson(current.applicationContext ?? {}) !==
+        canonicalJson(previous.applicationContext ?? {})
+    )
+      return 'constraints_changed';
+    if (current.observation.revision < previous.observation.revision)
+      return 'observation_regressed';
+    if (
+      current.observation.revision === previous.observation.revision &&
+      canonicalJson(parseJsonValue(current.observation, validation.stage)) !==
+        canonicalJson(parseJsonValue(previous.observation, validation.stage))
+    )
+      return 'observation_conflict';
+    return null;
+  }
+
+  /**
+   * Check the original fixed call against a proposed context focused on its goal.
+   * Use the current review epoch before adoption. Cancellation bounds acceptance;
+   * late callback receipts remain recorded. Success grants no continuation authority:
+   * the caller must check live state again and commit authorization with the plan.
+   * Invalid arguments and storage failures reject; callback failures return failed.
+   */
+  async checkContinuation(
+    executionId: string,
+    input: CandidateGenerationInput,
+    controlInput: CallControl,
+  ): Promise<
+    | ActionCheck
+    | { readonly outcome: 'stale' | 'failed'; readonly reason: string }
+  > {
+    const session = this.session;
+    if (session.failure !== null) throw session.failure;
+    const request = captureDecisionRequest(input);
+    const supplied = captureControl(controlInput);
+    const control = captureControl({
+      ...supplied,
+      signal: AbortSignal.any([
+        supplied.signal,
+        session.signal,
+        session.ownershipSignal,
+      ]),
+      deadlineAt: new Date(
+        Math.min(
+          supplied.deadlineMs,
+          Date.now() + session.state.limits.callbackTimeoutMs,
+        ),
+      ).toISOString(),
+    });
+    const reason = this.continuationInvalidationReason(executionId, request);
+    if (reason !== null) return { outcome: 'stale', reason };
+    const attempt = this.#attempt!;
+    if (
+      request.context.graph.currentGoalRef.id !==
+        attempt.intent.currentGoalRef.id ||
+      request.context.graph.currentGoalRef.version !==
+        attempt.intent.currentGoalRef.version ||
+      JSON.stringify(request.context.graph.goalPath) !==
+        JSON.stringify(attempt.basis.context.graph.goalPath)
+    )
+      return { outcome: 'stale', reason: 'current_goal_changed' };
+    const selected = attempt.selected!;
+    const call = getSelectedCall(selected);
+    const current = () =>
+      this.#attempt === attempt &&
+      this.continuationInvalidationReason(executionId, request) === null;
+    let answer: InvocationResult<JsonValue>;
+    try {
+      answer = await captureCallback(
+        session,
+        {
+          stage: 'rechecking',
+          phase: 'continuation',
+          decisionEpoch: request.decisionEpoch,
+          input: {
+            executionId,
+            intent: attempt.intent,
+            candidate: selected.candidate,
+            call: call.call,
+            basis: request,
+          },
+        },
+        control,
+        current,
+        (callbackControl) => call.check(request.context, callbackControl),
+      );
+    } catch (error) {
+      if (session.failure !== null) throw error;
+      return { outcome: 'failed', reason: 'invalid_result' };
+    }
+    const stale = this.continuationInvalidationReason(executionId, request);
+    if (this.#attempt !== attempt || stale !== null)
+      return { outcome: 'stale', reason: stale ?? 'execution_changed' };
+    if (answer.outcome !== 'returned')
+      return {
+        outcome: 'failed',
+        reason:
+          answer.outcome === 'failed'
+            ? 'callback_failed'
+            : answer.outcome === 'deadlineExceeded'
+              ? 'deadline_exceeded'
+              : 'cancelled',
+      };
+    if (control.signal.aborted || Date.now() >= control.deadlineMs)
+      return {
+        outcome: 'failed',
+        reason: control.signal.aborted ? 'cancelled' : 'deadline_exceeded',
+      };
+    try {
+      return parseActionCheck(answer.value);
+    } catch {
+      return { outcome: 'failed', reason: 'invalid_result' };
     }
   }
 
@@ -360,7 +627,10 @@ export class ActionCoordinator {
     const supplied = captureControl(controlInput);
     this.#reconciling = true;
     try {
-      const answer = await invokeControlled(
+      const answer = await this.invokeActionCallback(
+        attempt,
+        'action_reconciliation',
+        { intent: parseJsonValue(attempt.intent, validation.stage) },
         captureControl({
           signal: AbortSignal.any([
             supplied.signal,
@@ -373,6 +643,7 @@ export class ActionCoordinator {
             ),
           ).toISOString(),
         }),
+        () => attempt.result === previous && !attempt.reconciled,
         (control) => this.registry.reconcile(attempt.intent, control),
       );
       if (attempt.result !== previous)
@@ -381,39 +652,14 @@ export class ActionCoordinator {
       try {
         if (answer.outcome !== 'returned')
           reconciliation = { outcome: 'unknown', reason: answer.outcome };
+        else if (answer.value.outcome === 'failed')
+          reconciliation = { outcome: 'unknown', reason: 'failed' };
         else {
-          const value = requireObject(
-            parseJsonValue(answer.value, validation.stage),
-            validation,
-            '/reconciliation',
+          if (answer.value.outcome === 'invalid') throw answer.value.error;
+          reconciliation = this.captureReconciliation(
+            attempt,
+            answer.value.value,
           );
-          if (value.outcome === 'unknown')
-            reconciliation = {
-              outcome: 'unknown',
-              reason: requireString(value.reason, validation, '/reason'),
-            };
-          else if (
-            value.outcome === 'notPerformed' &&
-            value.underlyingSettled === true
-          )
-            reconciliation = {
-              outcome: 'notPerformed',
-              underlyingSettled: true,
-              reason: requireString(value.reason, validation, '/reason'),
-            };
-          else if (
-            value.outcome === 'performed' &&
-            value.underlyingSettled === true
-          ) {
-            const result = this.captureResult(attempt, value.result);
-            if (result.outcome === 'unknown')
-              throw new Error('Unconfirmed reconciliation');
-            reconciliation = {
-              outcome: 'performed',
-              underlyingSettled: true,
-              result,
-            };
-          } else throw new Error('Invalid reconciliation');
         }
       } catch {
         reconciliation = {
@@ -461,21 +707,23 @@ export class ActionCoordinator {
     const session = this.session;
     const context = session.state.decision.context;
     const startedAt = Date.now();
-    const result = await invokeControlled(
-      captureControl({
-        signal: session.signal,
-        deadlineAt: new Date(
-          Date.now() + session.state.limits.callbackTimeoutMs,
-        ).toISOString(),
-      }),
-      (control) => this.environment.observe(context, control),
-    );
-    if (!session.canDispatch(epoch)) return 'run_or_decision_inactive';
-    if (result.outcome !== 'returned') {
-      await this.block(`observation_${result.outcome}`);
-      return `observation_${result.outcome}`;
-    }
     try {
+      const result = await captureObservation(
+        session,
+        this.environment.observe,
+        context,
+        {
+          signal: session.signal,
+          deadlineAt: new Date(
+            Date.now() + session.state.limits.callbackTimeoutMs,
+          ).toISOString(),
+        },
+      );
+      if (!session.canDispatch(epoch)) return 'run_or_decision_inactive';
+      if (result.outcome !== 'returned') {
+        await this.block(`observation_${result.outcome}`);
+        return `observation_${result.outcome}`;
+      }
       const observation = parseObservation(result.value);
       const latest = session.state.decision.context.observation;
       if (
@@ -528,6 +776,10 @@ export class ActionCoordinator {
       let finished = false;
       let observed: ActionResult | undefined;
       let grace: ReturnType<typeof setTimeout> | undefined;
+      const current = () =>
+        this.#attempt === attempt &&
+        !attempt.reconciled &&
+        (attempt.result === null || attempt.result.outcome === 'unknown');
       // Storage failure closes dispatch immediately; cleanup still observes the action.
       void dispatchCommit.catch(reject);
       const cleanup = () => {
@@ -581,12 +833,26 @@ export class ActionCoordinator {
         });
         if (session.failure === null)
           void session
-            .commit(session.state, [
-              session.event('action_stop_requested', cause.reasonCode, {
-                executionId: attempt.intent.executionId,
-                stopCauseEventId: cause.eventId,
-              }),
-            ])
+            .commit(
+              {
+                ...session.state,
+                execution:
+                  session.state.execution?.intent.executionId ===
+                  attempt.intent.executionId
+                    ? {
+                        ...session.state.execution,
+                        stopCause: attempt.stopCause,
+                      }
+                    : session.state.execution,
+                scheduling: requestReview(session.state.scheduling),
+              },
+              [
+                session.event('action_stop_requested', cause.reasonCode, {
+                  executionId: attempt.intent.executionId,
+                  stopCauseEventId: cause.eventId,
+                }),
+              ],
+            )
             .catch(() => undefined);
         controller.abort();
         grace = setTimeout(() => {
@@ -626,24 +892,51 @@ export class ActionCoordinator {
           signal: controller.signal,
           deadlineAt,
           reportProgress: (progress) => {
-            if (finished || controller.signal.aborted) return;
-            try {
-              attempt.progress = requireObject(
-                parseJsonValue(progress, validation.stage),
-                validation,
-                '/progress',
-              );
-            } catch {
-              stopWithReason('invalid_action_progress');
-              return;
-            }
-            void session
-              .commit(session.state, [
-                session.event('action_progress', 'progress_reported', {
-                  executionId: attempt.intent.executionId,
-                  progress: attempt.progress,
-                }),
-              ])
+            const receipt = this.captureActionReceipt(
+              attempt,
+              'action_progress',
+              attempt.intent.executionId,
+              { signal: controller.signal, deadlineAt },
+              () => current() && !finished && !controller.signal.aborted,
+              { outcome: 'returned', value: progress },
+            );
+            void receipt.committed
+              .then(async () => {
+                if (finished || controller.signal.aborted || attempt.reconciled)
+                  return;
+                try {
+                  if (receipt.response.outcome !== 'returned')
+                    throw receipt.response.error;
+                  attempt.progress = requireObject(
+                    receipt.response.value,
+                    validation,
+                    '/progress',
+                  );
+                } catch {
+                  stopWithReason('invalid_action_progress');
+                  return;
+                }
+                await session.commit(
+                  {
+                    ...session.state,
+                    execution:
+                      session.state.execution?.intent.executionId ===
+                      attempt.intent.executionId
+                        ? {
+                            ...session.state.execution,
+                            progress: attempt.progress,
+                          }
+                        : session.state.execution,
+                    scheduling: requestReview(session.state.scheduling),
+                  },
+                  [
+                    session.event('action_progress', 'progress_reported', {
+                      executionId: attempt.intent.executionId,
+                      progress: attempt.progress,
+                    }),
+                  ],
+                );
+              })
               .catch(() => undefined);
           },
         });
@@ -655,32 +948,80 @@ export class ActionCoordinator {
       void Promise.resolve(returned)
         .then(
           async (raw) => {
+            attempt.responseReceived = true;
+            const receipt = this.captureActionReceipt(
+              attempt,
+              'action_execution',
+              attempt.intent.executionId,
+              { signal: controller.signal, deadlineAt },
+              current,
+              { outcome: 'returned', value: raw },
+            );
+            try {
+              await receipt.committed;
+            } catch (error) {
+              finished = true;
+              cleanup();
+              if (call.verifyResult === undefined)
+                this.releaseConfirmedReceipt(
+                  attempt,
+                  'action_execution',
+                  receipt.response,
+                );
+              throw error;
+            }
             if (attempt.reconciled) return;
             let result: ActionResult;
             try {
-              result = this.captureResult(attempt, raw);
+              if (receipt.response.outcome !== 'returned')
+                throw receipt.response.error;
+              result = this.captureResult(attempt, receipt.response.value);
               observed = result;
               if (call.verifyResult !== undefined) {
-                const verified = await invokeControlled(
+                const verificationInput = result;
+                const verified = await this.invokeActionCallback(
+                  attempt,
+                  'action_verification',
+                  {
+                    intent: parseJsonValue(attempt.intent, validation.stage),
+                    result: parseJsonValue(verificationInput, validation.stage),
+                  },
                   captureControl({
-                    signal: new AbortController().signal,
+                    signal: session.ownershipSignal,
                     deadlineAt: new Date(
                       Date.now() + session.state.limits.verificationTimeoutMs,
                     ).toISOString(),
                   }),
+                  current,
                   (control) =>
-                    call.verifyResult!(attempt.intent, result, control),
+                    call.verifyResult!(
+                      attempt.intent,
+                      verificationInput,
+                      control,
+                    ),
                 );
+                if (attempt.reconciled) return;
+                if (
+                  verified.outcome === 'returned' &&
+                  verified.value.outcome === 'invalid'
+                )
+                  throw verified.value.error;
                 result =
-                  verified.outcome === 'returned'
-                    ? this.captureResult(attempt, verified.value)
+                  verified.outcome === 'returned' &&
+                  verified.value.outcome === 'returned'
+                    ? this.captureResult(attempt, verified.value.value)
                     : this.unknownResult(
                         attempt,
                         'result_verification_failed',
                         result,
                       );
               }
-            } catch {
+            } catch (error) {
+              if (session.failure !== null) {
+                finished = true;
+                cleanup();
+                throw error;
+              }
               result = this.unknownResult(
                 attempt,
                 'invalid_action_result',
@@ -690,13 +1031,196 @@ export class ActionCoordinator {
             if (result.outcome === 'unknown') controller.abort();
             await accept(result);
           },
-          async () => {
+          async (error: unknown) => {
+            attempt.responseReceived = true;
+            const receipt = this.captureActionReceipt(
+              attempt,
+              'action_execution',
+              attempt.intent.executionId,
+              { signal: controller.signal, deadlineAt },
+              current,
+              { outcome: 'failed', error },
+            );
+            try {
+              await receipt.committed;
+            } catch (failure) {
+              finished = true;
+              cleanup();
+              throw failure;
+            }
+            if (attempt.reconciled) return;
             controller.abort();
             await accept(this.unknownResult(attempt, 'execution_failed'));
           },
         )
         .catch(reject);
+    }).finally(async () => {
+      if (attempt.result !== null && attempt.result.outcome !== 'unknown')
+        attempt.release();
+      if (session.failure === null) await this.settleStop(attempt.result);
     });
+  }
+
+  private async invokeActionCallback(
+    attempt: Attempt,
+    phase: 'action_verification' | 'action_reconciliation',
+    input: JsonObject,
+    controlInput: CallControl,
+    current: () => boolean,
+    invoke: (control: CallControl) => Promise<unknown>,
+  ): Promise<InvocationResult<CapturedCallbackResponse>> {
+    const session = this.session;
+    const control = captureControl(controlInput);
+    const requestId = randomUUID();
+    const startedAt = Date.now();
+    const request = {
+      requestId,
+      executionId: attempt.intent.executionId,
+      decisionId: attempt.intent.decisionId,
+    };
+    await session.commit(session.state, [
+      session.event('callback_started', phase, {
+        ...request,
+        input: parseJsonValue(input, validation.stage),
+      }),
+    ]);
+    const result: InvocationResult<CapturedCallbackResponse> =
+      session.failure !== null || session.ownershipSignal.aborted || !current()
+        ? { outcome: 'cancelled' }
+        : await invokeControlled(control, async (callbackControl) => {
+            let received:
+              | { outcome: 'returned'; value: unknown }
+              | { outcome: 'failed'; error: unknown };
+            try {
+              received = {
+                outcome: 'returned',
+                value: await invoke(callbackControl),
+              };
+            } catch (error) {
+              received = { outcome: 'failed', error };
+            }
+            const receipt = this.captureActionReceipt(
+              attempt,
+              phase,
+              requestId,
+              callbackControl,
+              current,
+              received,
+            );
+            try {
+              await receipt.committed;
+            } catch (error) {
+              this.releaseConfirmedReceipt(attempt, phase, receipt.response);
+              throw error;
+            }
+            return receipt.response;
+          });
+    try {
+      await session.commit(session.state, [
+        session.event('callback_finished', phase, {
+          ...request,
+          outcome:
+            result.outcome === 'returned'
+              ? result.value.outcome
+              : result.outcome,
+          currentAtReceipt: current(),
+          durationMs: Math.max(0, Date.now() - startedAt),
+        }),
+      ]);
+    } catch (error) {
+      if (result.outcome === 'returned')
+        this.releaseConfirmedReceipt(attempt, phase, result.value);
+      throw error;
+    }
+    return result;
+  }
+
+  private captureActionReceipt(
+    attempt: Attempt,
+    phase:
+      | 'action_execution'
+      | 'action_verification'
+      | 'action_reconciliation'
+      | 'action_progress',
+    requestId: string,
+    control: CallControl,
+    current: () => boolean,
+    received:
+      | { readonly outcome: 'returned'; readonly value: unknown }
+      | { readonly outcome: 'failed'; readonly error: unknown },
+  ): {
+    readonly response: CapturedCallbackResponse;
+    readonly committed: Promise<void>;
+  } {
+    const session = this.session;
+    const receivedAt = Date.now();
+    const { response, details } = captureCallbackResponse(
+      received,
+      validation.stage,
+    );
+    const receipt = session.event('callback_received', phase, {
+      requestId,
+      executionId: attempt.intent.executionId,
+      decisionId: attempt.intent.decisionId,
+      receivedAt: new Date(receivedAt).toISOString(),
+      currentAtReceipt: current(),
+      cancelledAtReceipt: control.signal.aborted,
+      deadlineExceededAtReceipt: receivedAt >= Date.parse(control.deadlineAt),
+      ...details,
+    });
+    const committed = (async () => {
+      try {
+        await session.commit(session.state, [receipt]);
+      } catch (error) {
+        session.report('receipt_failed', receipt.eventId);
+        throw error;
+      }
+    })();
+    return { response, committed };
+  }
+
+  private releaseConfirmedReceipt(
+    attempt: Attempt,
+    phase: 'action_execution' | 'action_verification' | 'action_reconciliation',
+    response: CapturedCallbackResponse,
+  ): void {
+    if (attempt.reconciled || response.outcome !== 'returned') return;
+    // Failed storage cannot accept new state, but a confirmed late boundary
+    // still releases the lease held for the external effect.
+    try {
+      const boundary =
+        phase === 'action_reconciliation'
+          ? this.captureReconciliation(attempt, response.value)
+          : this.captureResult(attempt, response.value);
+      if (boundary.outcome !== 'unknown') attempt.release();
+    } catch {
+      // An invalid result cannot confirm that the effect has settled.
+    }
+  }
+
+  private captureReconciliation(
+    attempt: Attempt,
+    raw: JsonValue,
+  ): Reconciliation {
+    const value = requireObject(raw, validation, '/reconciliation');
+    if (value.outcome === 'unknown')
+      return {
+        outcome: 'unknown',
+        reason: requireString(value.reason, validation, '/reason'),
+      };
+    if (value.outcome === 'notPerformed' && value.underlyingSettled === true)
+      return {
+        outcome: 'notPerformed',
+        underlyingSettled: true,
+        reason: requireString(value.reason, validation, '/reason'),
+      };
+    if (value.outcome === 'performed' && value.underlyingSettled === true) {
+      const result = this.captureResult(attempt, value.result);
+      if (result.outcome === 'unknown')
+        throw new Error('Unconfirmed reconciliation');
+      return { outcome: 'performed', underlyingSettled: true, result };
+    }
+    throw new Error('Invalid reconciliation');
   }
 
   private captureResult(attempt: Attempt, value: unknown): ActionResult {
@@ -750,6 +1274,7 @@ export class ActionCoordinator {
       {
         ...session.state,
         actionAttempts: session.state.actionAttempts - (unsent ? 1 : 0),
+        scheduling: requestReview(session.state.scheduling),
         // Persist the attempt before observation or verification can pause the run.
         progressAttempt:
           matches &&
@@ -777,6 +1302,8 @@ export class ActionCoordinator {
               ...current,
               phase: result.outcome,
               result,
+              progress: result.progress,
+              stopCause: attempt.stopCause,
               // A confirmed unsent reservation refunds this retry, not the
               // ancestry of the original uncertain execution.
               retries:

@@ -177,7 +177,24 @@ test.each(['selected', 'abstain'] as const)(
       typeof body.input[0].content !== 'string'
     )
       throw new Error('Expected Responses input data');
-    expect(JSON.parse(body.input[0].content)).toEqual({ request });
+    expect(JSON.parse(body.input[0].content)).toMatchObject({
+      context: {
+        rootGoal: { id: request.context.graph.rootGoalRef.id },
+        goalPath: request.context.graph.goalPath,
+        constraints: request.context.effectiveConstraints,
+        applicationContext: request.context.applicationContext,
+        snapshot: {
+          data: request.context.observation.data,
+          coverage: request.context.observation.coverage,
+        },
+      },
+      coverage: request.candidates.coverage,
+      candidates: request.candidates.candidates.map((candidate) => ({
+        id: candidate.id,
+        params: candidate.params,
+        paramSources: candidate.paramSources,
+      })),
+    });
     expect(request.context.graph.goalPath).toHaveLength(3);
     expect(body.instructions).not.toContain(
       request.context.applicationContext!.note,
