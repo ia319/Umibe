@@ -6,7 +6,7 @@ import {
   type SelectionAdvanceResult,
   type SelectionCursor,
 } from '#internal/selector/cursor';
-import { ModelRequestError } from './model.js';
+import { ModelRequestError, modelRetryDelayMs } from './model.js';
 
 interface ReadySelection {
   readonly selectionId: string;
@@ -132,18 +132,19 @@ export class SelectionLifecycle {
     if (
       state.kind !== 'comparing' ||
       state.cursor !== cursor ||
-      !(error instanceof ModelRequestError) ||
-      !['rate_limited', 'unavailable', 'deadline_exceeded'].includes(
-        error.code,
-      ) ||
-      state.attempt > maxRetries
+      !(error instanceof ModelRequestError)
     )
       return false;
+    const delayMs = modelRetryDelayMs(
+      error.code,
+      state.attempt,
+      maxRetries,
+      error.retryAfterMs,
+    );
+    if (delayMs === null) return false;
     this.#state = {
       ...state,
-      retryAt:
-        Date.now() +
-        Math.max(250 * 2 ** (state.attempt - 1), error.retryAfterMs),
+      retryAt: Date.now() + delayMs,
       attempt: state.attempt + 1,
     };
     return true;

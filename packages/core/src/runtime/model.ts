@@ -87,6 +87,27 @@ export class ModelRequestError extends Error {
   }
 }
 
+/**
+ * Return the minimum wait in milliseconds, or null when retry is not allowed.
+ * attempt is the one-based failed attempt; maxRetries excludes the initial call.
+ * retryAfterMs may include a delay already computed for the same attempt.
+ */
+export function modelRetryDelayMs(
+  code: ModelFailureCode,
+  attempt: number,
+  maxRetries: number,
+  retryAfterMs: number,
+): number | null {
+  if (
+    (code !== 'rate_limited' &&
+      code !== 'unavailable' &&
+      code !== 'deadline_exceeded') ||
+    attempt > maxRetries
+  )
+    return null;
+  return Math.max(250 * 2 ** (attempt - 1), retryAfterMs);
+}
+
 export interface ModelRequestBasis {
   readonly requestId: string;
   readonly decisionEpoch: number;
@@ -375,22 +396,22 @@ export async function invokeModel<T>(
       return { outcome: 'returned', value: result.value.value, usage };
     if (result.outcome === 'cancelled') return { outcome: 'cancelled' };
     const reasonCode = failure ?? 'request_failed';
-    const retryable =
-      reasonCode === 'rate_limited' ||
-      reasonCode === 'unavailable' ||
-      reasonCode === 'deadline_exceeded';
-    if (!retryable || attempt > limits.modelRetries)
+    const retryAfterMs =
+      result.outcome === 'failed' && result.error instanceof ModelRequestError
+        ? result.error.retryAfterMs
+        : 0;
+    const delayMs = modelRetryDelayMs(
+      reasonCode,
+      attempt,
+      limits.modelRetries,
+      retryAfterMs,
+    );
+    if (delayMs === null)
       return {
         outcome: 'failed',
         reasonCode,
         ...(issue === null ? {} : { issue }),
       };
-
-    const retryAfterMs =
-      result.outcome === 'failed' && result.error instanceof ModelRequestError
-        ? result.error.retryAfterMs
-        : 0;
-    const delayMs = Math.max(250 * 2 ** (attempt - 1), retryAfterMs);
     await session.commit(session.state, [
       session.event('model_retry_scheduled', reasonCode, {
         ...details,
