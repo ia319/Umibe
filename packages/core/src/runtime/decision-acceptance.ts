@@ -16,6 +16,8 @@ import type { GoalState } from './goals.js';
 import type { SelectionLifecycle } from './selection-lifecycle.js';
 import type { PendingPlanAdoption, RunSession } from './session.js';
 import { requestReview } from './scheduling.js';
+import { describeDecisionOption } from '#internal/decision/validation';
+import type { ChoiceHistoryEntry } from '#internal/contracts/choice-history';
 
 export interface PreparedPlan {
   readonly graph: GoalGraphSnapshot;
@@ -217,6 +219,15 @@ export async function acceptDecision(
           acceptedAt: new Date().toISOString(),
         }
       : null;
+  const choices: ChoiceHistoryEntry[] = [
+    {
+      kind: 'decision',
+      recordedAt: new Date().toISOString(),
+      goalRef: request.basis.currentGoalRef,
+      choice: describeDecisionOption(option),
+      selectionId: selected?.selectionId ?? null,
+    },
+  ];
   await session.commit(
     {
       ...state,
@@ -268,6 +279,7 @@ export async function acceptDecision(
           ]
         : []),
     ],
+    choices,
   );
   return {
     outcome: 'accepted',

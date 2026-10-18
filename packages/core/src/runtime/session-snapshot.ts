@@ -29,6 +29,7 @@ export function captureSessionSnapshot(state: SessionState): SessionSnapshot {
       context: Object.freeze({
         ...state.decision.context,
         runtime: Object.freeze({
+          recentChoices: state.recentChoices,
           execution:
             state.execution === null
               ? null

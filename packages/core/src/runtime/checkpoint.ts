@@ -15,8 +15,9 @@ import {
 import type { RunCheckpoint } from '#internal/contracts/record';
 import type { SessionState } from './session.js';
 import { captureLimits } from './limits.js';
+import { readChoiceHistory } from '#internal/validation/choice-history';
 
-export const runtimeStateSchemaVersion = 5;
+export const runtimeStateSchemaVersion = 6;
 const context = {
   code: 'INVALID_RUN_CHECKPOINT',
   stage: 'runtime_checkpoint',
@@ -325,6 +326,9 @@ const schema = z.strictObject({
     })
     .nullable(),
   recentResults: z.array(result).max(50),
+  recentChoices: z
+    .unknown()
+    .transform((value) => readChoiceHistory(value, context, '/recentChoices')),
 });
 
 /** Validate persisted state without applying defaults, running adapters or granting execution. */
@@ -339,6 +343,13 @@ export function parseRuntimeState(input: unknown): SessionState {
       canonicalJson(parseJsonValue(a, context.stage)) ===
       canonicalJson(parseJsonValue(b, context.stage));
     const observations = state.observations;
+    if (
+      !same(state.recentChoices, state.decision.context.runtime?.recentChoices)
+    )
+      fail(
+        '/decision/context/runtime/recentChoices',
+        'choice_history_mismatch',
+      );
     if (!observations.initialized) {
       const observation = state.decision.context.observation;
       if (
@@ -353,6 +364,7 @@ export function parseRuntimeState(input: unknown): SessionState {
         state.pendingAdoption !== null ||
         state.scheduling.lastDecisionStartedAt !== null ||
         state.recentResults.length !== 0 ||
+        state.recentChoices.length !== 0 ||
         state.decision.context.lastActionResult !== null ||
         observations.lastReviewedEventSequence !== 0
       )

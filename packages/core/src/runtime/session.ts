@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { JsonObject } from '#internal/contracts/json';
+import type { ChoiceHistoryEntry } from '#internal/contracts/choice-history';
 import type { CandidateGenerationInput } from '#internal/contracts/candidate-processing';
 import type { DecisionBasis } from '#internal/contracts/decision';
 import type { RunCheckpoint, RunRecord } from '#internal/contracts/record';
@@ -53,6 +54,7 @@ export interface PendingPlanAdoption {
 }
 
 export interface SessionState {
+  readonly recentChoices: readonly ChoiceHistoryEntry[];
   readonly identity: RuntimeIdentity;
   readonly pendingModels: readonly PendingModelAttempt[];
   readonly control: RunControlState;
@@ -163,6 +165,7 @@ export class RunSession {
         'missing_application_id',
       );
     const state: SessionState = Object.freeze({
+      recentChoices: [],
       identity,
       pendingModels: [],
       control: createRunControl(decision.context.graph.rootGoalRef),
@@ -817,8 +820,14 @@ export class RunSession {
   commit(
     state: SessionState,
     records: readonly RunRecordDraft[],
+    choices: readonly ChoiceHistoryEntry[] = [],
   ): Promise<void> {
     this.ensureOpen();
+    if (choices.length > 0)
+      state = {
+        ...state,
+        recentChoices: [...this.#state.recentChoices, ...choices].slice(-20),
+      };
     // Only this session's captured state can reuse its detached persistence payload.
     const snapshot =
       this.#snapshot !== null && this.#snapshot.state === state

@@ -5,8 +5,11 @@ import type { Observation } from './observation.js';
 import type { ActionIntent, ActionResult } from './record.js';
 import type { GoalRef, PlanRef } from './references.js';
 import type { GoalProgress } from '#internal/runtime/progress';
+import type { ChoiceHistoryEntry } from './choice-history.js';
 
 export interface RuntimeContext {
+  /** Optional for direct callers; runtime snapshots always supply recent choices. */
+  readonly recentChoices?: readonly ChoiceHistoryEntry[];
   readonly execution: {
     readonly executionId: string;
     readonly phase: 'prepared' | 'running' | ActionResult['outcome'];
