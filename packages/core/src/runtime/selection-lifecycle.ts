@@ -8,6 +8,7 @@ import {
 } from '#internal/selector/cursor';
 import { ModelRequestError, modelRetryDelayMs } from './model.js';
 import type { ChoiceHistoryEntry } from '#internal/contracts/choice-history';
+import { describeHistoricalCandidate } from './choice-history.js';
 
 interface ReadySelection {
   readonly selectionId: string;
@@ -188,6 +189,30 @@ export class SelectionLifecycle {
 
   discard(): void {
     this.#state = { kind: 'idle' };
+  }
+
+  /** Capture the discarded comparison while its original goal and ready call are available. */
+  describeDiscard(
+    reasonCode: string,
+  ): Extract<ChoiceHistoryEntry, { kind: 'selectionDiscarded' }> | null {
+    const state = this.#state;
+    if (state.kind === 'idle') return null;
+    const selection = state.kind === 'ready' ? state.selection : state.cursor;
+    const context =
+      state.kind === 'ready'
+        ? state.selection.result.filtered.checked.prepared.request.context
+        : state.cursor.request.context;
+    return {
+      kind: 'selectionDiscarded',
+      recordedAt: new Date().toISOString(),
+      goalRef: context.graph.currentGoalRef,
+      selectionId: selection.selectionId,
+      operationId: selection.operationId,
+      reasonCode,
+      candidate: describeHistoricalCandidate(
+        state.kind === 'ready' ? state.selection.result.candidate : null,
+      ),
+    };
   }
 
   /** Completed choices retain their identity and receipt source until dispatch is permitted. */

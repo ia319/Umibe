@@ -1657,6 +1657,7 @@ export class RunDriver<TCriteria extends JsonValue> {
       },
     );
     if (accepted.outcome === 'rejected') return;
+    if (chosen.kind === 'selectOperation') this.#selection.discard();
     if (chosen.kind === 'adoptPlan') {
       this.#selection.discard();
       if (pending === null) throw new CallStopped();
@@ -1678,7 +1679,7 @@ export class RunDriver<TCriteria extends JsonValue> {
         const selection = this.#selection.snapshot();
         if (selection === null) throw new CallStopped();
         if (Date.now() >= Date.parse(selection.summary.deadlineAt)) {
-          this.#selection.discard();
+          await this.discardSelection('selection_deadlineExceeded');
           await this.block('selection_deadlineExceeded');
           return;
         }
@@ -1700,7 +1701,6 @@ export class RunDriver<TCriteria extends JsonValue> {
         await this.stopExecution(chosen.executionId, accepted.decisionEventId);
         return;
       case 'selectOperation':
-        this.#selection.discard();
         if (execution !== null)
           await this.stopExecution(
             execution.intent.executionId,
@@ -2195,6 +2195,21 @@ export class RunDriver<TCriteria extends JsonValue> {
     );
   }
 
+  private async discardSelection(reasonCode: string): Promise<void> {
+    const history = this.#selection.describeDiscard(reasonCode);
+    this.#selection.discard();
+    if (history === null || this.session.failure !== null) return;
+    await this.session.commit(
+      this.session.state,
+      [
+        this.session.event('selection_discarded', reasonCode, {
+          selectionId: history.selectionId,
+        }),
+      ],
+      [history],
+    );
+  }
+
   private async startExecution(selected: SelectedCandidate): Promise<void> {
     const session = this.session;
     if (this.#verifyPending) {
@@ -2242,7 +2257,7 @@ export class RunDriver<TCriteria extends JsonValue> {
         try {
           if (this.#refresh) {
             this.#refresh = false;
-            this.#selection.discard();
+            await this.discardSelection('basis_changed');
           }
           if (
             session.hasExecution &&
@@ -2288,7 +2303,7 @@ export class RunDriver<TCriteria extends JsonValue> {
             selection !== null &&
             Date.now() >= Date.parse(selection.deadlineAt)
           ) {
-            this.#selection.discard();
+            await this.discardSelection('selection_deadlineExceeded');
             await this.block('selection_deadlineExceeded');
             break;
           }
@@ -2332,8 +2347,10 @@ export class RunDriver<TCriteria extends JsonValue> {
         );
     } finally {
       this.clearReviewTimer();
-      this.#selection.discard();
       await Promise.allSettled([
+        this.discardSelection(
+          session.state.control.stopCause?.reasonCode ?? 'run_stopped',
+        ),
         ...this.#callbacks.keys(),
         this.#plannerTask,
         this.#executionTask,

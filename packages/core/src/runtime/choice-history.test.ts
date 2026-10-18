@@ -19,6 +19,7 @@ import { RunSession } from './session.js';
 import { parseRuntimeCheckpoint } from './checkpoint.js';
 import { ModelRequestError } from './model.js';
 import {
+  applicationEvent,
   fixtureDecisionPolicy,
   runnerFixture,
 } from './__tests__/runner-fixtures.js';
@@ -126,6 +127,9 @@ test.each(['single', 'resumable'] as const)(
       expect(
         history.filter((entry) => entry.kind === 'selectionResult'),
       ).toEqual([selected, selected]);
+      expect(history.some((entry) => entry.kind === 'selectionDiscarded')).toBe(
+        false,
+      );
       expect(h.execute).toHaveBeenCalledTimes(2);
     } finally {
       await agent.close();
@@ -294,6 +298,75 @@ test('does not report a rejected option as an accepted historical decision', asy
     expect(
       (await agent.inspect(run.runId))!.checkpoint.state.recentChoices,
     ).toEqual([]);
+    expect(h.execute).not.toHaveBeenCalled();
+  } finally {
+    await agent.close();
+  }
+});
+
+test('records one discard when pause follows acceptance of a replacement operation', async () => {
+  const h = runnerFixture(0, 1);
+  h.generate.mockImplementation((request) =>
+    Promise.resolve(
+      candidateSet(
+        request,
+        ['north', 'south', 'west'].map((target) => ({
+          id: target,
+          params: { target },
+        })),
+      ),
+    ),
+  );
+  const pauses: Promise<unknown>[] = [];
+  const agent = createAgent({
+    ...h.options,
+    decisionPolicy: {
+      decide(request, control) {
+        return request.input.selection === null
+          ? fixtureDecisionPolicy.decide(request, control)
+          : Promise.resolve({
+              optionId: request.options.find(
+                ({ decision }) => decision.kind === 'selectOperation',
+              )!.id,
+            });
+      },
+    },
+    selector: {
+      kind: 'resumable',
+      batchCapacity: 2,
+      async advance(request) {
+        await agent.emit(applicationEvent({ impact: 'observation' }));
+        return {
+          decisionId: request.requestId,
+          candidateSetId: request.candidates.id,
+          outcome: 'selected',
+          candidateId: request.candidates.candidates[0]!.id,
+        };
+      },
+    },
+  });
+  try {
+    const run = await agent.start(h.input);
+    agent.subscribe(run.runId, (record) => {
+      if (
+        record.kind === 'coreEvent' &&
+        record.data.type === 'selection_discarded'
+      )
+        pauses.push(agent.pause(run.runId, 'pause_after_reselection'));
+    });
+    await expect(run.result).resolves.toMatchObject({ status: 'paused' });
+    await Promise.all(pauses);
+    expect(pauses).toHaveLength(1);
+    const discarded = parseRuntimeCheckpoint(
+      (await agent.inspect(run.runId))!.checkpoint,
+    ).state.recentChoices.filter(
+      (entry) => entry.kind === 'selectionDiscarded',
+    );
+    expect(discarded).toHaveLength(1);
+    expect(discarded[0]).toMatchObject({
+      reasonCode: 'selectOperation',
+      candidate: null,
+    });
     expect(h.execute).not.toHaveBeenCalled();
   } finally {
     await agent.close();

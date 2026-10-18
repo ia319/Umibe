@@ -51,4 +51,12 @@ export type ChoiceHistoryEntry = ChoiceHistoryBasis &
         readonly candidate: HistoricalCandidate | null;
         readonly reasonCode: string | null;
       }
+    | {
+        readonly kind: 'selectionDiscarded';
+        readonly selectionId: string;
+        readonly operationId: string;
+        readonly reasonCode: string;
+        /** The ready recommendation lost by this discard, if comparison finished. */
+        readonly candidate: HistoricalCandidate | null;
+      }
   );

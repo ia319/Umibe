@@ -228,6 +228,10 @@ export async function acceptDecision(
       selectionId: selected?.selectionId ?? null,
     },
   ];
+  if (chosen.kind === 'adoptPlan' || chosen.kind === 'selectOperation') {
+    const discarded = selection.describeDiscard(chosen.kind);
+    if (discarded !== null) choices.push(discarded);
+  }
   await session.commit(
     {
       ...state,

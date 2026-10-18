@@ -76,6 +76,14 @@ const entry = z.discriminatedUnion('kind', [
     candidate: candidate.nullable(),
     reasonCode: text.nullable(),
   }),
+  z.strictObject({
+    ...basis,
+    kind: z.literal('selectionDiscarded'),
+    selectionId: text,
+    operationId: text,
+    reasonCode: text,
+    candidate: candidate.nullable(),
+  }),
 ]);
 
 /** Validate and detach persisted or caller-supplied history without granting authority. */
@@ -117,7 +125,8 @@ export function readChoiceHistory(
       if (
         (item.candidate !== null &&
           item.candidate.actionId !== item.operationId) ||
-        (item.outcome === 'selected') !== (item.candidate !== null)
+        (item.kind === 'selectionResult' &&
+          (item.outcome === 'selected') !== (item.candidate !== null))
       )
         throw new ContractError(
           context.code,
