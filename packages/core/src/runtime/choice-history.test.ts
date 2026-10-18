@@ -1,4 +1,5 @@
 import { expect, test, vi } from 'vitest';
+import type { ChoiceHistoryEntry } from '#internal/contracts/choice-history';
 import type {
   ChoiceRequest,
   StructuredOutputRequest,
@@ -8,6 +9,7 @@ import { createPlanner } from '#internal/planner/model';
 import { createSelector } from '#internal/selector/model';
 import { MemoryRunStore } from '#internal/storage/memory';
 import { generationInput } from '#internal/candidate/__tests__/fixtures';
+import { readChoiceHistory } from '#internal/validation/choice-history';
 import { createAgent } from './agent.js';
 import { RunSession } from './session.js';
 import { parseRuntimeCheckpoint } from './checkpoint.js';
@@ -16,8 +18,8 @@ import {
   runnerFixture,
 } from './__tests__/runner-fixtures.js';
 
-test('projects accepted control decisions to all model roles', async () => {
-  const h = runnerFixture(0, 1);
+test('projects accepted choices to all model roles with a single selector', async () => {
+  const h = runnerFixture(0, 2);
   const decisionMessages: ChoiceRequest[] = [];
   const selectionMessages: ChoiceRequest[] = [];
   const planningMessages: StructuredOutputRequest[] = [];
@@ -74,32 +76,50 @@ test('projects accepted control decisions to all model roles', async () => {
   try {
     const run = await agent.start(h.input);
     await expect(run.result).resolves.toMatchObject({ status: 'succeeded' });
+    const candidate: unknown = expect.objectContaining({
+      actionId: 'collect',
+      params: { target: 'north', count: 1 },
+    });
+    const selected: unknown = expect.objectContaining({
+      kind: 'selectionResult',
+      comparisonComplete: true,
+      operationId: 'collect',
+      outcome: 'selected',
+      candidate,
+    });
     expect(decisionMessages[0]!.instructions).toHaveProperty(
       'references.recentChoices',
       [],
     );
     expect(decisionMessages.at(-1)!.instructions).toHaveProperty(
-      'references.recentChoices.0.choice.kind',
-      'replan',
+      'references.recentChoices',
+      expect.arrayContaining([selected]),
     );
     expect(planningMessages[0]!.input).toHaveProperty(
       'context.recentChoices.0.choice.kind',
       'replan',
     );
+    expect(selectionMessages).toHaveLength(2);
+    expect(selectionMessages[0]!.instructions).toHaveProperty(
+      'references.context.recentChoices',
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'selectionStarted',
+          candidateCount: 1,
+        }),
+      ]),
+    );
+    expect(selectionMessages[1]!.instructions).toHaveProperty(
+      'references.context.recentChoices',
+      expect.arrayContaining([selected]),
+    );
     const history = parseRuntimeCheckpoint(
       (await agent.inspect(run.runId))!.checkpoint,
     ).state.recentChoices;
-    expect(history.map(({ choice }) => choice.kind)).toEqual([
-      'replan',
-      'adoptPlan',
-      'selectOperation',
-    ]);
-    expect(selectionMessages).toHaveLength(1);
-    expect(selectionMessages[0]!.instructions).toHaveProperty(
-      'references.context.recentChoices',
-      history,
+    expect(history.filter((entry) => entry.kind === 'selectionResult')).toEqual(
+      [selected, selected],
     );
-    expect(h.execute).toHaveBeenCalledTimes(1);
+    expect(h.execute).toHaveBeenCalledTimes(2);
   } finally {
     await agent.close();
   }
@@ -142,6 +162,46 @@ test('bounds history, restores it independently of live selection, and starts fr
   );
   expect(fresh.state.recentChoices).toEqual([]);
   await fresh.close();
+});
+
+test('rejects malformed choice evidence and detaches accepted parameter objects', () => {
+  const context = {
+    code: 'INVALID_RUN_CHECKPOINT',
+    stage: 'history_test',
+  } as const;
+  const entry = {
+    kind: 'selectionResult',
+    recordedAt: '2026-10-18T04:00:00.000Z',
+    goalRef: { id: 'goal', version: 1 },
+    selectionId: 'selection',
+    operationId: 'look',
+    round: 0,
+    batchIndex: 0,
+    comparisonComplete: true,
+    outcome: 'selected',
+    candidate: { id: 'candidate', actionId: 'look', params: { yaw: 0 } },
+    reasonCode: null,
+  } satisfies ChoiceHistoryEntry;
+  const captured = readChoiceHistory([entry], context, '/history');
+  entry.candidate.params.yaw = 1;
+  expect(captured[0]).toMatchObject({ candidate: { params: { yaw: 0 } } });
+  expect(() =>
+    readChoiceHistory([{ ...entry, candidate: null }], context, '/history'),
+  ).toThrow();
+  expect(() =>
+    readChoiceHistory(
+      [{ ...entry, candidate: { ...entry.candidate, actionId: 'dig' } }],
+      context,
+      '/history',
+    ),
+  ).toThrow();
+  expect(() =>
+    readChoiceHistory(
+      Array.from({ length: 21 }, () => entry),
+      context,
+      '/history',
+    ),
+  ).toThrow();
 });
 
 test('does not report a rejected option as an accepted historical decision', async () => {

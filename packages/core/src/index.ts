@@ -82,7 +82,10 @@ export type {
   DecisionContext,
   RuntimeContext,
 } from '#internal/contracts/context';
-export type { ChoiceHistoryEntry } from '#internal/contracts/choice-history';
+export type {
+  ChoiceHistoryEntry,
+  HistoricalCandidate,
+} from '#internal/contracts/choice-history';
 export type {
   ControlDecision,
   DecisionBasis,

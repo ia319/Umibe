@@ -24,7 +24,9 @@ import type {
   CandidateSelectionResult,
   CandidateGenerationInput,
   SelectedCandidate,
+  FilteredCandidates,
 } from '#internal/contracts/candidate-processing';
+import type { ChoiceHistoryEntry } from '#internal/contracts/choice-history';
 import type { OperationSet } from '#internal/contracts/operation';
 import type { JsonValue } from '#internal/contracts/json';
 import type {
@@ -72,6 +74,7 @@ import { captureCallback } from './callback-receipt.js';
 import { invokeRole } from './role-callback.js';
 import type { RoleStage } from './role-callback.js';
 import { SelectionLifecycle } from './selection-lifecycle.js';
+import { describeSelectionResult } from './choice-history.js';
 import type { SelectionBatch } from './selection-lifecycle.js';
 import type { PendingPlanAdoption, RunSession } from './session.js';
 import {
@@ -1992,6 +1995,11 @@ export class RunDriver<TCriteria extends JsonValue> {
       return;
     }
     const selectionControl = this.control('selection');
+    await this.recordSelectionStart(
+      input.requestId,
+      operationId,
+      filtered.filtered,
+    );
     const selected = await selectCandidates(
       filtered.filtered,
       {
@@ -1999,20 +2007,39 @@ export class RunDriver<TCriteria extends JsonValue> {
         ...(selector.capacity === undefined
           ? {}
           : { capacity: selector.capacity }),
-        select: (request, control) =>
-          this.call(
+        select: (original, control) => {
+          const request =
+            original.context.runtime === undefined
+              ? original
+              : Object.freeze({
+                  ...original,
+                  context: Object.freeze({
+                    ...original.context,
+                    runtime: Object.freeze({
+                      ...original.context.runtime,
+                      recentChoices: session.state.recentChoices,
+                    }),
+                  }),
+                });
+          return this.call(
             'selection',
             request,
             (control) => selector.select(request, control),
             request.requestId,
             control,
-          ),
+          );
+        },
       },
       selectionControl,
       this.options.selectorCapacity,
     );
     await this.drainLightCallbacks();
     if (!session.canDispatch(input.decisionEpoch)) throw new CallStopped();
+    await session.commit(
+      session.state,
+      [],
+      [describeSelectionResult(selected, input.requestId, operationId)],
+    );
     if (selected.outcome === 'selected') {
       this.#selection.start({
         kind: 'ready',
@@ -2090,6 +2117,32 @@ export class RunDriver<TCriteria extends JsonValue> {
       return;
     }
     await this.startExecution(selected);
+  }
+
+  private recordSelectionStart(
+    selectionId: string,
+    operationId: string,
+    filtered: FilteredCandidates,
+  ): Promise<void> {
+    const history: ChoiceHistoryEntry = {
+      kind: 'selectionStarted',
+      recordedAt: new Date().toISOString(),
+      goalRef: filtered.checked.prepared.request.context.graph.currentGoalRef,
+      selectionId,
+      operationId,
+      candidateCount: filtered.set.candidates.length,
+    };
+    return this.session.commit(
+      this.session.state,
+      [
+        this.session.event('selection_started', 'operation_bound', {
+          selectionId,
+          operationId,
+          candidateCount: filtered.set.candidates.length,
+        }),
+      ],
+      [history],
+    );
   }
 
   private async startExecution(selected: SelectedCandidate): Promise<void> {
