@@ -1666,10 +1666,27 @@ export class RunDriver<TCriteria extends JsonValue> {
       case 'continueAction':
       case 'wait':
         return;
-      case 'continueSelection':
+      case 'continueSelection': {
         if (!this.#selection.authorize(chosen.selectionId))
           throw new CallStopped();
+        const selection = this.#selection.snapshot();
+        if (selection === null) throw new CallStopped();
+        if (Date.now() >= Date.parse(selection.summary.deadlineAt)) {
+          this.#selection.discard();
+          await this.block('selection_deadlineExceeded');
+          return;
+        }
+        // Facts arriving during this review remain unread. Consume its accepted
+        // authorization for one step before they request another review, otherwise
+        // a continuous source can prevent every batch or ready result from advancing.
+        const ready = this.#selection.takeReady();
+        if (ready !== null) await this.finishSelection(ready);
+        else {
+          const batch = this.#selection.nextBatch();
+          if (batch?.kind === 'batch') await this.advanceSelection(batch);
+        }
         return;
+      }
       case 'abstain':
         await this.block('decision_abstained');
         return;
@@ -2172,13 +2189,16 @@ export class RunDriver<TCriteria extends JsonValue> {
             await this.block('selection_deadlineExceeded');
             break;
           }
-          if (session.state.scheduling.reviewPending) {
-            await this.review();
-            continue;
-          }
+          // A completed, still-authorized comparison already chose this call.
+          // Recheck it against a fresh observation before ordinary review can
+          // replace it. Epoch changes, cancellation and deadlines still win.
           const ready = this.#selection.takeReady();
           if (ready !== null) {
             await this.finishSelection(ready);
+            continue;
+          }
+          if (session.state.scheduling.reviewPending) {
+            await this.review();
             continue;
           }
           const batch = this.#selection.nextBatch();

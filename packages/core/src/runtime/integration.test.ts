@@ -1,13 +1,74 @@
 import { afterEach, expect, test, vi } from 'vitest';
 import { createAgent } from '#internal/index';
 import { isJsonObject } from '#internal/validation/json';
+import { candidateSet } from '#internal/candidate/__tests__/fixtures';
 import {
   applicationEvent,
+  fixtureDecisionPolicy,
   proposalBasis,
   runnerFixture,
 } from './__tests__/runner-fixtures.js';
 
 afterEach(() => vi.useRealTimers());
+
+test.each(['single', 'resumable'] as const)(
+  'advances a %s selection while observations request review',
+  async (kind) => {
+    const h = runnerFixture(0, 1);
+    h.generate.mockImplementation((request) =>
+      Promise.resolve(
+        candidateSet(
+          request,
+          ['north', 'south', 'west'].map((target) => ({
+            id: target,
+            params: { target },
+          })),
+        ),
+      ),
+    );
+    let reviews = 0;
+    let comparisons = 0;
+    const agent = createAgent({
+      ...h.options,
+      decisionPolicy: {
+        async decide(request, control) {
+          if (request.input.selection !== null && ++reviews === 1)
+            await agent.emit(
+              applicationEvent({
+                eventId: 'during-review',
+                impact: 'observation',
+              }),
+            );
+          return fixtureDecisionPolicy.decide(request, control);
+        },
+      },
+      selector:
+        kind === 'single'
+          ? { kind, select: h.select }
+          : { kind, batchCapacity: 2, advance: h.select },
+    });
+    const select = h.select.getMockImplementation()!;
+    h.select.mockImplementation(async (request, control) => {
+      const result = await select(request, control);
+      await agent.emit(
+        applicationEvent({
+          eventId: 'after-comparison-' + ++comparisons,
+          impact: 'observation',
+        }),
+      );
+      return result;
+    });
+    try {
+      const run = await agent.start(h.input);
+      await expect(run.result).resolves.toMatchObject({ status: 'succeeded' });
+      expect(h.generate).toHaveBeenCalledTimes(1);
+      expect(h.execute).toHaveBeenCalledTimes(1);
+      expect(reviews).toBe(kind === 'single' ? 0 : 2);
+    } finally {
+      await agent.close();
+    }
+  },
+);
 
 test.each(['cancel', 'invalidate'] as const)(
   'blocks dispatch when %s arrives during the intent commit',
