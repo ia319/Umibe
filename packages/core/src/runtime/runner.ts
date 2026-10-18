@@ -74,7 +74,10 @@ import { captureCallback } from './callback-receipt.js';
 import { invokeRole } from './role-callback.js';
 import type { RoleStage } from './role-callback.js';
 import { SelectionLifecycle } from './selection-lifecycle.js';
-import { describeSelectionResult } from './choice-history.js';
+import {
+  describeHistoricalCandidate,
+  describeSelectionResult,
+} from './choice-history.js';
 import type { SelectionBatch } from './selection-lifecycle.js';
 import type { PendingPlanAdoption, RunSession } from './session.js';
 import {
@@ -1685,7 +1688,7 @@ export class RunDriver<TCriteria extends JsonValue> {
         const ready = this.#selection.takeReady();
         if (ready !== null) await this.finishSelection(ready);
         else {
-          const batch = this.#selection.nextBatch();
+          const batch = this.#selection.nextBatch(session.state.recentChoices);
           if (batch?.kind === 'batch') await this.advanceSelection(batch);
         }
         return;
@@ -1991,7 +1994,19 @@ export class RunDriver<TCriteria extends JsonValue> {
       );
       if (started.outcome === 'pending') {
         this.#selection.start({ kind: 'comparing', cursor: started.cursor });
-      } else await this.finishSelection(started);
+        await this.recordSelectionStart(
+          started.cursor.selectionId,
+          operationId,
+          filtered.filtered,
+        );
+      } else {
+        await session.commit(
+          session.state,
+          [],
+          [describeSelectionResult(started, input.requestId, operationId)],
+        );
+        await this.finishSelection(started);
+      }
       return;
     }
     const selectionControl = this.control('selection');
@@ -2078,13 +2093,48 @@ export class RunDriver<TCriteria extends JsonValue> {
       )
         throw new CallStopped();
       const result = acceptSelectionBatch(cursor, raw);
-      await this.session.commit(this.session.state, [
-        this.session.event('selection_batch_finished', result.outcome, {
+      let history: ChoiceHistoryEntry;
+      if (result.outcome === 'pending') {
+        const candidate =
+          raw.outcome === 'selected'
+            ? request.candidates.candidates.find(
+                (candidate) => candidate.id === raw.candidateId,
+              )!
+            : null;
+        history = {
+          kind: 'selectionResult',
+          recordedAt: new Date().toISOString(),
+          goalRef: request.context.graph.currentGoalRef,
           selectionId: cursor.selectionId,
-          request: parseJsonValue(request, 'selection'),
-          response: parseJsonValue(raw, 'selection'),
-        }),
-      ]);
+          operationId: cursor.operationId,
+          round: request.round,
+          batchIndex: request.batchIndex,
+          comparisonComplete: false,
+          outcome: raw.outcome,
+          candidate: describeHistoricalCandidate(candidate),
+          reasonCode: raw.outcome === 'abstain' ? raw.reason : null,
+        };
+      } else
+        history = {
+          ...describeSelectionResult(
+            result,
+            cursor.selectionId,
+            cursor.operationId,
+          ),
+          round: request.round,
+          batchIndex: request.batchIndex,
+        };
+      await this.session.commit(
+        this.session.state,
+        [
+          this.session.event('selection_batch_finished', result.outcome, {
+            selectionId: cursor.selectionId,
+            request: parseJsonValue(request, 'selection'),
+            response: parseJsonValue(raw, 'selection'),
+          }),
+        ],
+        [history],
+      );
       if (!this.#selection.advance(cursor, result)) throw new CallStopped();
       if (result.outcome !== 'pending' && result.outcome !== 'selected')
         await this.finishSelection(result);
@@ -2254,7 +2304,7 @@ export class RunDriver<TCriteria extends JsonValue> {
             await this.review();
             continue;
           }
-          const batch = this.#selection.nextBatch();
+          const batch = this.#selection.nextBatch(session.state.recentChoices);
           if (batch !== null) {
             if (batch.kind === 'wait') await this.waitForWake(batch.until);
             else await this.advanceSelection(batch);

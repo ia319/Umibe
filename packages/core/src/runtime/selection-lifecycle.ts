@@ -7,6 +7,7 @@ import {
   type SelectionCursor,
 } from '#internal/selector/cursor';
 import { ModelRequestError, modelRetryDelayMs } from './model.js';
+import type { ChoiceHistoryEntry } from '#internal/contracts/choice-history';
 
 interface ReadySelection {
   readonly selectionId: string;
@@ -29,6 +30,7 @@ type SelectionState =
       readonly authorized: boolean;
       readonly attempt: number;
       readonly retryAt: number;
+      readonly request: SelectorBatchRequest | null;
     }
   | {
       readonly kind: 'ready';
@@ -58,6 +60,7 @@ export class SelectionLifecycle {
             authorized: true,
             attempt: 1,
             retryAt: 0,
+            request: null,
           }
         : {
             ...input,
@@ -85,8 +88,9 @@ export class SelectionLifecycle {
   }
 
   /** Preserve the original cursor and deadline while a retry waits or review suspends it. */
-  nextBatch():
-    SelectionBatch | { readonly kind: 'wait'; readonly until: number } | null {
+  nextBatch(
+    recentChoices: readonly ChoiceHistoryEntry[],
+  ): SelectionBatch | { readonly kind: 'wait'; readonly until: number } | null {
     const state = this.#state;
     if (state.kind !== 'comparing' || !state.authorized) return null;
     if (Date.now() < state.retryAt)
@@ -94,10 +98,30 @@ export class SelectionLifecycle {
         kind: 'wait',
         until: Math.min(state.retryAt, Date.parse(state.cursor.deadlineAt)),
       };
+    let request = state.request;
+    if (request === null) {
+      const original = nextSelectionBatch(state.cursor);
+      // Refresh only informational history, never the candidate basis or deadline.
+      // Capture it once per cursor so retries still receive the same request.
+      request =
+        original.context.runtime === undefined
+          ? original
+          : Object.freeze({
+              ...original,
+              context: Object.freeze({
+                ...original.context,
+                runtime: Object.freeze({
+                  ...original.context.runtime,
+                  recentChoices,
+                }),
+              }),
+            });
+      this.#state = { ...state, request };
+    }
     return {
       kind: 'batch',
       cursor: state.cursor,
-      request: nextSelectionBatch(state.cursor),
+      request,
       attempt: state.attempt,
     };
   }
@@ -107,7 +131,13 @@ export class SelectionLifecycle {
     const state = this.#state;
     if (state.kind !== 'comparing' || state.cursor !== cursor) return false;
     if (result.outcome === 'pending')
-      this.#state = { ...state, cursor: result.cursor, attempt: 1, retryAt: 0 };
+      this.#state = {
+        ...state,
+        cursor: result.cursor,
+        attempt: 1,
+        retryAt: 0,
+        request: null,
+      };
     else if (result.outcome === 'selected')
       this.#state = {
         kind: 'ready',
