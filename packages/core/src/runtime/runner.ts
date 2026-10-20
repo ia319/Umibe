@@ -2010,6 +2010,12 @@ export class RunDriver<TCriteria extends JsonValue> {
       return;
     }
     const selectionControl = this.control('selection');
+    this.#selection.start({
+      kind: 'selecting',
+      selectionId: input.requestId,
+      operationId,
+      goalRef: input.context.graph.currentGoalRef,
+    });
     await this.recordSelectionStart(
       input.requestId,
       operationId,
@@ -2067,7 +2073,10 @@ export class RunDriver<TCriteria extends JsonValue> {
           result: selected,
         },
       });
-    } else await this.finishSelection(selected);
+    } else {
+      this.#selection.discard();
+      await this.finishSelection(selected);
+    }
   }
 
   private async advanceSelection(batch: SelectionBatch): Promise<void> {

@@ -1,4 +1,5 @@
 import type { SelectedCandidate } from '#internal/contracts/candidate-processing';
+import type { GoalRef } from '#internal/contracts/references';
 import type { DecisionRequestInput } from '#internal/decision/request';
 import type { SelectorBatchRequest } from '#internal/selector/contracts';
 import {
@@ -19,11 +20,20 @@ interface ReadySelection {
   readonly result: SelectedCandidate;
 }
 
+interface InFlightSelection {
+  readonly kind: 'selecting';
+  readonly selectionId: string;
+  readonly operationId: string;
+  readonly goalRef: GoalRef;
+}
+
 type SelectionStart =
+  | InFlightSelection
   | { readonly kind: 'comparing'; readonly cursor: SelectionCursor }
   | { readonly kind: 'ready'; readonly selection: ReadySelection };
 
 type SelectionState =
+  | InFlightSelection
   | { readonly kind: 'idle' }
   | {
       readonly kind: 'comparing';
@@ -48,12 +58,17 @@ export interface SelectionBatch {
 
 /**
  * Owns one in-process selection through review, retries, and dispatch admission.
+ * Single-call callbacks become reviewable only after their result is accepted.
  * The scheduler checks the original deadline before consuming a ready result.
  */
 export class SelectionLifecycle {
   #state: SelectionState = { kind: 'idle' };
 
   start(input: SelectionStart): void {
+    if (input.kind === 'selecting') {
+      this.#state = { ...input };
+      return;
+    }
     this.#state =
       input.kind === 'comparing'
         ? {
@@ -71,7 +86,7 @@ export class SelectionLifecycle {
   }
 
   suspend(): void {
-    if (this.#state.kind !== 'idle')
+    if (this.#state.kind === 'comparing' || this.#state.kind === 'ready')
       this.#state = { ...this.#state, authorized: false };
   }
 
@@ -79,6 +94,7 @@ export class SelectionLifecycle {
     const state = this.#state;
     if (
       state.kind === 'idle' ||
+      state.kind === 'selecting' ||
       (state.kind === 'comparing'
         ? state.cursor.selectionId
         : state.selection.selectionId) !== selectionId
@@ -191,21 +207,29 @@ export class SelectionLifecycle {
     this.#state = { kind: 'idle' };
   }
 
-  /** Capture the discarded comparison while its original goal and ready call are available. */
+  /** Capture the original goal and any ready call before clearing a selection. */
   describeDiscard(
     reasonCode: string,
   ): Extract<ChoiceHistoryEntry, { kind: 'selectionDiscarded' }> | null {
     const state = this.#state;
     if (state.kind === 'idle') return null;
-    const selection = state.kind === 'ready' ? state.selection : state.cursor;
-    const context =
-      state.kind === 'ready'
-        ? state.selection.result.filtered.checked.prepared.request.context
-        : state.cursor.request.context;
+    const selection =
+      state.kind === 'selecting'
+        ? state
+        : state.kind === 'ready'
+          ? state.selection
+          : state.cursor;
+    const goalRef =
+      state.kind === 'selecting'
+        ? state.goalRef
+        : state.kind === 'ready'
+          ? state.selection.result.filtered.checked.prepared.request.context
+              .graph.currentGoalRef
+          : state.cursor.request.context.graph.currentGoalRef;
     return {
       kind: 'selectionDiscarded',
       recordedAt: new Date().toISOString(),
-      goalRef: context.graph.currentGoalRef,
+      goalRef,
       selectionId: selection.selectionId,
       operationId: selection.operationId,
       reasonCode,
@@ -218,7 +242,7 @@ export class SelectionLifecycle {
   /** Completed choices retain their identity and receipt source until dispatch is permitted. */
   snapshot() {
     const state = this.#state;
-    if (state.kind === 'idle') return null;
+    if (state.kind === 'idle' || state.kind === 'selecting') return null;
     const selection = state.kind === 'ready' ? state.selection : state.cursor;
     const summary: NonNullable<DecisionRequestInput['selection']> =
       Object.freeze({

@@ -12,7 +12,10 @@ import {
   candidateSet,
   generationInput,
 } from '#internal/candidate/__tests__/fixtures';
-import type { SelectorBatchRequest } from '#internal/selector/contracts';
+import type {
+  SelectionResult,
+  SelectorBatchRequest,
+} from '#internal/selector/contracts';
 import { readChoiceHistory } from '#internal/validation/choice-history';
 import { createAgent } from './agent.js';
 import { RunSession } from './session.js';
@@ -298,6 +301,199 @@ test('does not report a rejected option as an accepted historical decision', asy
     expect(
       (await agent.inspect(run.runId))!.checkpoint.state.recentChoices,
     ).toEqual([]);
+    expect(h.execute).not.toHaveBeenCalled();
+  } finally {
+    await agent.close();
+  }
+});
+
+test.each(['pause', 'cancel'] as const)(
+  'retains one discard after %s interrupts a single-call selection',
+  async (control) => {
+    const h = runnerFixture(0, 1);
+    let enter!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    h.select.mockImplementationOnce(() => {
+      enter();
+      return new Promise(() => undefined);
+    });
+    const agent = h.create();
+    try {
+      const run = await agent.start(h.input);
+      await entered;
+      await agent[control](run.runId, `${control}_during_selection`);
+      await expect(run.result).resolves.toMatchObject({
+        status: control === 'pause' ? 'paused' : 'cancelled',
+      });
+      const state = parseRuntimeCheckpoint(
+        (await agent.inspect(run.runId))!.checkpoint,
+      ).state;
+      const started = state.recentChoices.find(
+        (entry) => entry.kind === 'selectionStarted',
+      )!;
+      expect(
+        state.recentChoices.filter((entry) => entry.kind !== 'decision'),
+      ).toEqual([
+        started,
+        expect.objectContaining({
+          kind: 'selectionDiscarded',
+          selectionId: started.selectionId,
+          operationId: 'collect',
+          goalRef: started.goalRef,
+          reasonCode: `${control}_during_selection`,
+          candidate: null,
+        }),
+      ]);
+      expect(h.execute).not.toHaveBeenCalled();
+      await agent.close();
+      const restored = await RunSession.restore(
+        h.store,
+        run.runId,
+        vi.fn(),
+        state.identity,
+      );
+      try {
+        expect(restored.state.recentChoices).toEqual(state.recentChoices);
+        expect(restored.state.decision.context.runtime?.recentChoices).toEqual(
+          state.recentChoices,
+        );
+      } finally {
+        await restored.close();
+      }
+    } finally {
+      await agent.close();
+    }
+  },
+);
+
+test('retains a discard when pause precedes single-call selector dispatch', async () => {
+  const h = runnerFixture(0, 1);
+  const agent = h.create();
+  const pauses: Promise<void>[] = [];
+  try {
+    const run = await agent.start(h.input);
+    agent.subscribe(run.runId, (record) => {
+      if (
+        record.kind === 'coreEvent' &&
+        record.data.type === 'selection_started'
+      )
+        pauses.push(agent.pause(run.runId, 'pause_before_selection'));
+    });
+    await expect(run.result).resolves.toMatchObject({ status: 'paused' });
+    await Promise.all(pauses);
+    const history = parseRuntimeCheckpoint(
+      (await agent.inspect(run.runId))!.checkpoint,
+    ).state.recentChoices;
+    expect(pauses).toHaveLength(1);
+    expect(
+      history.filter((entry) => entry.kind === 'selectionDiscarded'),
+    ).toEqual([
+      expect.objectContaining({
+        selectionId: history.find((entry) => entry.kind === 'selectionStarted')!
+          .selectionId,
+        reasonCode: 'pause_before_selection',
+        candidate: null,
+      }),
+    ]);
+    expect(h.select).not.toHaveBeenCalled();
+    expect(h.execute).not.toHaveBeenCalled();
+  } finally {
+    await agent.close();
+  }
+});
+
+test('discards an invalidated single-call selection and ignores its late result', async () => {
+  const h = runnerFixture(0, 1);
+  let enter!: () => void;
+  const entered = new Promise<void>((resolve) => {
+    enter = resolve;
+  });
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let late!: Promise<SelectionResult>;
+  const select = h.select.getMockImplementation()!;
+  h.select.mockImplementationOnce((request, control) => {
+    enter();
+    late = blocked.then(() => select(request, control));
+    return late;
+  });
+  h.select.mockImplementationOnce(async (request, control) => {
+    release();
+    await late;
+    return select(request, control);
+  });
+  const agent = h.create();
+  try {
+    const run = await agent.start(h.input);
+    await entered;
+    await agent.emit(applicationEvent({ impact: 'candidates' }));
+    await expect(run.result).resolves.toMatchObject({ status: 'succeeded' });
+    await late;
+    const history = parseRuntimeCheckpoint(
+      (await agent.inspect(run.runId))!.checkpoint,
+    ).state.recentChoices.filter((entry) => entry.kind !== 'decision');
+    expect(history).toEqual([
+      expect.objectContaining({
+        kind: 'selectionStarted',
+        selectionId: h.select.mock.calls[0]![0].requestId,
+      }),
+      expect.objectContaining({
+        kind: 'selectionDiscarded',
+        selectionId: h.select.mock.calls[0]![0].requestId,
+        reasonCode: 'basis_changed',
+        candidate: null,
+      }),
+      expect.objectContaining({
+        kind: 'selectionStarted',
+        selectionId: h.select.mock.calls[1]![0].requestId,
+      }),
+      expect.objectContaining({
+        kind: 'selectionResult',
+        selectionId: h.select.mock.calls[1]![0].requestId,
+        comparisonComplete: true,
+        outcome: 'selected',
+      }),
+    ]);
+    expect(h.select).toHaveBeenCalledTimes(2);
+    expect(h.execute).toHaveBeenCalledTimes(1);
+  } finally {
+    release();
+    await agent.close();
+  }
+});
+
+test('records a single-call abstention without a later discard', async () => {
+  const h = runnerFixture(0, 1);
+  h.select.mockImplementationOnce((request) =>
+    Promise.resolve({
+      outcome: 'abstain',
+      decisionId: request.requestId,
+      candidateSetId: request.candidates.id,
+      reason: 'no_suitable_call',
+    }),
+  );
+  const agent = h.create();
+  try {
+    const run = await agent.start(h.input);
+    await expect(run.result).resolves.toMatchObject({ status: 'paused' });
+    const history = parseRuntimeCheckpoint(
+      (await agent.inspect(run.runId))!.checkpoint,
+    ).state.recentChoices.filter((entry) => entry.kind !== 'decision');
+    expect(history).toEqual([
+      expect.objectContaining({ kind: 'selectionStarted' }),
+      expect.objectContaining({
+        kind: 'selectionResult',
+        selectionId: h.select.mock.calls[0]![0].requestId,
+        comparisonComplete: true,
+        outcome: 'abstain',
+        reasonCode: 'no_suitable_call',
+        candidate: null,
+      }),
+    ]);
     expect(h.execute).not.toHaveBeenCalled();
   } finally {
     await agent.close();
