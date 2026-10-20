@@ -325,6 +325,7 @@ export function createDecisionRequest(
     options.map(describeDecisionOption),
   );
   const projected: DecisionInput = Object.freeze({
+    recentChoices: context.runtime?.recentChoices ?? [],
     rootGoal: describeGoal(root),
     goalPath: Object.freeze(context.graph.goalPath.map((goal) => goal.id)),
     acceptedPlan:

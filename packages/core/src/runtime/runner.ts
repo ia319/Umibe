@@ -24,7 +24,9 @@ import type {
   CandidateSelectionResult,
   CandidateGenerationInput,
   SelectedCandidate,
+  FilteredCandidates,
 } from '#internal/contracts/candidate-processing';
+import type { ChoiceHistoryEntry } from '#internal/contracts/choice-history';
 import type { OperationSet } from '#internal/contracts/operation';
 import type { JsonValue } from '#internal/contracts/json';
 import type {
@@ -72,6 +74,10 @@ import { captureCallback } from './callback-receipt.js';
 import { invokeRole } from './role-callback.js';
 import type { RoleStage } from './role-callback.js';
 import { SelectionLifecycle } from './selection-lifecycle.js';
+import {
+  describeHistoricalCandidate,
+  describeSelectionResult,
+} from './choice-history.js';
 import type { SelectionBatch } from './selection-lifecycle.js';
 import type { PendingPlanAdoption, RunSession } from './session.js';
 import {
@@ -1651,6 +1657,7 @@ export class RunDriver<TCriteria extends JsonValue> {
       },
     );
     if (accepted.outcome === 'rejected') return;
+    if (chosen.kind === 'selectOperation') this.#selection.discard();
     if (chosen.kind === 'adoptPlan') {
       this.#selection.discard();
       if (pending === null) throw new CallStopped();
@@ -1666,10 +1673,27 @@ export class RunDriver<TCriteria extends JsonValue> {
       case 'continueAction':
       case 'wait':
         return;
-      case 'continueSelection':
+      case 'continueSelection': {
         if (!this.#selection.authorize(chosen.selectionId))
           throw new CallStopped();
+        const selection = this.#selection.snapshot();
+        if (selection === null) throw new CallStopped();
+        if (Date.now() >= Date.parse(selection.summary.deadlineAt)) {
+          await this.discardSelection('selection_deadlineExceeded');
+          await this.block('selection_deadlineExceeded');
+          return;
+        }
+        // Facts arriving during this review remain unread. Consume its accepted
+        // authorization for one step before they request another review, otherwise
+        // a continuous source can prevent every batch or ready result from advancing.
+        const ready = this.#selection.takeReady();
+        if (ready !== null) await this.finishSelection(ready);
+        else {
+          const batch = this.#selection.nextBatch(session.state.recentChoices);
+          if (batch?.kind === 'batch') await this.advanceSelection(batch);
+        }
         return;
+      }
       case 'abstain':
         await this.block('decision_abstained');
         return;
@@ -1677,7 +1701,6 @@ export class RunDriver<TCriteria extends JsonValue> {
         await this.stopExecution(chosen.executionId, accepted.decisionEventId);
         return;
       case 'selectOperation':
-        this.#selection.discard();
         if (execution !== null)
           await this.stopExecution(
             execution.intent.executionId,
@@ -1971,10 +1994,33 @@ export class RunDriver<TCriteria extends JsonValue> {
       );
       if (started.outcome === 'pending') {
         this.#selection.start({ kind: 'comparing', cursor: started.cursor });
-      } else await this.finishSelection(started);
+        await this.recordSelectionStart(
+          started.cursor.selectionId,
+          operationId,
+          filtered.filtered,
+        );
+      } else {
+        await session.commit(
+          session.state,
+          [],
+          [describeSelectionResult(started, input.requestId, operationId)],
+        );
+        await this.finishSelection(started);
+      }
       return;
     }
     const selectionControl = this.control('selection');
+    this.#selection.start({
+      kind: 'selecting',
+      selectionId: input.requestId,
+      operationId,
+      goalRef: input.context.graph.currentGoalRef,
+    });
+    await this.recordSelectionStart(
+      input.requestId,
+      operationId,
+      filtered.filtered,
+    );
     const selected = await selectCandidates(
       filtered.filtered,
       {
@@ -1982,20 +2028,39 @@ export class RunDriver<TCriteria extends JsonValue> {
         ...(selector.capacity === undefined
           ? {}
           : { capacity: selector.capacity }),
-        select: (request, control) =>
-          this.call(
+        select: (original, control) => {
+          const request =
+            original.context.runtime === undefined
+              ? original
+              : Object.freeze({
+                  ...original,
+                  context: Object.freeze({
+                    ...original.context,
+                    runtime: Object.freeze({
+                      ...original.context.runtime,
+                      recentChoices: session.state.recentChoices,
+                    }),
+                  }),
+                });
+          return this.call(
             'selection',
             request,
             (control) => selector.select(request, control),
             request.requestId,
             control,
-          ),
+          );
+        },
       },
       selectionControl,
       this.options.selectorCapacity,
     );
     await this.drainLightCallbacks();
     if (!session.canDispatch(input.decisionEpoch)) throw new CallStopped();
+    await session.commit(
+      session.state,
+      [],
+      [describeSelectionResult(selected, input.requestId, operationId)],
+    );
     if (selected.outcome === 'selected') {
       this.#selection.start({
         kind: 'ready',
@@ -2008,7 +2073,10 @@ export class RunDriver<TCriteria extends JsonValue> {
           result: selected,
         },
       });
-    } else await this.finishSelection(selected);
+    } else {
+      this.#selection.discard();
+      await this.finishSelection(selected);
+    }
   }
 
   private async advanceSelection(batch: SelectionBatch): Promise<void> {
@@ -2034,13 +2102,48 @@ export class RunDriver<TCriteria extends JsonValue> {
       )
         throw new CallStopped();
       const result = acceptSelectionBatch(cursor, raw);
-      await this.session.commit(this.session.state, [
-        this.session.event('selection_batch_finished', result.outcome, {
+      let history: ChoiceHistoryEntry;
+      if (result.outcome === 'pending') {
+        const candidate =
+          raw.outcome === 'selected'
+            ? request.candidates.candidates.find(
+                (candidate) => candidate.id === raw.candidateId,
+              )!
+            : null;
+        history = {
+          kind: 'selectionResult',
+          recordedAt: new Date().toISOString(),
+          goalRef: request.context.graph.currentGoalRef,
           selectionId: cursor.selectionId,
-          request: parseJsonValue(request, 'selection'),
-          response: parseJsonValue(raw, 'selection'),
-        }),
-      ]);
+          operationId: cursor.operationId,
+          round: request.round,
+          batchIndex: request.batchIndex,
+          comparisonComplete: false,
+          outcome: raw.outcome,
+          candidate: describeHistoricalCandidate(candidate),
+          reasonCode: raw.outcome === 'abstain' ? raw.reason : null,
+        };
+      } else
+        history = {
+          ...describeSelectionResult(
+            result,
+            cursor.selectionId,
+            cursor.operationId,
+          ),
+          round: request.round,
+          batchIndex: request.batchIndex,
+        };
+      await this.session.commit(
+        this.session.state,
+        [
+          this.session.event('selection_batch_finished', result.outcome, {
+            selectionId: cursor.selectionId,
+            request: parseJsonValue(request, 'selection'),
+            response: parseJsonValue(raw, 'selection'),
+          }),
+        ],
+        [history],
+      );
       if (!this.#selection.advance(cursor, result)) throw new CallStopped();
       if (result.outcome !== 'pending' && result.outcome !== 'selected')
         await this.finishSelection(result);
@@ -2073,6 +2176,47 @@ export class RunDriver<TCriteria extends JsonValue> {
       return;
     }
     await this.startExecution(selected);
+  }
+
+  private recordSelectionStart(
+    selectionId: string,
+    operationId: string,
+    filtered: FilteredCandidates,
+  ): Promise<void> {
+    const history: ChoiceHistoryEntry = {
+      kind: 'selectionStarted',
+      recordedAt: new Date().toISOString(),
+      goalRef: filtered.checked.prepared.request.context.graph.currentGoalRef,
+      selectionId,
+      operationId,
+      candidateCount: filtered.set.candidates.length,
+    };
+    return this.session.commit(
+      this.session.state,
+      [
+        this.session.event('selection_started', 'operation_bound', {
+          selectionId,
+          operationId,
+          candidateCount: filtered.set.candidates.length,
+        }),
+      ],
+      [history],
+    );
+  }
+
+  private async discardSelection(reasonCode: string): Promise<void> {
+    const history = this.#selection.describeDiscard(reasonCode);
+    this.#selection.discard();
+    if (history === null || this.session.failure !== null) return;
+    await this.session.commit(
+      this.session.state,
+      [
+        this.session.event('selection_discarded', reasonCode, {
+          selectionId: history.selectionId,
+        }),
+      ],
+      [history],
+    );
   }
 
   private async startExecution(selected: SelectedCandidate): Promise<void> {
@@ -2122,7 +2266,7 @@ export class RunDriver<TCriteria extends JsonValue> {
         try {
           if (this.#refresh) {
             this.#refresh = false;
-            this.#selection.discard();
+            await this.discardSelection('basis_changed');
           }
           if (
             session.hasExecution &&
@@ -2168,20 +2312,23 @@ export class RunDriver<TCriteria extends JsonValue> {
             selection !== null &&
             Date.now() >= Date.parse(selection.deadlineAt)
           ) {
-            this.#selection.discard();
+            await this.discardSelection('selection_deadlineExceeded');
             await this.block('selection_deadlineExceeded');
             break;
           }
-          if (session.state.scheduling.reviewPending) {
-            await this.review();
-            continue;
-          }
+          // A completed, still-authorized comparison already chose this call.
+          // Recheck it against a fresh observation before ordinary review can
+          // replace it. Epoch changes, cancellation and deadlines still win.
           const ready = this.#selection.takeReady();
           if (ready !== null) {
             await this.finishSelection(ready);
             continue;
           }
-          const batch = this.#selection.nextBatch();
+          if (session.state.scheduling.reviewPending) {
+            await this.review();
+            continue;
+          }
+          const batch = this.#selection.nextBatch(session.state.recentChoices);
           if (batch !== null) {
             if (batch.kind === 'wait') await this.waitForWake(batch.until);
             else await this.advanceSelection(batch);
@@ -2209,8 +2356,10 @@ export class RunDriver<TCriteria extends JsonValue> {
         );
     } finally {
       this.clearReviewTimer();
-      this.#selection.discard();
       await Promise.allSettled([
+        this.discardSelection(
+          session.state.control.stopCause?.reasonCode ?? 'run_stopped',
+        ),
         ...this.#callbacks.keys(),
         this.#plannerTask,
         this.#executionTask,

@@ -12,6 +12,7 @@ import { readActionIntent, readActionResult } from './record.js';
 import { readGoalRef } from './references.js';
 import { readGoalAssessment } from './assessment.js';
 import { isJsonArray } from './json.js';
+import { readChoiceHistory } from './choice-history.js';
 
 export function readRuntimeContext(
   value: JsonValue,
@@ -21,7 +22,14 @@ export function readRuntimeContext(
   const raw = requireObject(value, context, path);
   requireKeys(
     raw,
-    ['execution', 'recentResults', 'progress', 'blocker', 'completedSiblings'],
+    [
+      'execution',
+      'recentResults',
+      'progress',
+      'blocker',
+      'completedSiblings',
+      ...(Object.hasOwn(raw, 'recentChoices') ? ['recentChoices'] : []),
+    ],
     context,
     path,
   );
@@ -194,6 +202,15 @@ export function readRuntimeContext(
     }),
   );
   return Object.freeze({
+    ...(raw.recentChoices === undefined
+      ? {}
+      : {
+          recentChoices: readChoiceHistory(
+            raw.recentChoices,
+            context,
+            `${path}/recentChoices`,
+          ),
+        }),
     execution,
     recentResults,
     progress,

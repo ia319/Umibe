@@ -7,6 +7,7 @@ import type { OperationOffer } from './operation.js';
 import type { GoalRef, ObservationRef, PlanRef } from './references.js';
 import type { ModelIdentity } from '#internal/model/metadata';
 import type { PlanProposalContent } from '#internal/planner/contracts';
+import type { ChoiceHistoryEntry } from './choice-history.js';
 
 export type ExecutionDisposition =
   | { readonly kind: 'none' }
@@ -83,6 +84,7 @@ export interface DecisionChoice {
 }
 
 export interface DecisionInput {
+  readonly recentChoices: readonly ChoiceHistoryEntry[];
   readonly rootGoal: DecisionGoal;
   /** IDs in root-to-current order; goal definitions appear once in rootGoal or acceptedPlan. */
   readonly goalPath: readonly string[];

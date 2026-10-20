@@ -72,6 +72,7 @@ function projectContext(context: DecisionContext) {
       : canonicalJson(parseJsonValue(lastResult, 'model_projection'));
   return {
     rootGoal: projectGoal(root, snapshot),
+    recentChoices: context.runtime?.recentChoices ?? [],
     goals: context.graph.goals
       .filter((goal) => goal.id !== root.id)
       .map((goal) => projectGoal(goal, snapshot)),
