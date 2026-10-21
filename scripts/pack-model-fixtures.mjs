@@ -38,6 +38,9 @@ const server = createServer((request, response) => {
       assert.equal(request.url, '/v1/responses');
       assert.equal(request.headers['x-stainless-retry-count'], '0');
       assert.equal(body.text.format.strict, true);
+      assert.equal(body.text.verbosity, 'low');
+      assert.deepEqual(body.reasoning, { effort: 'low' });
+      assert.equal(body.future_setting, true);
       const output = body.text.format.name === 'umibe_plan'
         ? { proposal: { outcome: 'continue', nextGoalRef: rootGoalRef, guidance: 'Continue with the candidate', goalOrder: null } }
         : body.text.format.name === 'umibe_selection'
@@ -61,7 +64,7 @@ try {
   let model;
   if (provider === 'openai') {
     const { createOpenAIModel } = await import('@umibe/provider-openai');
-    model = createOpenAIModel({ apiKey: 'test-only-key', model: 'configured', maxOutputTokens: 200, baseURL });
+    model = createOpenAIModel({ apiKey: 'test-only-key', model: 'configured', maxOutputTokens: 200, parameters: { reasoning: { effort: 'low' }, text: { verbosity: 'low' }, future_setting: true }, baseURL });
     const generated = await model.generate({ instructions: 'Return an object', input: 'Synthetic', output: { name: 'capability', schema: { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'], additionalProperties: false } } }, control());
     assert.equal(generated.ok, true);
     assert.deepEqual(Object.keys(generated), ['ok']);
@@ -91,7 +94,7 @@ export const modelConsumerTypes = {
 import { createOpenAIModel, type OpenAIModelOptions } from '@umibe/provider-openai';
 import { createPlanner, createSelector, type Planner, type Selector } from '@umibe/core';
 import type { StructuredOutputModel, StructuredOutputRequest, CallControl, JsonValue } from '@umibe/core/model';
-const options: OpenAIModelOptions = { apiKey: 'test-only', model: 'configured', maxOutputTokens: 200 };
+const options: OpenAIModelOptions = { apiKey: 'test-only', model: 'configured', maxOutputTokens: 200, parameters: { reasoning: { effort: 'low' }, text: { verbosity: 'low' }, future_setting: true } };
 const model: StructuredOutputModel = createOpenAIModel(options);
 const planner: Planner = createPlanner({ model });
 const selector: Selector = createSelector({ model });
