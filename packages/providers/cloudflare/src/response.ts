@@ -23,6 +23,7 @@ export function decodeResponse(
   requestId: string | null,
   headers: Headers,
   control: CallControl,
+  contextWindowTokens?: number,
 ): ChoiceResponse {
   const envelope = object(response, '');
   if (typeof envelope.success !== 'boolean' || !isJsonArray(envelope.errors))
@@ -82,9 +83,13 @@ export function decodeResponse(
   if (invalidUsage)
     throw protocolFailure('/result/usage', 'invalid_token_usage');
   if (model === null) throw protocolFailure('/result/model', 'missing_model');
-  // Reference encoding trims state when the whole context fills its window.
+  // Cloudflare trims state when the whole context fills the configured window.
   // Treat saturation as uncertain integrity even if the original input just fit.
-  if (inputTokens !== null && inputTokens >= 65_536)
+  if (
+    contextWindowTokens !== undefined &&
+    inputTokens !== null &&
+    inputTokens >= contextWindowTokens
+  )
     throw new ModelRequestError('input_limit');
   const answers = object(result.answers, '/result/answers');
   if (Object.keys(answers).length !== 1 || !Object.hasOwn(answers, 'selection'))

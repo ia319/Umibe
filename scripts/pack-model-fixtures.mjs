@@ -45,8 +45,9 @@ const server = createServer((request, response) => {
           : { ok: true };
       response.end(JSON.stringify({ object: 'response', model: 'actual-openai', status: 'completed', error: null, incomplete_details: null, usage: { input_tokens: 7, output_tokens: 3, total_tokens: 10 }, output: [{ type: 'message', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: JSON.stringify(output) }] }] }));
     } else {
-      assert.equal(request.url, '/v1/accounts/test-account/ai/run/@cf/cloudflare/clef');
-      assert.equal(body.model, 'clef');
+      assert.equal(request.url, '/v1/accounts/test-account/ai/run/@cf/cloudflare/clef-flash');
+      assert.equal(body.model, 'clef-flash');
+      assert.deepEqual(body.extension, { value: 1 });
       assert.equal(body.questions.selection.type, 'choice');
       const ids = Object.keys(body.questions.selection.criteria);
       response.end(JSON.stringify({ success: true, errors: [], result: { model: 'actual-clef', usage: { input_tokens: 9, output_tokens: 0 }, answers: { selection: { type: 'choice', choice: ids[0], probabilities: Object.fromEntries(ids.map((id, index) => [id, index === 0 ? 1 : 0])), confidence: 0.04 } } } }));
@@ -67,7 +68,7 @@ try {
     assert.equal((await createPlanner({ model }).plan({ requestId: 'planning', decisionEpoch: 1, context, capabilities: [], trigger: { kind: 'initial', assessment: 'notYet' } }, control())).outcome, 'continue');
   } else {
     const { createCloudflareModel } = await import('@umibe/provider-cloudflare');
-    model = createCloudflareModel({ accountId: 'test-account', apiToken: 'test-only-token', model: '@cf/cloudflare/clef', baseURL });
+    model = createCloudflareModel({ accountId: 'test-account', apiToken: 'test-only-token', model: '@cf/cloudflare/clef-flash', parameters: { extension: { value: 1 } }, contextWindowTokens: 24576, baseURL });
     assert.equal((await model.choose({ instructions: 'Choose', input: 'Synthetic', options: [{ id: 'a', description: null }, { id: 'none', description: 'Abstain' }] }, control())).optionId, 'a');
     assert.equal(createSelector({ model }).capacity, 254);
   }
@@ -105,7 +106,7 @@ model.choose(request, control);
 import { createCloudflareModel, type CloudflareModelOptions } from '@umibe/provider-cloudflare';
 import { createPlanner, createSelector, type ResumableSelector } from '@umibe/core';
 import type { ChoiceModel, ChoiceRequest, ChoiceResponse, CallControl } from '@umibe/core/model';
-const options: CloudflareModelOptions = { accountId: 'test-account', apiToken: 'test-only', model: '@cf/cloudflare/clef' };
+const options: CloudflareModelOptions = { accountId: 'test-account', apiToken: 'test-only', model: '@vendor/future-choice', parameters: { extension: true }, contextWindowTokens: 24576 };
 const model: ChoiceModel = createCloudflareModel(options);
 const selector: ResumableSelector = createSelector({ model, overflow: 'compareBatches' });
 declare const request: ChoiceRequest;

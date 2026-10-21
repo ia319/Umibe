@@ -153,11 +153,6 @@ try {
       }).trim();
       codexVersion = publicIdentifier(/^codex-cli (\S+)$/.exec(version)?.[1]);
     }
-    if (
-      selected.provider === 'cloudflare' &&
-      args.model !== '@cf/cloudflare/clef'
-    )
-      throw new Error('invalid_config');
     const timeoutMs = boundedInteger(args['timeout-ms'], 30_000, 60_000);
     const maxOutputTokens = boundedInteger(
       args['max-output-tokens'],

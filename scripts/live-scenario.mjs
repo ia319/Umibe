@@ -52,7 +52,7 @@ export async function runScenario(options) {
             ...transport,
             accountId: options.accountId,
             apiToken: options.apiToken,
-            model: '@cf/cloudflare/clef',
+            model: options.model,
           })
         : options.provider === 'codex'
           ? createCodexModel({

@@ -4,19 +4,20 @@ import {
   parseJsonValue,
   ModelRequestError,
 } from '@umibe/core/model';
-import type { ChoiceRequest } from '@umibe/core/model';
+import type { ChoiceRequest, JsonObject } from '@umibe/core/model';
 
 /** Validate the native protocol and capture the exact option IDs before awaiting HTTP. */
 export function encodeRequest(
   request: ChoiceRequest,
+  model: string,
+  parameters: JsonObject,
   maxRequestBytes: number,
 ): { body: string; ids: readonly string[] } {
-  let state: string;
   let body: string;
   let ids: string[];
   try {
     const input = parseJsonValue(request.input, 'clef_state');
-    state = typeof input === 'string' ? input : JSON.stringify(input);
+    const state = typeof input === 'string' ? input : JSON.stringify(input);
     const instructions = parseJsonValue(request.instructions, 'clef_question');
     if (
       !(typeof instructions === 'string'
@@ -43,7 +44,8 @@ export function encodeRequest(
       return [option.id, description] as const;
     });
     body = JSON.stringify({
-      model: 'clef',
+      model,
+      ...parameters,
       state,
       questions: {
         selection: {
@@ -56,14 +58,7 @@ export function encodeRequest(
   } catch {
     throw new ModelRequestError('invalid_request');
   }
-  // The hosted API capped state at 2048 tokens in 2026-10-05 probes. UTF-8
-  // bytes conservatively bound the reference Qwen2 byte-level tokenization;
-  // this is an input integrity guard, not a token usage estimate. See
-  // https://huggingface.co/Cloudflare/clef/blob/main/joint_schema_model.py
-  if (
-    Buffer.byteLength(state, 'utf8') > 2048 ||
-    Buffer.byteLength(body, 'utf8') > maxRequestBytes
-  )
+  if (Buffer.byteLength(body, 'utf8') > maxRequestBytes)
     throw new ModelRequestError('input_limit');
   return { body, ids: Object.freeze(ids) };
 }

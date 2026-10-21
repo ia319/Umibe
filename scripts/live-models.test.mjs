@@ -154,11 +154,15 @@ async function fixture(provider, mode = 'selected') {
         );
       } else {
         if (
+          typeof body.model !== 'string' ||
           !isJsonObject(body.questions) ||
           !isJsonObject(body.questions.selection) ||
           !isJsonObject(body.questions.selection.criteria)
         )
           throw new Error('Missing native options');
+        expect(request.url).toBe(
+          `/v1/accounts/test-secret-account/ai/run/@cf/cloudflare/${body.model}`,
+        );
         const ids = Object.keys(body.questions.selection.criteria);
         const chosen = mode === 'abstain' ? ids.at(-1) : ids[0];
         response.end(
@@ -229,7 +233,7 @@ test('disabled runs read no env file and make zero HTTP requests', async () => {
 test.each([
   ['openai', 'planning', 'configured'],
   ['openai', 'selection', 'configured'],
-  ['cloudflare', 'selection', '@cf/cloudflare/clef'],
+  ['cloudflare', 'selection', '@vendor/future-choice'],
 ])(
   'requires credentials after enabling %s %s',
   async (provider, role, model) => {
@@ -268,7 +272,7 @@ test.each([
     '--model',
     '@cf/cloudflare/clef',
   ],
-  ['--provider', 'cloudflare', '--role', 'selection', '--model', 'wrong'],
+  ['--provider', 'cloudflare', '--role', 'selection', '--model', ''],
   [
     '--provider',
     'openai',
@@ -312,7 +316,7 @@ test.each(['openai', 'cloudflare'])(
         '--role',
         'selection',
         '--model',
-        provider === 'openai' ? 'configured' : '@cf/cloudflare/clef',
+        provider === 'openai' ? 'configured' : '@cf/cloudflare/clef-flash',
         '--base-url',
         http.baseURL,
         '--report',

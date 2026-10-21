@@ -1,5 +1,9 @@
-import { ModelRequestError, parseJsonValue } from '@umibe/core/model';
-import type { ChoiceModel, JsonValue } from '@umibe/core/model';
+import {
+  isJsonObject,
+  ModelRequestError,
+  parseJsonValue,
+} from '@umibe/core/model';
+import type { ChoiceModel, JsonObject, JsonValue } from '@umibe/core/model';
 import { encodeRequest } from './request.js';
 import { decodeResponse } from './response.js';
 import { cloudflareFailure, protocolFailure } from './errors.js';
@@ -8,13 +12,26 @@ export interface CloudflareModelOptions {
   /** Account path segment; letters, digits, underscores and hyphens only. */
   readonly accountId: string;
   readonly apiToken: string;
-  readonly model: '@cf/cloudflare/clef';
+  /** Workers AI model path; the model must implement the Clef choice protocol. */
+  readonly model: string;
+  /**
+   * Native JSON body fields, copied at construction and passed to Cloudflare.
+   * The body model defaults to the last path segment and may be set here.
+   * state, questions and stream are adapter-owned; supplying them throws TypeError.
+   */
+  readonly parameters?: JsonObject;
+  /**
+   * Reject reported input usage at or above this token count as input_limit.
+   * Set it to the chosen model's context window to detect possible truncation.
+   * No window is inferred; without it, provider-side truncation is undetectable.
+   */
+  readonly contextWindowTokens?: number;
   /**
    * Defaults to the official REST root. Require HTTPS except for HTTP protocol
    * tests at localhost, 127.0.0.1 or [::1]. Credentials, query and fragment are rejected.
    */
   readonly baseURL?: string;
-  /** UTF-8 HTTP body limit, default 1 MiB; independent of the fixed 2048-byte state guard. */
+  /** UTF-8 HTTP body limit, default 1 MiB; independent of model token limits. */
   readonly maxRequestBytes?: number;
   /** Decoded HTTP body limit, default 8 MiB, also enforced on errors. */
   readonly maxResponseBytes?: number;
@@ -22,10 +39,10 @@ export interface CloudflareModelOptions {
 
 /**
  * Create a stateless hosted Clef adapter without sending a request or reading env.
- * Invalid configuration throws TypeError or RangeError. Each choose call sends
- * at most one POST, without retries, redirects or fallback. Its deadline includes
- * response body reading. State above 2048 UTF-8 bytes or a saturated 65536-token
- * response rejects with input_limit; input is never locally shortened.
+ * Invalid configuration throws. Each choose call sends at most one POST,
+ * without retries, redirects or fallback. Its deadline includes
+ * response body reading. Input is sent in full; Cloudflare may truncate state
+ * that exceeds the model's context window.
  */
 export function createCloudflareModel(
   options: CloudflareModelOptions,
@@ -41,15 +58,29 @@ export function createCloudflareModel(
     /[\r\n]/.test(options.apiToken)
   )
     throw new TypeError('apiToken is required');
-  if (options.model !== '@cf/cloudflare/clef')
-    throw new TypeError('model must be @cf/cloudflare/clef');
+  if (typeof options.model !== 'string' || options.model.trim() === '')
+    throw new TypeError('model is required');
+  const modelParts = options.model.split('/');
+  if (modelParts.some((part) => part === '' || part === '.' || part === '..'))
+    throw new TypeError('model must contain nonempty model path segments');
+  const parameters = parseJsonValue(
+    options.parameters === undefined ? {} : options.parameters,
+    'cloudflare_parameters',
+  );
+  if (!isJsonObject(parameters))
+    throw new TypeError('parameters must be a JSON object');
+  for (const key of ['state', 'questions', 'stream'])
+    if (Object.hasOwn(parameters, key))
+      throw new TypeError(`parameters.${key} is controlled by the adapter`);
   const maxRequestBytes = options.maxRequestBytes ?? 1_048_576;
   const maxResponseBytes = options.maxResponseBytes ?? 8_388_608;
+  const contextWindowTokens = options.contextWindowTokens;
   for (const [name, value] of Object.entries({
     maxRequestBytes,
     maxResponseBytes,
+    contextWindowTokens,
   }))
-    if (!Number.isSafeInteger(value) || value < 1)
+    if (value !== undefined && (!Number.isSafeInteger(value) || value < 1))
       throw new RangeError(`${name} must be a positive safe integer`);
   const baseURL = new URL(
     options.baseURL ?? 'https://api.cloudflare.com/client/v4',
@@ -66,7 +97,12 @@ export function createCloudflareModel(
     throw new TypeError(
       'baseURL requires HTTPS or loopback HTTP, without credentials, query or fragment',
     );
-  const endpoint = `${baseURL.href.replace(/\/$/, '')}/accounts/${options.accountId}/ai/run/@cf/cloudflare/clef`;
+  const modelPath = modelParts
+    .map(encodeURIComponent)
+    .join('/')
+    .replaceAll('%40', '@');
+  const endpoint = `${baseURL.href.replace(/\/$/, '')}/accounts/${options.accountId}/ai/run/${modelPath}`;
+  const bodyModel = modelParts.at(-1)!;
   const apiToken = options.apiToken;
   const identity = Object.freeze({
     provider: 'cloudflare',
@@ -88,7 +124,12 @@ export function createCloudflareModel(
         throw new DOMException('Model request cancelled', 'AbortError');
       if (Date.now() >= deadline)
         throw new ModelRequestError('deadline_exceeded');
-      const { body, ids } = encodeRequest(request, maxRequestBytes);
+      const { body, ids } = encodeRequest(
+        request,
+        bodyModel,
+        parameters,
+        maxRequestBytes,
+      );
       await control.recordModelRequest?.({
         protocol: 'http',
         method: 'POST',
@@ -179,13 +220,20 @@ export function createCloudflareModel(
         } catch {
           throw protocolFailure('', 'invalid_json');
         }
-        const decoded = decodeResponse(data, ids, requestId, response.headers, {
-          ...control,
-          reportModelResponse(metadata) {
-            reported = true;
-            control.reportModelResponse?.(metadata);
+        const decoded = decodeResponse(
+          data,
+          ids,
+          requestId,
+          response.headers,
+          {
+            ...control,
+            reportModelResponse(metadata) {
+              reported = true;
+              control.reportModelResponse?.(metadata);
+            },
           },
-        });
+          contextWindowTokens,
+        );
         if (control.signal.aborted)
           throw new DOMException('Model request cancelled', 'AbortError');
         if (Date.now() >= deadline)

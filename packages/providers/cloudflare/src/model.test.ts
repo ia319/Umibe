@@ -61,6 +61,78 @@ test('sends a single native request with exact fields and independent confidence
   expect(JSON.stringify(model)).not.toContain('test-only-token');
 });
 
+test('forwards the configured model and captures native parameters', async () => {
+  const modelName = '@cf/cloudflare/clef-flash';
+  const h = await httpFixture((_request, response) => {
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify(responseBody()));
+  });
+  const parameters = { images: ['original-image'] };
+  const model = createCloudflareModel({
+    ...options,
+    model: modelName,
+    parameters,
+    baseURL: h.baseURL,
+  });
+  parameters.images[0] = 'changed-image';
+  await expect(
+    model.choose(choiceRequest, callControl()),
+  ).resolves.toMatchObject({
+    optionId: 'a',
+  });
+  expect(h.requests).toHaveLength(1);
+  expect(h.requests[0]).toMatchObject({
+    url: `/client/v4/accounts/test-account/ai/run/${modelName}`,
+    body: {
+      model: 'clef-flash',
+      images: ['original-image'],
+      state: JSON.stringify(choiceRequest.input),
+    },
+  });
+  expect(model.identity.model).toBe(modelName);
+});
+
+test('lets Cloudflare validate native parameters and records its rejection', async () => {
+  const failure = {
+    success: false,
+    errors: [{ code: 5007, message: 'Unknown model' }],
+  };
+  const h = await httpFixture((_request, response) => {
+    response.writeHead(400, { 'content-type': 'application/json' });
+    response.end(JSON.stringify(failure));
+  });
+  const record = vi.fn();
+  await expect(
+    createCloudflareModel({
+      ...options,
+      model: '@vendor/future-choice',
+      parameters: {
+        model: 'native-selector',
+        extension: { value: 'unsupported' },
+      },
+      baseURL: h.baseURL,
+    }).choose(choiceRequest, { ...callControl(), recordModelResult: record }),
+  ).rejects.toMatchObject({ code: 'invalid_request' });
+  expect(h.requests).toHaveLength(1);
+  expect(h.requests[0]).toMatchObject({
+    body: { model: 'native-selector', extension: { value: 'unsupported' } },
+  });
+  expect(record).toHaveBeenCalledExactlyOnceWith({
+    protocol: 'http',
+    method: 'POST',
+    body: Buffer.from(JSON.stringify(failure), 'utf8').toString('base64'),
+    encoding: 'base64',
+    complete: true,
+    status: 400,
+  });
+});
+
+test('rejects parameters that replace the generated choice question', () => {
+  expect(() =>
+    createCloudflareModel({ ...options, parameters: { questions: {} } }),
+  ).toThrow('parameters.questions is controlled by the adapter');
+});
+
 test.each([
   [401, 'unauthorized'],
   [403, 'unauthorized'],
@@ -485,7 +557,7 @@ test('rejects redirects and disconnected bodies without a second request', async
   expect(broken.requests).toHaveLength(1);
 });
 
-test('separates conservative state bytes, HTTP bytes and the model token window', async () => {
+test('sends state in full and enforces HTTP bytes and an explicit model token window', async () => {
   const h = await httpFixture((_request, response) => {
     response.writeHead(200, { 'content-type': 'application/json' });
     response.end(JSON.stringify(responseBody()));
@@ -496,10 +568,12 @@ test('separates conservative state bytes, HTTP bytes and the model token window'
   ).resolves.toMatchObject({ optionId: 'a' });
   await expect(
     model.choose({ ...choiceRequest, input: 'x'.repeat(2049) }, callControl()),
-  ).rejects.toMatchObject({ code: 'input_limit' });
+  ).resolves.toMatchObject({ optionId: 'a' });
   await expect(
     model.choose({ ...choiceRequest, input: '中'.repeat(683) }, callControl()),
-  ).rejects.toMatchObject({ code: 'input_limit' });
+  ).resolves.toMatchObject({ optionId: 'a' });
+  expect(h.requests[1]).toMatchObject({ body: { state: 'x'.repeat(2049) } });
+  expect(h.requests[2]).toMatchObject({ body: { state: '中'.repeat(683) } });
   await expect(
     model.choose(
       {
@@ -517,14 +591,14 @@ test('separates conservative state bytes, HTTP bytes and the model token window'
       maxRequestBytes: 100,
     }).choose(choiceRequest, callControl()),
   ).rejects.toMatchObject({ code: 'input_limit' });
-  expect(h.requests).toHaveLength(2);
+  expect(h.requests).toHaveLength(4);
   const body = responseBody();
   if (!isJsonObject(body.result)) throw new Error('Expected fixture result');
   const saturated = {
     ...body,
     result: {
       ...body.result,
-      usage: { input_tokens: 65536, output_tokens: 0 },
+      usage: { input_tokens: 24576, output_tokens: 0 },
     },
   };
   const saturatedHttp = await httpFixture((_request, response) => {
@@ -536,11 +610,20 @@ test('separates conservative state bytes, HTTP bytes and the model token window'
     createCloudflareModel({
       ...options,
       baseURL: saturatedHttp.baseURL,
+      contextWindowTokens: 24_576,
     }).choose(choiceRequest, { ...callControl(), reportModelResponse: report }),
   ).rejects.toMatchObject({ code: 'input_limit' });
   expect(report.mock.calls[0]![0]).toMatchObject({
-    usage: { inputTokens: 65536 },
+    usage: { inputTokens: 24576 },
   });
+  saturated.result.usage.input_tokens = 65536;
+  await expect(
+    createCloudflareModel({
+      ...options,
+      model: '@vendor/larger-window',
+      baseURL: saturatedHttp.baseURL,
+    }).choose(choiceRequest, callControl()),
+  ).resolves.toMatchObject({ optionId: 'a' });
 });
 
 test.each([
@@ -608,6 +691,10 @@ test('validates configuration and native request limits before network access', 
   expect(() =>
     createCloudflareModel({ ...options, maxResponseBytes: 0 }),
   ).toThrow(RangeError);
+  for (const model of ['', '@cf/../other'])
+    expect(() => createCloudflareModel({ ...options, model })).toThrow(
+      TypeError,
+    );
   expect(() =>
     createCloudflareModel({
       ...options,
