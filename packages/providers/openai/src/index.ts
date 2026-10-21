@@ -19,6 +19,7 @@ export interface OpenAIModelOptions {
    * history, tools, truncation and execution mode are adapter-owned; conflicts throw
    * TypeError. text must be an object and may include fields such as verbosity,
    * but text.format is reserved for the runner's schema.
+   * Cache prewarming (prompt_cache_options.prewarm=true) also throws TypeError.
    */
   readonly parameters?: JsonObject;
   /**
@@ -80,6 +81,12 @@ export function createOpenAIModel(
         'parameters.text.format is controlled by the adapter',
       );
   }
+  // Cache prewarming produces no output and cannot fulfill generate().
+  const promptCacheOptions = parameters.prompt_cache_options;
+  if (isJsonObject(promptCacheOptions) && promptCacheOptions.prewarm === true)
+    throw new TypeError(
+      'parameters.prompt_cache_options.prewarm is controlled by the adapter',
+    );
   const maxRequestBytes = options.maxRequestBytes ?? 1_048_576;
   const maxResponseBytes = options.maxResponseBytes ?? 8_388_608;
   const maxOutputTokens = options.maxOutputTokens;

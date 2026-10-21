@@ -76,6 +76,7 @@ test('captures native parameters and merges text options with the runner schema'
   const parameters = {
     reasoning: { effort: 'low' },
     text: { verbosity: 'low' },
+    prompt_cache_options: { prewarm: false, ttl: '30m' },
   };
   const model = createOpenAIModel({
     ...options,
@@ -91,6 +92,7 @@ test('captures native parameters and merges text options with the runner schema'
   expect(h.requests[0]).toMatchObject({
     body: {
       reasoning: { effort: 'low' },
+      prompt_cache_options: { prewarm: false, ttl: '30m' },
       text: {
         verbosity: 'low',
         format: {
@@ -109,6 +111,7 @@ test.each([
   { text: { format: { type: 'text' } } },
   { tools: [{ type: 'web_search' }] },
   { background: true },
+  { prompt_cache_options: { prewarm: true } },
 ] satisfies readonly JsonObject[])(
   'rejects native parameters that change the adapter contract %#',
   (parameters) => {
