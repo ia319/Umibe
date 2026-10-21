@@ -7,7 +7,10 @@ import { createCodexModel } from '@umibe/provider-codex';
 for (const dependency of ['@umibe/provider-openai', '@umibe/provider-cloudflare', 'openai'])
   await assert.rejects(import(dependency), { code: 'ERR_MODULE_NOT_FOUND' });
 assert.throws(() => createCodexModel({ executablePath: 'codex' }), TypeError);
-const model = createCodexModel({ executablePath: join(process.cwd(), 'missing-codex') });
+const executablePath = join(process.cwd(), 'missing-codex');
+assert.throws(() => createCodexModel({ executablePath, threadParameters: { config: {} } }), TypeError);
+assert.throws(() => createCodexModel({ executablePath, turnParameters: { threadId: 'existing' } }), TypeError);
+const model = createCodexModel({ executablePath, threadParameters: { serviceTier: 'priority', future_setting: true }, turnParameters: { summary: 'concise' } });
 assert.deepEqual(model.identity, { provider: 'codex', model: 'default' });
 assert.deepEqual(createPlanner({ model }).model, model.identity);
 assert.deepEqual(createSelector({ model }).model, model.identity);
@@ -30,7 +33,7 @@ import type { StructuredOutputModel } from '@umibe/core/model';
 import { createCodexModel, type CodexModelOptions } from '@umibe/provider-codex';
 
 declare const executablePath: string;
-const options: CodexModelOptions = { executablePath };
+const options: CodexModelOptions = { executablePath, threadParameters: { serviceTier: 'priority', future_setting: true }, turnParameters: { summary: 'concise' } };
 const model: StructuredOutputModel = createCodexModel(options);
 createPlanner({ model });
 createSelector({ model });

@@ -2,7 +2,11 @@ import { EventEmitter } from 'node:events';
 import { PassThrough, Writable } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { isJsonObject, parseJsonValue } from '@umibe/core/model';
-import type { JsonObject, StructuredOutputRequest } from '@umibe/core/model';
+import type {
+  CallControl,
+  JsonObject,
+  StructuredOutputRequest,
+} from '@umibe/core/model';
 import { createCodexModel } from './index.js';
 
 const launch = vi.hoisted(() => vi.fn());
@@ -22,7 +26,15 @@ const request: StructuredOutputRequest = {
   },
 };
 
-function server(mode: 'success' | 'invalid' | 'failed' | 'waiting') {
+function server(
+  mode:
+    | 'success'
+    | 'invalid'
+    | 'failed'
+    | 'waiting'
+    | 'thread-rejected'
+    | 'turn-rejected',
+) {
   const messages: JsonObject[] = [];
   const stdout = new PassThrough();
   const process = Object.assign(new EventEmitter(), {
@@ -40,7 +52,17 @@ function server(mode: 'success' | 'invalid' | 'failed' | 'waiting') {
           stdout.write(JSON.stringify({ id: message.id, result }) + '\n');
         const event = (method: string, params: JsonObject) =>
           stdout.write(JSON.stringify({ method, params }) + '\n');
-        if (message.method === 'initialize') reply({});
+        if (
+          (mode === 'thread-rejected' && message.method === 'thread/start') ||
+          (mode === 'turn-rejected' && message.method === 'turn/start')
+        )
+          stdout.write(
+            JSON.stringify({
+              id: message.id,
+              error: { code: -32602, message: 'Unsupported service tier' },
+            }) + '\n',
+          );
+        else if (message.method === 'initialize') reply({});
         else if (message.method === 'account/read')
           reply({ account: { type: 'chatgpt' } });
         else if (message.method === 'thread/start')
@@ -148,6 +170,135 @@ describe('Codex provider', () => {
     });
     expect(process.kill).toHaveBeenCalledExactlyOnceWith('SIGKILL');
   });
+
+  it('captures native parameters and sends them only to their configured stage', async () => {
+    const { messages, process } = server('success');
+    const threadParameters = {
+      serviceTier: 'priority',
+      extension: { value: 'thread' },
+    };
+    const turnParameters = {
+      serviceTier: 'default',
+      summary: 'concise',
+      extension: { value: 'turn' },
+    };
+    const model = createCodexModel({
+      executablePath: globalThis.process.execPath,
+      model: 'chosen',
+      reasoningEffort: 'future-effort',
+      threadParameters,
+      turnParameters,
+    });
+    threadParameters.extension.value = 'changed';
+    turnParameters.summary = 'detailed';
+    turnParameters.extension.value = 'changed';
+    await expect(
+      model.generate(request, {
+        signal: new AbortController().signal,
+        deadlineAt: new Date(Date.now() + 10_000).toISOString(),
+      }),
+    ).resolves.toEqual({ ok: true });
+    const thread = messages.find(
+      (message) => message.method === 'thread/start',
+    );
+    expect(thread?.params).toMatchObject({
+      serviceTier: 'priority',
+      extension: { value: 'thread' },
+      model: 'chosen',
+    });
+    expect(thread?.params).not.toHaveProperty('summary');
+    const turns = messages.filter((message) => message.method === 'turn/start');
+    expect(turns).toHaveLength(1);
+    expect(turns[0]?.params).toMatchObject({
+      threadId: 'thread',
+      serviceTier: 'default',
+      summary: 'concise',
+      extension: { value: 'turn' },
+      effort: 'future-effort',
+      input: [{ type: 'text', text: JSON.stringify(request.input) }],
+      outputSchema: request.output.schema,
+    });
+    expect(process.kill).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { threadParameters: { config: { mcp_servers: { injected: {} } } } },
+    { turnParameters: { threadId: 'existing' } },
+    { turnParameters: { outputSchema: {} } },
+  ])(
+    'rejects parameters that replace owned content or enable capabilities %#',
+    (parameters) => {
+      expect(() =>
+        createCodexModel({
+          executablePath: globalThis.process.execPath,
+          ...parameters,
+        }),
+      ).toThrow(/controlled by the adapter/);
+      expect(launch).not.toHaveBeenCalled();
+    },
+  );
+
+  it('shares the input limit across role input and both parameter stages', async () => {
+    const model = createCodexModel({
+      executablePath: globalThis.process.execPath,
+      threadParameters: { extension: 'x'.repeat(256 * 1024) },
+      turnParameters: { extension: 'x'.repeat(256 * 1024) },
+    });
+    await expect(
+      model.generate(
+        { ...request, input: 'x'.repeat(512 * 1024) },
+        {
+          signal: new AbortController().signal,
+          deadlineAt: new Date(Date.now() + 10_000).toISOString(),
+        },
+      ),
+    ).rejects.toMatchObject({ code: 'input_limit' });
+    expect(launch).not.toHaveBeenCalled();
+  });
+
+  it.each(['thread/start', 'turn/start'] as const)(
+    'preserves native parameter rejection from %s without retrying',
+    async (method) => {
+      const { messages, process } = server(
+        method === 'thread/start' ? 'thread-rejected' : 'turn-rejected',
+      );
+      const record = vi
+        .fn<NonNullable<CallControl['recordModelResult']>>()
+        .mockResolvedValue(undefined);
+      const model = createCodexModel({
+        executablePath: globalThis.process.execPath,
+        ...(method === 'thread/start'
+          ? { threadParameters: { serviceTier: 'unsupported' } }
+          : { turnParameters: { serviceTier: 'unsupported' } }),
+      });
+      await expect(
+        model.generate(request, {
+          signal: new AbortController().signal,
+          deadlineAt: new Date(Date.now() + 10_000).toISOString(),
+          recordModelResult: record,
+        }),
+      ).rejects.toMatchObject({ code: 'invalid_request' });
+      expect(
+        messages.filter((message) => message.method === method),
+      ).toHaveLength(1);
+      expect(
+        messages.find((message) => message.method === method)?.params,
+      ).toHaveProperty('serviceTier', 'unsupported');
+      expect(
+        record.mock.calls.map(([result]) =>
+          parseJsonValue(
+            JSON.parse(Buffer.from(result.body, 'base64').toString('utf8')),
+            'fixture',
+          ),
+        ),
+      ).toContainEqual(
+        expect.objectContaining({
+          error: { code: -32602, message: 'Unsupported service tier' },
+        }),
+      );
+      expect(process.kill).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it.each([
     ['invalid', 'invalid_response'],
