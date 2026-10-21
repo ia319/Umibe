@@ -21,12 +21,6 @@ export interface CloudflareModelOptions {
    */
   readonly parameters?: JsonObject;
   /**
-   * Reject reported input usage at or above this token count as input_limit.
-   * Set it to the chosen model's context window to detect possible truncation.
-   * No window is inferred; without it, provider-side truncation is undetectable.
-   */
-  readonly contextWindowTokens?: number;
-  /**
    * Defaults to the official REST root. Require HTTPS except for HTTP protocol
    * tests at localhost, 127.0.0.1 or [::1]. Credentials, query and fragment are rejected.
    */
@@ -41,8 +35,10 @@ export interface CloudflareModelOptions {
  * Create a stateless hosted Clef adapter without sending a request or reading env.
  * Invalid configuration throws. Each choose call sends at most one POST,
  * without retries, redirects or fallback. Its deadline includes
- * response body reading. Input is sent in full; Cloudflare may truncate state
- * that exceeds the model's context window.
+ * response body reading. Input is sent in full; model context limits are left
+ * to Cloudflare, like other native parameters. Cloudflare may truncate state
+ * and still return a valid choice; this adapter accepts that response.
+ * @see https://developers.cloudflare.com/workers-ai/models/clef/
  */
 export function createCloudflareModel(
   options: CloudflareModelOptions,
@@ -74,13 +70,11 @@ export function createCloudflareModel(
       throw new TypeError(`parameters.${key} is controlled by the adapter`);
   const maxRequestBytes = options.maxRequestBytes ?? 1_048_576;
   const maxResponseBytes = options.maxResponseBytes ?? 8_388_608;
-  const contextWindowTokens = options.contextWindowTokens;
   for (const [name, value] of Object.entries({
     maxRequestBytes,
     maxResponseBytes,
-    contextWindowTokens,
   }))
-    if (value !== undefined && (!Number.isSafeInteger(value) || value < 1))
+    if (!Number.isSafeInteger(value) || value < 1)
       throw new RangeError(`${name} must be a positive safe integer`);
   const baseURL = new URL(
     options.baseURL ?? 'https://api.cloudflare.com/client/v4',
@@ -220,20 +214,13 @@ export function createCloudflareModel(
         } catch {
           throw protocolFailure('', 'invalid_json');
         }
-        const decoded = decodeResponse(
-          data,
-          ids,
-          requestId,
-          response.headers,
-          {
-            ...control,
-            reportModelResponse(metadata) {
-              reported = true;
-              control.reportModelResponse?.(metadata);
-            },
+        const decoded = decodeResponse(data, ids, requestId, response.headers, {
+          ...control,
+          reportModelResponse(metadata) {
+            reported = true;
+            control.reportModelResponse?.(metadata);
           },
-          contextWindowTokens,
-        );
+        });
         if (control.signal.aborted)
           throw new DOMException('Model request cancelled', 'AbortError');
         if (Date.now() >= deadline)

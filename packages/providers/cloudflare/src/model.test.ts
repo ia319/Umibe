@@ -557,7 +557,7 @@ test('rejects redirects and disconnected bodies without a second request', async
   expect(broken.requests).toHaveLength(1);
 });
 
-test('sends state in full and enforces HTTP bytes and an explicit model token window', async () => {
+test('sends full state within the HTTP byte budget and accepts reported token usage', async () => {
   const h = await httpFixture((_request, response) => {
     response.writeHead(200, { 'content-type': 'application/json' });
     response.end(JSON.stringify(responseBody()));
@@ -598,7 +598,7 @@ test('sends state in full and enforces HTTP bytes and an explicit model token wi
     ...body,
     result: {
       ...body.result,
-      usage: { input_tokens: 24576, output_tokens: 0 },
+      usage: { input_tokens: 65536, output_tokens: 0 },
     },
   };
   const saturatedHttp = await httpFixture((_request, response) => {
@@ -610,20 +610,11 @@ test('sends state in full and enforces HTTP bytes and an explicit model token wi
     createCloudflareModel({
       ...options,
       baseURL: saturatedHttp.baseURL,
-      contextWindowTokens: 24_576,
     }).choose(choiceRequest, { ...callControl(), reportModelResponse: report }),
-  ).rejects.toMatchObject({ code: 'input_limit' });
-  expect(report.mock.calls[0]![0]).toMatchObject({
-    usage: { inputTokens: 24576 },
-  });
-  saturated.result.usage.input_tokens = 65536;
-  await expect(
-    createCloudflareModel({
-      ...options,
-      model: '@vendor/larger-window',
-      baseURL: saturatedHttp.baseURL,
-    }).choose(choiceRequest, callControl()),
   ).resolves.toMatchObject({ optionId: 'a' });
+  expect(report.mock.calls[0]![0]).toMatchObject({
+    usage: { inputTokens: 65536 },
+  });
 });
 
 test.each([

@@ -71,7 +71,7 @@ try {
     assert.equal((await createPlanner({ model }).plan({ requestId: 'planning', decisionEpoch: 1, context, capabilities: [], trigger: { kind: 'initial', assessment: 'notYet' } }, control())).outcome, 'continue');
   } else {
     const { createCloudflareModel } = await import('@umibe/provider-cloudflare');
-    model = createCloudflareModel({ accountId: 'test-account', apiToken: 'test-only-token', model: '@cf/cloudflare/clef-flash', parameters: { extension: { value: 1 } }, contextWindowTokens: 24576, baseURL });
+    model = createCloudflareModel({ accountId: 'test-account', apiToken: 'test-only-token', model: '@cf/cloudflare/clef-flash', parameters: { extension: { value: 1 } }, baseURL });
     assert.equal((await model.choose({ instructions: 'Choose', input: 'Synthetic', options: [{ id: 'a', description: null }, { id: 'none', description: 'Abstain' }] }, control())).optionId, 'a');
     assert.equal(createSelector({ model }).capacity, 254);
   }
@@ -109,7 +109,7 @@ model.choose(request, control);
 import { createCloudflareModel, type CloudflareModelOptions } from '@umibe/provider-cloudflare';
 import { createPlanner, createSelector, type ResumableSelector } from '@umibe/core';
 import type { ChoiceModel, ChoiceRequest, ChoiceResponse, CallControl } from '@umibe/core/model';
-const options: CloudflareModelOptions = { accountId: 'test-account', apiToken: 'test-only', model: '@vendor/future-choice', parameters: { extension: true }, contextWindowTokens: 24576 };
+const options: CloudflareModelOptions = { accountId: 'test-account', apiToken: 'test-only', model: '@vendor/future-choice', parameters: { extension: true } };
 const model: ChoiceModel = createCloudflareModel(options);
 const selector: ResumableSelector = createSelector({ model, overflow: 'compareBatches' });
 declare const request: ChoiceRequest;
