@@ -38,6 +38,9 @@ const server = createServer((request, response) => {
       assert.equal(request.url, '/v1/responses');
       assert.equal(request.headers['x-stainless-retry-count'], '0');
       assert.equal(body.text.format.strict, true);
+      assert.equal(body.text.verbosity, 'low');
+      assert.deepEqual(body.reasoning, { effort: 'low' });
+      assert.equal(body.future_setting, true);
       const output = body.text.format.name === 'umibe_plan'
         ? { proposal: { outcome: 'continue', nextGoalRef: rootGoalRef, guidance: 'Continue with the candidate', goalOrder: null } }
         : body.text.format.name === 'umibe_selection'
@@ -45,8 +48,9 @@ const server = createServer((request, response) => {
           : { ok: true };
       response.end(JSON.stringify({ object: 'response', model: 'actual-openai', status: 'completed', error: null, incomplete_details: null, usage: { input_tokens: 7, output_tokens: 3, total_tokens: 10 }, output: [{ type: 'message', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: JSON.stringify(output) }] }] }));
     } else {
-      assert.equal(request.url, '/v1/accounts/test-account/ai/run/@cf/cloudflare/clef');
-      assert.equal(body.model, 'clef');
+      assert.equal(request.url, '/v1/accounts/test-account/ai/run/@cf/cloudflare/clef-flash');
+      assert.equal(body.model, 'clef-flash');
+      assert.deepEqual(body.extension, { value: 1 });
       assert.equal(body.questions.selection.type, 'choice');
       const ids = Object.keys(body.questions.selection.criteria);
       response.end(JSON.stringify({ success: true, errors: [], result: { model: 'actual-clef', usage: { input_tokens: 9, output_tokens: 0 }, answers: { selection: { type: 'choice', choice: ids[0], probabilities: Object.fromEntries(ids.map((id, index) => [id, index === 0 ? 1 : 0])), confidence: 0.04 } } } }));
@@ -60,14 +64,14 @@ try {
   let model;
   if (provider === 'openai') {
     const { createOpenAIModel } = await import('@umibe/provider-openai');
-    model = createOpenAIModel({ apiKey: 'test-only-key', model: 'configured', maxOutputTokens: 200, baseURL });
+    model = createOpenAIModel({ apiKey: 'test-only-key', model: 'configured', maxOutputTokens: 200, parameters: { reasoning: { effort: 'low' }, text: { verbosity: 'low' }, future_setting: true }, baseURL });
     const generated = await model.generate({ instructions: 'Return an object', input: 'Synthetic', output: { name: 'capability', schema: { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'], additionalProperties: false } } }, control());
     assert.equal(generated.ok, true);
     assert.deepEqual(Object.keys(generated), ['ok']);
     assert.equal((await createPlanner({ model }).plan({ requestId: 'planning', decisionEpoch: 1, context, capabilities: [], trigger: { kind: 'initial', assessment: 'notYet' } }, control())).outcome, 'continue');
   } else {
     const { createCloudflareModel } = await import('@umibe/provider-cloudflare');
-    model = createCloudflareModel({ accountId: 'test-account', apiToken: 'test-only-token', model: '@cf/cloudflare/clef', baseURL });
+    model = createCloudflareModel({ accountId: 'test-account', apiToken: 'test-only-token', model: '@cf/cloudflare/clef-flash', parameters: { extension: { value: 1 } }, baseURL });
     assert.equal((await model.choose({ instructions: 'Choose', input: 'Synthetic', options: [{ id: 'a', description: null }, { id: 'none', description: 'Abstain' }] }, control())).optionId, 'a');
     assert.equal(createSelector({ model }).capacity, 254);
   }
@@ -90,7 +94,7 @@ export const modelConsumerTypes = {
 import { createOpenAIModel, type OpenAIModelOptions } from '@umibe/provider-openai';
 import { createPlanner, createSelector, type Planner, type Selector } from '@umibe/core';
 import type { StructuredOutputModel, StructuredOutputRequest, CallControl, JsonValue } from '@umibe/core/model';
-const options: OpenAIModelOptions = { apiKey: 'test-only', model: 'configured', maxOutputTokens: 200 };
+const options: OpenAIModelOptions = { apiKey: 'test-only', model: 'configured', maxOutputTokens: 200, parameters: { reasoning: { effort: 'low' }, text: { verbosity: 'low' }, future_setting: true } };
 const model: StructuredOutputModel = createOpenAIModel(options);
 const planner: Planner = createPlanner({ model });
 const selector: Selector = createSelector({ model });
@@ -105,7 +109,7 @@ model.choose(request, control);
 import { createCloudflareModel, type CloudflareModelOptions } from '@umibe/provider-cloudflare';
 import { createPlanner, createSelector, type ResumableSelector } from '@umibe/core';
 import type { ChoiceModel, ChoiceRequest, ChoiceResponse, CallControl } from '@umibe/core/model';
-const options: CloudflareModelOptions = { accountId: 'test-account', apiToken: 'test-only', model: '@cf/cloudflare/clef' };
+const options: CloudflareModelOptions = { accountId: 'test-account', apiToken: 'test-only', model: '@vendor/future-choice', parameters: { extension: true } };
 const model: ChoiceModel = createCloudflareModel(options);
 const selector: ResumableSelector = createSelector({ model, overflow: 'compareBatches' });
 declare const request: ChoiceRequest;

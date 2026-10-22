@@ -1,8 +1,4 @@
-import {
-  isJsonArray,
-  isJsonObject,
-  ModelRequestError,
-} from '@umibe/core/model';
+import { isJsonArray, isJsonObject } from '@umibe/core/model';
 import type {
   CallControl,
   ChoiceResponse,
@@ -82,10 +78,8 @@ export function decodeResponse(
   if (invalidUsage)
     throw protocolFailure('/result/usage', 'invalid_token_usage');
   if (model === null) throw protocolFailure('/result/model', 'missing_model');
-  // Reference encoding trims state when the whole context fills its window.
-  // Treat saturation as uncertain integrity even if the original input just fit.
-  if (inputTokens !== null && inputTokens >= 65_536)
-    throw new ModelRequestError('input_limit');
+  // Leave context limits to Cloudflare: reported usage alone cannot prove
+  // truncation. Validate the returned choice without inferring a token limit.
   const answers = object(result.answers, '/result/answers');
   if (Object.keys(answers).length !== 1 || !Object.hasOwn(answers, 'selection'))
     throw protocolFailure('/result/answers', 'question_mismatch');

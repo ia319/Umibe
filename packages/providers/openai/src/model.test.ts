@@ -68,6 +68,92 @@ test('sends one stateless SDK request with strict schema and reports actual resp
   expect(JSON.stringify(model)).not.toContain('test-only-key');
 });
 
+test('captures native parameters and merges text options with the runner schema', async () => {
+  const h = await httpFixture((_request, response) => {
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify(responseBody({ ok: true })));
+  });
+  const parameters = {
+    reasoning: { effort: 'low' },
+    text: { verbosity: 'low' },
+    prompt_cache_options: { prewarm: false, ttl: '30m' },
+  };
+  const model = createOpenAIModel({
+    ...options,
+    parameters,
+    baseURL: h.baseURL,
+  });
+  parameters.reasoning.effort = 'high';
+  parameters.text.verbosity = 'high';
+  await expect(
+    model.generate(structuredRequest, callControl()),
+  ).resolves.toEqual({ ok: true });
+  expect(h.requests).toHaveLength(1);
+  expect(h.requests[0]).toMatchObject({
+    body: {
+      reasoning: { effort: 'low' },
+      prompt_cache_options: { prewarm: false, ttl: '30m' },
+      text: {
+        verbosity: 'low',
+        format: {
+          type: 'json_schema',
+          name: structuredRequest.output.name,
+          schema: structuredRequest.output.schema,
+          strict: true,
+        },
+      },
+    },
+  });
+});
+
+test.each([
+  { input: 'replacement' },
+  { text: { format: { type: 'text' } } },
+  { tools: [{ type: 'web_search' }] },
+  { background: true },
+  { prompt_cache_options: { prewarm: true } },
+] satisfies readonly JsonObject[])(
+  'rejects native parameters that change the adapter contract %#',
+  (parameters) => {
+    expect(() => createOpenAIModel({ ...options, parameters })).toThrow(
+      /controlled by the adapter/,
+    );
+  },
+);
+
+test('lets the API reject unsupported parameter values and preserves the raw error', async () => {
+  const failure = {
+    error: { code: 'unsupported_value', message: 'Unknown effort' },
+  };
+  const h = await httpFixture((_request, response) => {
+    response.writeHead(400, { 'content-type': 'application/json' });
+    response.end(JSON.stringify(failure));
+  });
+  const record = vi.fn();
+  await expect(
+    createOpenAIModel({
+      ...options,
+      parameters: { reasoning: { effort: 'future-effort' } },
+      baseURL: h.baseURL,
+    }).generate(structuredRequest, {
+      ...callControl(),
+      recordModelResult: record,
+    }),
+  ).rejects.toMatchObject({ code: 'invalid_request' });
+  expect(h.requests).toHaveLength(1);
+  expect(h.requests[0]).toMatchObject({
+    body: { reasoning: { effort: 'future-effort' } },
+  });
+  expect(record).toHaveBeenCalledExactlyOnceWith({
+    protocol: 'http',
+    method: 'POST',
+    body: Buffer.from(JSON.stringify(failure), 'utf8').toString('base64'),
+    encoding: 'base64',
+    complete: true,
+    status: 400,
+  });
+});
+
 test.each([
   [401, 'unauthorized'],
   [403, 'unauthorized'],
@@ -396,6 +482,9 @@ test('validates construction and input byte limits before any HTTP request', asy
   expect(() => createOpenAIModel({ ...options, maxOutputTokens: 0 })).toThrow(
     RangeError,
   );
+  expect(() =>
+    createOpenAIModel({ ...options, parameters: { text: null } }),
+  ).toThrow(TypeError);
   expect(() =>
     createOpenAIModel({ ...options, baseURL: 'http://user:pass@localhost' }),
   ).toThrow(TypeError);

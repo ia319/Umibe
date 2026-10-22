@@ -14,6 +14,15 @@ export interface OpenAIModelOptions {
   /** Positive safe integer; the adapter never increases this limit after truncation. */
   readonly maxOutputTokens: number;
   /**
+   * Native Responses body fields, copied at construction and passed to the API.
+   * model and max_output_tokens use the explicit options above. Input, instructions,
+   * history, tools, truncation and execution mode are adapter-owned; conflicts throw
+   * TypeError. text must be an object and may include fields such as verbosity,
+   * but text.format is reserved for the runner's schema.
+   * Cache prewarming (prompt_cache_options.prewarm=true) also throws TypeError.
+   */
+  readonly parameters?: JsonObject;
+  /**
    * Defaults to the official API. Require HTTPS except for HTTP protocol tests
    * at localhost, 127.0.0.1 or [::1]. Credentials, query and fragment are rejected.
    */
@@ -26,7 +35,7 @@ export interface OpenAIModelOptions {
 
 /**
  * Create a stateless Responses API adapter without making a request.
- * Missing credentials or invalid options throw TypeError or RangeError.
+ * Missing credentials or invalid options throw.
  * Each generate call sends at most one SDK request and stores no remote history.
  * Credentials remain in the client closure and never enter model metadata.
  */
@@ -37,6 +46,47 @@ export function createOpenAIModel(
     throw new TypeError('apiKey is required');
   if (typeof options.model !== 'string' || options.model.trim() === '')
     throw new TypeError('model is required');
+  const parameters = parseJsonValue(
+    options.parameters === undefined ? {} : options.parameters,
+    'openai_parameters',
+  );
+  if (!isJsonObject(parameters))
+    throw new TypeError('parameters must be a JSON object');
+  // These fields can replace role content, invoke tools or outlive a bounded call.
+  for (const key of [
+    'model',
+    'max_output_tokens',
+    'instructions',
+    'input',
+    'stream',
+    'stream_options',
+    'store',
+    'background',
+    'conversation',
+    'previous_response_id',
+    'prompt',
+    'context_management',
+    'truncation',
+    'tools',
+    'tool_choice',
+  ])
+    if (Object.hasOwn(parameters, key))
+      throw new TypeError(`parameters.${key} is controlled by the adapter`);
+  const textParameters = parameters.text;
+  if (textParameters !== undefined) {
+    if (!isJsonObject(textParameters))
+      throw new TypeError('parameters.text must be a JSON object');
+    if (Object.hasOwn(textParameters, 'format'))
+      throw new TypeError(
+        'parameters.text.format is controlled by the adapter',
+      );
+  }
+  // Cache prewarming produces no output and cannot fulfill generate().
+  const promptCacheOptions = parameters.prompt_cache_options;
+  if (isJsonObject(promptCacheOptions) && promptCacheOptions.prewarm === true)
+    throw new TypeError(
+      'parameters.prompt_cache_options.prewarm is controlled by the adapter',
+    );
   const maxRequestBytes = options.maxRequestBytes ?? 1_048_576;
   const maxResponseBytes = options.maxResponseBytes ?? 8_388_608;
   const maxOutputTokens = options.maxOutputTokens;
@@ -102,10 +152,12 @@ export function createOpenAIModel(
         throw new ModelRequestError('invalid_request');
       }
       const body = {
+        ...parameters,
         model: identity.model,
         instructions: request.instructions,
         input: [{ role: 'user' as const, content: input }],
         text: {
+          ...textParameters,
           format: {
             type: 'json_schema' as const,
             name: request.output.name,

@@ -378,6 +378,7 @@ export async function runTurn(
     if (!isJsonObject(account.account) || account.account.type !== 'chatgpt')
       throw new ModelRequestError('unauthorized');
     const started = await rpc('thread/start', {
+      ...options.threadParameters,
       ephemeral: true,
       environments: [],
       dynamicTools: [],
@@ -400,6 +401,7 @@ export async function runTurn(
         : null;
     turnRequested = true;
     const startedTurn = await rpc('turn/start', {
+      ...options.turnParameters,
       threadId,
       environments: [],
       input: [{ type: 'text', text: JSON.stringify(request.input) }],

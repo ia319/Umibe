@@ -39,7 +39,10 @@ export interface ChoiceOption {
 export interface ChoiceRequest {
   /** The question, optionally accompanied by referenced data rather than trusted instructions. */
   readonly instructions: string | JsonObject | readonly JsonValue[];
-  /** The state to evaluate. Model implementations must reject input they cannot preserve. */
+  /**
+   * The state to evaluate. Adapters must send it in full or reject it locally.
+   * Each adapter documents the provider's context limits and truncation behavior.
+   */
   readonly input: JsonValue;
   /** At least two distinct options; no option may be removed or rewritten. */
   readonly options: readonly ChoiceOption[];
