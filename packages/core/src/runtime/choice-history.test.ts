@@ -466,6 +466,35 @@ test('discards an invalidated single-call selection and ignores its late result'
   }
 });
 
+test('preserves candidate generation gaps through checkpoint serialization', async () => {
+  const h = runnerFixture();
+  const gaps = ['target_position_unknown'];
+  h.generate.mockImplementation((request) => {
+    const set = candidateSet(request, []);
+    return Promise.resolve({
+      ...set,
+      coverage: { ...set.coverage, informationGaps: gaps },
+    });
+  });
+  const agent = h.create();
+  try {
+    const run = await agent.start(h.input);
+    await expect(run.result).resolves.toMatchObject({ status: 'paused' });
+    const checkpoint = (await agent.inspect(run.runId))!.checkpoint;
+    const restored = parseRuntimeCheckpoint(
+      JSON.parse(JSON.stringify(checkpoint)),
+    );
+    expect(
+      restored.state.recentChoices.find(
+        (entry) =>
+          entry.kind === 'selectionResult' && entry.outcome === 'no_candidates',
+      ),
+    ).toMatchObject({ informationGaps: gaps });
+  } finally {
+    await agent.close();
+  }
+});
+
 test('records a single-call abstention without a later discard', async () => {
   const h = runnerFixture(0, 1);
   h.select.mockImplementationOnce((request) =>

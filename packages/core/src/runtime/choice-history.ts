@@ -43,5 +43,11 @@ export function describeSelectionResult(
         : 'reason' in selected
           ? selected.reason
           : null,
+    ...(selected.outcome !== 'selected' &&
+    selected.filtered.set.coverage.informationGaps.length > 0
+      ? {
+          informationGaps: selected.filtered.set.coverage.informationGaps,
+        }
+      : {}),
   };
 }
