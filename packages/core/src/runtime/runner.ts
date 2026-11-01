@@ -1044,8 +1044,9 @@ export class RunDriver<TCriteria extends JsonValue> {
 
   private async recordProgress(
     before: GoalGraphSnapshot,
-    attempt: 'baseline' | 'action' | 'planning',
+    attempt: 'baseline' | 'action' | 'planning' | 'selection',
     failed: boolean,
+    receipt?: RunRecordDraft,
   ): Promise<void> {
     const session = this.session;
     let progress = assessProgress(
@@ -1093,6 +1094,7 @@ export class RunDriver<TCriteria extends JsonValue> {
             : session.state.scheduling,
       },
       [
+        ...(receipt === undefined ? [] : [receipt]),
         session.event('progress_assessed', attempt, {
           executionId:
             attempt === 'action'
@@ -2164,13 +2166,28 @@ export class RunDriver<TCriteria extends JsonValue> {
   private async finishSelection(
     selected: CandidateSelectionResult,
   ): Promise<void> {
-    await this.session.commit(this.session.state, [
-      this.session.event('selection_finished', selected.outcome, {
-        ...(selected.outcome === 'selected' || selected.outcome === 'abstain'
-          ? { selection: parseJsonValue(selected.selection, 'selection') }
-          : {}),
-      }),
-    ]);
+    const receipt = this.session.event('selection_finished', selected.outcome, {
+      ...(selected.outcome === 'selected' || selected.outcome === 'abstain'
+        ? { selection: parseJsonValue(selected.selection, 'selection') }
+        : {}),
+    });
+    if (
+      selected.outcome === 'abstain' ||
+      selected.outcome === 'no_candidates'
+    ) {
+      // One operation lacking an acceptable call does not rule out the other
+      // controls. Persist its receipt with the failed-attempt counters before
+      // reviewing again; configured progress and recovery limits still apply.
+      await this.recordProgress(
+        selected.filtered.checked.prepared.request.context.graph,
+        'selection',
+        true,
+        receipt,
+      );
+      await this.session.markReview(`selection_${selected.outcome}`);
+      return;
+    }
+    await this.session.commit(this.session.state, [receipt]);
     if (selected.outcome !== 'selected') {
       await this.block(`selection_${selected.outcome}`);
       return;

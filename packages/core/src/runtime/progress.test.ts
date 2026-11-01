@@ -1,6 +1,7 @@
 import { afterEach, expect, test, vi } from 'vitest';
 import { createAgent } from './agent.js';
 import type { GoalAssessment } from '#internal/contracts/goal';
+import { candidateSet } from '#internal/candidate/__tests__/fixtures';
 import { proposalBasis, runnerFixture } from './__tests__/runner-fixtures.js';
 
 afterEach(() => vi.useRealTimers());
@@ -187,6 +188,89 @@ test('starts a fresh progress scope when resume replaces a root awaiting verific
     [{ goalRef: { id: 'root', version: 2 }, noProgress: 1 }],
   );
   await agent.close();
+});
+
+test('counts an empty comparison once when pause interrupts its progress commit', async () => {
+  const h = runnerFixture(0, 1);
+  h.generate.mockImplementationOnce((request) =>
+    Promise.resolve(candidateSet(request, [])),
+  );
+  const agent = createAgent({
+    ...h.options,
+    limits: { maxNoProgress: 2 },
+  });
+  const commit = h.store.commit.bind(h.store);
+  let paused: Promise<void> | undefined;
+  vi.spyOn(h.store, 'commit').mockImplementation((input) => {
+    if (
+      paused === undefined &&
+      input.records.some(
+        (record) =>
+          record.kind === 'coreEvent' &&
+          record.data.type === 'progress_assessed' &&
+          record.data.reasonCode === 'selection',
+      )
+    )
+      paused = agent.pause('run', 'pause_after_selection');
+    return commit(input);
+  });
+  try {
+    const first = await agent.start(h.input);
+    await expect(first.result).resolves.toMatchObject({
+      status: 'paused',
+      blocker: { reasonCode: 'pause_after_selection' },
+    });
+    await paused;
+    expect(
+      (await agent.inspect('run'))!.checkpoint.state.progress,
+    ).toMatchObject([{ noProgress: 1, recoveryAttempts: 1 }]);
+    expect(h.execute).not.toHaveBeenCalled();
+
+    const resumed = await agent.resume('run');
+    await expect(resumed.result).resolves.toMatchObject({
+      status: 'succeeded',
+    });
+    expect(h.generate).toHaveBeenCalledTimes(2);
+    expect(h.execute).toHaveBeenCalledTimes(1);
+  } finally {
+    await agent.close();
+  }
+});
+
+test('requests recovery planning after parameter abstentions reach the configured limit', async () => {
+  const h = runnerFixture(0, 1);
+  const select = h.select.getMockImplementation()!;
+  let comparisons = 0;
+  h.select.mockImplementation((request, control) =>
+    ++comparisons <= 2
+      ? Promise.resolve({
+          outcome: 'abstain',
+          decisionId: request.requestId,
+          candidateSetId: request.candidates.id,
+          reason: 'no_suitable_call',
+        })
+      : select(request, control),
+  );
+  const agent = createAgent({
+    ...h.options,
+    limits: { maxRecoveryAttempts: 2, maxNoProgress: 5 },
+  });
+  try {
+    const run = await agent.start(h.input);
+    await expect(run.result).resolves.toMatchObject({ status: 'succeeded' });
+    expect(h.plan).toHaveBeenCalledTimes(2);
+    expect(h.plan.mock.calls[1]![0].trigger).toMatchObject({
+      kind: 'recoveryExhausted',
+      failures: 2,
+    });
+    expect(h.select).toHaveBeenCalledTimes(3);
+    expect(h.execute).toHaveBeenCalledTimes(1);
+    expect(
+      (await agent.inspect('run'))!.checkpoint.state.progress,
+    ).toMatchObject([{ noProgress: 0, recoveryAttempts: 0 }]);
+  } finally {
+    await agent.close();
+  }
 });
 
 test('keeps the progress high-water mark when actions undo and repeat their effects', async () => {

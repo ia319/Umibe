@@ -23,16 +23,17 @@ export function assessProgress(
   previous: readonly GoalProgress[],
   before: GoalGraphSnapshot,
   after: GoalGraphSnapshot,
-  attempt: 'baseline' | 'action' | 'planning',
+  attempt: 'baseline' | 'action' | 'planning' | 'selection',
   failed: boolean,
 ): readonly GoalProgress[] {
   const progress = new Map(previous.map((item) => [item.goalRef.id, item]));
   for (const ref of before.goalPath) {
-    // A retained action still belongs to the goal versions captured at dispatch.
+    // An action or comparison belongs to the goal versions captured at admission.
     const goal = after.goals.find(
       (item) =>
         item.id === ref.id &&
-        (attempt !== 'action' || item.version === ref.version),
+        ((attempt !== 'action' && attempt !== 'selection') ||
+          item.version === ref.version),
     );
     if (!goal) continue;
     const prior = progress.get(ref.id);
@@ -80,7 +81,7 @@ export function assessProgress(
       recoveryAttempts: passed
         ? 0
         : (prior?.recoveryAttempts ?? 0) +
-          (attempt === 'action' && failed ? 1 : 0),
+          ((attempt === 'action' || attempt === 'selection') && failed ? 1 : 0),
       recoveryPlanned: passed ? false : (prior?.recoveryPlanned ?? false),
       highWater:
         value === null ? highWater : Math.max(highWater ?? value, value),

@@ -1,10 +1,12 @@
 import { afterEach, expect, test, vi } from 'vitest';
 import type { Environment } from '#internal/contracts/adapters';
+import type { DecisionInput } from '#internal/contracts/decision';
 import type { PlanProposal } from '#internal/planner/contracts';
 import { candidateSet } from '#internal/candidate/__tests__/fixtures';
 import { createAgent } from './agent.js';
 import {
   applicationEvent,
+  fixtureDecisionPolicy,
   proposalBasis,
   runnerFixture,
 } from './__tests__/runner-fixtures.js';
@@ -135,42 +137,64 @@ test.each(['pausing', 'paused'] as const)(
   },
 );
 
-test('reports selector abstention without automatically requesting another plan', async () => {
-  const h = runnerFixture();
-  h.select.mockImplementation((request) =>
-    Promise.resolve({
-      outcome: 'abstain',
-      decisionId: request.requestId,
-      candidateSetId: request.candidates.id,
-      reason: 'no_preference',
-    }),
-  );
-  const run = await h.create().start(h.input);
-  await expect(run.result).resolves.toMatchObject({
-    status: 'paused',
-    blocker: { reasonCode: 'selection_abstain' },
-  });
-  expect(h.select).toHaveBeenCalledTimes(1);
-  expect(h.generate).toHaveBeenCalledTimes(1);
-  expect(h.plan).toHaveBeenCalledTimes(1);
-  expect(h.execute).not.toHaveBeenCalled();
-});
-
-test('reports empty candidates without invoking the selector or replanning', async () => {
-  const h = runnerFixture();
-  h.generate.mockImplementation((request) =>
-    Promise.resolve(candidateSet(request, [])),
-  );
-  const run = await h.create().start(h.input);
-  await expect(run.result).resolves.toMatchObject({
-    status: 'paused',
-    blocker: { reasonCode: 'selection_no_candidates' },
-  });
-  expect(h.generate).toHaveBeenCalledTimes(1);
-  expect(h.plan).toHaveBeenCalledTimes(1);
-  expect(h.select).not.toHaveBeenCalled();
-  expect(h.execute).not.toHaveBeenCalled();
-});
+test.each(['abstain', 'no_candidates'] as const)(
+  'returns %s to decision review without automatic replanning',
+  async (outcome) => {
+    const h = runnerFixture();
+    if (outcome === 'abstain')
+      h.select.mockImplementation((request) =>
+        Promise.resolve({
+          outcome: 'abstain',
+          decisionId: request.requestId,
+          candidateSetId: request.candidates.id,
+          reason: 'no_preference',
+        }),
+      );
+    else
+      h.generate.mockImplementation((request) =>
+        Promise.resolve(candidateSet(request, [])),
+      );
+    const reviews: DecisionInput[] = [];
+    const agent = createAgent({
+      ...h.options,
+      decisionPolicy: {
+        decide(request, control) {
+          if (
+            request.input.recentChoices.some(
+              (entry) =>
+                entry.kind === 'selectionResult' && entry.outcome === outcome,
+            )
+          ) {
+            reviews.push(request.input);
+            return Promise.resolve({
+              optionId: request.options.find(
+                ({ decision }) => decision.kind === 'abstain',
+              )!.id,
+            });
+          }
+          return fixtureDecisionPolicy.decide(request, control);
+        },
+      },
+    });
+    try {
+      const run = await agent.start(h.input);
+      await expect(run.result).resolves.toMatchObject({
+        status: 'paused',
+        blocker: { reasonCode: 'decision_abstained' },
+      });
+      expect(reviews).toHaveLength(1);
+      expect(reviews[0]!.progress).toMatchObject([
+        { noProgress: 1, recoveryAttempts: 1 },
+      ]);
+      expect(h.generate).toHaveBeenCalledTimes(1);
+      expect(h.select).toHaveBeenCalledTimes(outcome === 'abstain' ? 1 : 0);
+      expect(h.plan).toHaveBeenCalledTimes(1);
+      expect(h.execute).not.toHaveBeenCalled();
+    } finally {
+      await agent.close();
+    }
+  },
+);
 
 test('discards a late blocked proposal after a plan invalidation event', async () => {
   vi.useFakeTimers();

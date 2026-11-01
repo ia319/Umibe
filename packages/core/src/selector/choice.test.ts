@@ -359,16 +359,13 @@ test.each([0, 255])(
       ...h.options,
       selector: createSelector({ model }),
       selectorCapacity: 300,
-      limits: { maxModelAttempts: 0 },
+      limits: { maxModelAttempts: 0, maxNoProgress: 1 },
     });
     try {
       await expect((await agent.start(h.input)).result).resolves.toMatchObject({
         status: 'paused',
         blocker: {
-          reasonCode:
-            count === 0
-              ? 'selection_no_candidates'
-              : 'selection_candidate_limit',
+          reasonCode: count === 0 ? 'no_progress' : 'selection_candidate_limit',
         },
       });
       expect((await agent.inspect('run'))!.checkpoint.state.modelAttempts).toBe(

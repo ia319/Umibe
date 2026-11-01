@@ -70,6 +70,10 @@ export interface AgentOptions<TCriteria extends JsonValue = JsonValue> {
   readonly actions: readonly RegisteredAction[];
   readonly decisionPolicy: DecisionPolicy;
   readonly planner: Planner;
+  /**
+   * Empty candidate sets and completed parameter abstentions return to decision
+   * review, subject to no-progress and recovery limits. Decision abstention pauses.
+   */
   readonly selector: Selector;
   readonly candidateProvider: CandidateProvider;
   readonly environment: Environment;
