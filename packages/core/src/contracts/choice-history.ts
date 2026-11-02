@@ -50,6 +50,8 @@ export type ChoiceHistoryEntry = ChoiceHistoryBasis &
           | 'failed';
         readonly candidate: HistoricalCandidate | null;
         readonly reasonCode: string | null;
+        /** Captured candidate-generation gaps; historical evidence for the next review. */
+        readonly informationGaps?: readonly string[];
       }
     | {
         readonly kind: 'selectionDiscarded';

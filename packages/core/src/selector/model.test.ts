@@ -315,15 +315,13 @@ test.each(['empty', 'application_limit', 'selector_limit'] as const)(
         capacity: kind === 'selector_limit' ? 1 : 3,
       }),
       selectorCapacity: kind === 'application_limit' ? 1 : 3,
-      limits: { maxModelAttempts: 0 },
+      limits: { maxModelAttempts: 0, maxNoProgress: 1 },
     });
     await expect((await agent.start(h.input)).result).resolves.toMatchObject({
       status: 'paused',
       blocker: {
         reasonCode:
-          kind === 'empty'
-            ? 'selection_no_candidates'
-            : 'selection_candidate_limit',
+          kind === 'empty' ? 'no_progress' : 'selection_candidate_limit',
       },
     });
     expect((await agent.inspect('run'))!.checkpoint.state.modelAttempts).toBe(

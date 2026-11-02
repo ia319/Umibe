@@ -466,39 +466,88 @@ test('discards an invalidated single-call selection and ignores its late result'
   }
 });
 
-test('records a single-call abstention without a later discard', async () => {
-  const h = runnerFixture(0, 1);
-  h.select.mockImplementationOnce((request) =>
-    Promise.resolve({
-      outcome: 'abstain',
-      decisionId: request.requestId,
-      candidateSetId: request.candidates.id,
-      reason: 'no_suitable_call',
-    }),
-  );
+test('preserves candidate generation gaps through checkpoint serialization', async () => {
+  const h = runnerFixture();
+  const gaps = ['target_position_unknown'];
+  h.generate.mockImplementation((request) => {
+    const set = candidateSet(request, []);
+    return Promise.resolve({
+      ...set,
+      coverage: { ...set.coverage, informationGaps: gaps },
+    });
+  });
   const agent = h.create();
   try {
     const run = await agent.start(h.input);
     await expect(run.result).resolves.toMatchObject({ status: 'paused' });
-    const history = parseRuntimeCheckpoint(
-      (await agent.inspect(run.runId))!.checkpoint,
-    ).state.recentChoices.filter((entry) => entry.kind !== 'decision');
-    expect(history).toEqual([
-      expect.objectContaining({ kind: 'selectionStarted' }),
-      expect.objectContaining({
-        kind: 'selectionResult',
-        selectionId: h.select.mock.calls[0]![0].requestId,
-        comparisonComplete: true,
-        outcome: 'abstain',
-        reasonCode: 'no_suitable_call',
-        candidate: null,
-      }),
-    ]);
-    expect(h.execute).not.toHaveBeenCalled();
+    const checkpoint = (await agent.inspect(run.runId))!.checkpoint;
+    const restored = parseRuntimeCheckpoint(
+      JSON.parse(JSON.stringify(checkpoint)),
+    );
+    expect(
+      restored.state.recentChoices.find(
+        (entry) =>
+          entry.kind === 'selectionResult' && entry.outcome === 'no_candidates',
+      ),
+    ).toMatchObject({ informationGaps: gaps });
   } finally {
     await agent.close();
   }
 });
+
+test.each(['abstain', 'no_candidates'] as const)(
+  'retains a %s result when a later comparison succeeds',
+  async (outcome) => {
+    const h = runnerFixture(0, 1);
+    if (outcome === 'abstain')
+      h.select.mockImplementationOnce((request) =>
+        Promise.resolve({
+          outcome: 'abstain',
+          decisionId: request.requestId,
+          candidateSetId: request.candidates.id,
+          reason: 'no_suitable_call',
+        }),
+      );
+    else
+      h.generate.mockImplementationOnce((request) =>
+        Promise.resolve(candidateSet(request, [])),
+      );
+    const agent = h.create();
+    try {
+      const run = await agent.start(h.input);
+      await expect(run.result).resolves.toMatchObject({ status: 'succeeded' });
+      const history = parseRuntimeCheckpoint(
+        (await agent.inspect(run.runId))!.checkpoint,
+      ).state.recentChoices.filter((entry) => entry.kind !== 'decision');
+      const selectedCandidate: unknown = expect.objectContaining({
+        actionId: 'collect',
+      });
+      expect(history).toEqual([
+        expect.objectContaining({ kind: 'selectionStarted' }),
+        expect.objectContaining({
+          kind: 'selectionResult',
+          comparisonComplete: true,
+          outcome,
+          reasonCode: outcome === 'abstain' ? 'no_suitable_call' : null,
+          candidate: null,
+        }),
+        expect.objectContaining({ kind: 'selectionStarted' }),
+        expect.objectContaining({
+          kind: 'selectionResult',
+          comparisonComplete: true,
+          outcome: 'selected',
+          candidate: selectedCandidate,
+        }),
+      ]);
+      expect(h.generate).toHaveBeenCalledTimes(2);
+      expect(h.select).toHaveBeenCalledTimes(outcome === 'abstain' ? 2 : 1);
+      expect(h.execute).toHaveBeenCalledTimes(1);
+      expect(h.plan).toHaveBeenCalledTimes(1);
+    } finally {
+      await agent.close();
+    }
+  },
+);
 
 test('records one discard when pause follows acceptance of a replacement operation', async () => {
   const h = runnerFixture(0, 1);
